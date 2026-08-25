@@ -74,9 +74,11 @@ async def submit_dogme_job(
     user_id: str | None = None,
     username: str | None = None,
     project_slug: str | None = None,
+    parent_block_id: str | None = None,
     modifications: str | None = None,
     input_type: str | None = None,
     entry_point: str | None = None,
+    dogme_revision: str | None = None,
     modkit_filter_threshold: float | None = None,
     min_cov: int | None = None,
     per_mod: int | None = None,
@@ -86,6 +88,8 @@ async def submit_dogme_job(
     custom_dogme_bind_paths: list[str] | None = None,
     resume_from_dir: str | None = None,
     execution_mode: str = "local",
+    local_max_task_cpus: int | None = None,
+    local_max_task_memory_gb: int | None = None,
     ssh_profile_id: str | None = None,
     slurm_account: str | None = None,
     slurm_partition: str | None = None,
@@ -115,6 +119,7 @@ async def submit_dogme_job(
         user_id=user_id,
         username=username,
         project_slug=project_slug,
+        parent_block_id=parent_block_id,
         sample_name=sample_name,
         mode=mode,
         reference_genome=reference_genome,
@@ -122,6 +127,7 @@ async def submit_dogme_job(
         modifications=modifications,
         input_type=input_type,
         entry_point=entry_point,
+        dogme_revision=dogme_revision,
         modkit_filter_threshold=modkit_filter_threshold,
         min_cov=min_cov,
         per_mod=per_mod,
@@ -131,6 +137,8 @@ async def submit_dogme_job(
         custom_dogme_bind_paths=custom_dogme_bind_paths,
         resume_from_dir=resume_from_dir,
         execution_mode=execution_mode,
+        local_max_task_cpus=local_max_task_cpus,
+        local_max_task_memory_gb=local_max_task_memory_gb,
         ssh_profile_id=ssh_profile_id,
         slurm_account=slurm_account,
         slurm_partition=slurm_partition,
@@ -150,6 +158,47 @@ async def submit_dogme_job(
         script_path=script_path,
         script_args=script_args,
         script_working_directory=script_working_directory,
+    )
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def preview_workflow(
+    workflow_key: str = "dogme",
+    sample_name: str | None = None,
+    mode: str | None = None,
+    input_type: str | None = None,
+    input_path: str | None = None,
+    input_directory: str | None = None,
+    reference_genome: str | list[str] | None = None,
+    reference_fasta: str | None = None,
+    vcf: str | None = None,
+    sample_sheet: str | None = None,
+    cutter: str | None = None,
+    output_directory: str | None = None,
+    workflow_repo: str | None = None,
+    workflow_version: str | None = None,
+    report_filename: str | None = None,
+    output_flags: dict | None = None,
+) -> str:
+    """Build a workflow preview without submitting a Launchpad job."""
+    result = await tools.preview_workflow(
+        workflow_key=workflow_key,
+        sample_name=sample_name,
+        mode=mode,
+        input_type=input_type,
+        input_path=input_path,
+        input_directory=input_directory,
+        reference_genome=reference_genome,
+        reference_fasta=reference_fasta,
+        vcf=vcf,
+        sample_sheet=sample_sheet,
+        cutter=cutter,
+        output_directory=output_directory,
+        workflow_repo=workflow_repo,
+        workflow_version=workflow_version,
+        report_filename=report_filename,
+        output_flags=output_flags,
     )
     return json.dumps(result, indent=2)
 
@@ -196,6 +245,16 @@ async def get_staging_task_status(task_id: str) -> str:
 async def check_nextflow_status(run_uuid: str) -> str:
     """Check the status of a Nextflow job."""
     result = await tools.check_nextflow_status(run_uuid=run_uuid)
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def find_job_by_parent_block(project_id: str, parent_block_id: str) -> str:
+    """Find the Launchpad job associated with a Cortex workflow-plan block."""
+    result = await tools.find_job_by_parent_block(
+        project_id=project_id,
+        parent_block_id=parent_block_id,
+    )
     return json.dumps(result, indent=2)
 
 

@@ -1,6 +1,6 @@
 # AGOUTIC UI
 
-**Release:** 3.6.6  
+**Release:** 3.7.6
 **Status:** Active Development
 
 ## Overview
@@ -14,11 +14,14 @@ The AGOUTIC UI is a **Streamlit** web application for interacting with the AGOUT
 - ✅ **Approval gates** for reviewing and editing job parameters before submission
 - ⚙️ **Live job monitoring** with Nextflow-style task progress visualization
 - 📊 **Results analysis** page for browsing, parsing, and downloading job outputs
+- 📄 **Direct file previews and downloads** — `/read-file` and natural-language file reads can open txt, markdown, and HTML workflow reports directly in chat, and assistant-shared project file paths now render download controls in the conversation UI
 - 📁 **Project management** with history, switching, and conversation recall
-- 🔑 **Admin panel** for user approval and role management
+- 🏷️ **Project-aware browser title** — the active project name appears in the browser tab alongside the AGOUTIC version
+- 🔑 **Admin panel** for user approval, role management, active-download cancellation, and cross-user project archive or deletion
 - 📈 **Interactive Plotly charts** — the agent can generate histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset charts from any DataFrame in the conversation; rendered inline as `AGENT_PLOT` blocks
 - 🧮 **Pending dataframe actions** — saved in-memory dataframe transforms can be reviewed and applied or dismissed directly from chat via `PENDING_ACTION` blocks
 - 📋 **Built-in dataframe + grouped DE help** — sidebar and deterministic help responses include dataframe inspection, transform, plotting, and reconcile-abundance differential-expression examples
+- 🧬 **VCF haplotype help and live progress** — built-in help now includes `/haplotype` and natural-language indexed-VCF examples, and haplotype script jobs show live per-BAM/per-chromosome status instead of a generic script label
 
 ## Getting Started
 
@@ -66,10 +69,12 @@ The UI follows a strict **single-gateway** pattern: every request goes through C
 - Approval gates for job submission parameters
 - Live Nextflow job progress with task-level detail
 - Project switching, conversation history
-- Model selection (default / fast / smart)
+- Browser tab title synced to the active project name and AGOUTIC version
+- Model selection sourced from backend LLM aliases and cached once per UI runtime
 - `AGENT_PLOT` blocks: inline Plotly charts triggered by the agent using `[[PLOT:...]]` tags; supports histogram, scatter, line, area, bar, box, violin, strip, heatmap, pie, venn, and upset chart types
 - `PENDING_ACTION` blocks: block-specific Apply / Dismiss controls for saved dataframe transforms
 - Deterministic help shortcuts for grouped differential expression from reconcile abundance outputs or saved dataframes
+- Workflow command help includes `/import-workflow`, `/sync-workflow`, and `/haplotype` alongside the existing workflow actions
 
 ### Results ([pages/results.py](pages/results.py))
 - Browse completed job files (CSV, BED, text)

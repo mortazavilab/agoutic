@@ -75,6 +75,37 @@ def seed_data(session_factory):
     sess.close()
 
 
+def _seed_user_with_session(session_factory, *, user_id: str, email: str, username: str, session_id: str):
+    sess = session_factory()
+    sess.add(User(id=user_id, email=email, role="user", username=username, is_active=True))
+    sess.add(
+        SessionModel(
+            id=session_id,
+            user_id=user_id,
+            is_valid=True,
+            expires_at=datetime.datetime(2099, 1, 1),
+        )
+    )
+    sess.commit()
+    sess.close()
+
+
+def _grant_project_access(session_factory, *, user_id: str, project_id: str, project_name: str, role: str):
+    sess = session_factory()
+    sess.add(
+        ProjectAccess(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
+            role=role,
+            last_accessed=datetime.datetime.utcnow(),
+        )
+    )
+    sess.commit()
+    sess.close()
+
+
 @pytest.fixture()
 def client(session_factory, seed_data, tmp_path):
     # Clean any leftover active downloads from other tests
@@ -91,7 +122,6 @@ def client(session_factory, seed_data, tmp_path):
          patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
          patch("cortex.routes.files._resolve_user_and_project", _mock_resolve), \
          patch("cortex.routes.files.get_user_data_dir", return_value=tmp_path / "users" / "dluser" / "data"), \
-         patch("cortex.routes.files.create_project_file_symlink", side_effect=lambda u, s, fn, cp: tmp_path / "proj" / "data" / fn), \
          patch("cortex.app._resolve_project_dir", return_value=tmp_path / "proj"), \
          patch("cortex.db_helpers._resolve_project_dir", return_value=tmp_path / "proj"), \
          patch("cortex.app.asyncio"), \
@@ -183,6 +213,66 @@ class TestInitiateDownload:
             })
             assert resp.status_code == 401
 
+    def test_shared_editor_download_uses_actor_central_dir_and_owner_project_dir(self, session_factory, tmp_path):
+        _active_downloads.clear()
+        _seed_user_with_session(
+            session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            session_factory,
+            user_id="editor-uid",
+            project_id="proj-dl",
+            project_name="DL Project",
+            role="editor",
+        )
+
+        owner_project_dir = tmp_path / "users" / "dluser" / "dl-project"
+        actor_central_dir = tmp_path / "users" / "editoruser" / "data"
+        actor_central_dir.mkdir(parents=True, exist_ok=True)
+        (owner_project_dir / "data").mkdir(parents=True, exist_ok=True)
+
+        with patch("cortex.db.SessionLocal", session_factory), \
+             patch("cortex.app.SessionLocal", session_factory), \
+             patch("cortex.dependencies.SessionLocal", session_factory), \
+             patch("cortex.middleware.SessionLocal", session_factory), \
+             patch("cortex.config.AGOUTIC_DATA", tmp_path), \
+             patch("cortex.user_jail.AGOUTIC_DATA", tmp_path), \
+             patch(
+                 "cortex.routes.files._resolve_user_and_project",
+                 MagicMock(return_value=("editoruser", "dl-project", owner_project_dir)),
+             ), \
+             patch("cortex.routes.files.get_user_data_dir", return_value=actor_central_dir), \
+             patch("cortex.app._resolve_project_dir", return_value=owner_project_dir), \
+             patch("cortex.db_helpers._resolve_project_dir", return_value=owner_project_dir), \
+             patch("cortex.app.asyncio"), \
+             patch("cortex.routes.files.asyncio") as mock_asyncio:
+            mock_asyncio.create_task = lambda coro: None
+            client = TestClient(app, raise_server_exceptions=False)
+            client.cookies.set("session", "editor-session")
+
+            resp = client.post(
+                "/projects/proj-dl/downloads",
+                json={
+                    "source": "url",
+                    "files": [{"url": "https://ex.com/shared.bam", "filename": "shared.bam"}],
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["target_dir"] == str(actor_central_dir)
+
+        sess = session_factory()
+        block = sess.execute(select(ProjectBlock).where(ProjectBlock.id == data["block_id"])).scalar_one()
+        payload = json.loads(block.payload_json)
+        sess.close()
+
+        assert payload["project_data_dir"] == str(owner_project_dir / "data")
+
 
 # ---------------------------------------------------------------------------
 # GET /projects/{id}/downloads/{dl_id}
@@ -206,6 +296,33 @@ class TestGetDownloadStatus:
         data = resp2.json()
         assert data["status"] == "RUNNING"
         assert data["total_files"] == 1
+
+
+class TestProjectFileDownload:
+    def test_downloads_project_file_by_relative_path(self, client, tmp_path):
+        target = tmp_path / "proj" / "summaries" / "workflow-summary.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("summary")
+
+        resp = client.get(
+            "/projects/proj-dl/files/download",
+            params={"path": "summaries/workflow-summary.md"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.text == "summary"
+        assert 'filename="workflow-summary.md"' in resp.headers.get("content-disposition", "")
+
+    def test_rejects_project_file_traversal(self, client, tmp_path):
+        outside = tmp_path / "secret.txt"
+        outside.write_text("nope")
+
+        resp = client.get(
+            "/projects/proj-dl/files/download",
+            params={"path": "../secret.txt"},
+        )
+
+        assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------

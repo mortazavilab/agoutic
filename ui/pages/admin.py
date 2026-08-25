@@ -2,19 +2,300 @@
 Admin page for user management.
 """
 
+from datetime import datetime, timedelta, timezone
 import streamlit as st
 import pandas as pd
 import sys
 from pathlib import Path
 
 # Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from auth import require_auth, make_authenticated_request
 from components.cards import section_header, empty_state, stat_tile
 import os
+from common.database import SessionLocal
+from cortex.maintenance_status import (
+    DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS,
+    build_recommendation,
+    build_snapshot,
+    render_text_report,
+)
 
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
+CANCELLABLE_TRANSFER_STATES = {"pending_import", "downloading_outputs"}
+
+
+def _is_admin_user(user):
+    return str((user or {}).get("role") or "").strip().lower() == "admin"
+
+
+def _activity_refresh_interval(auto_refresh, interval_label):
+    if not auto_refresh:
+        return None
+    seconds = {
+        "15s": 15,
+        "30s": 30,
+        "60s": 60,
+        "Off": None,
+    }.get(str(interval_label or "30s"), 30)
+    if seconds is None:
+        return None
+    return timedelta(seconds=seconds)
+
+
+def _activity_chat_window_minutes(label):
+    return {
+        "5min": 5,
+        "15min": 15,
+        "60min": 60,
+    }.get(str(label or "5min"), 5)
+
+
+def _activity_max_age_hours(label, custom_hours=None):
+    options = {
+        "24h": 24,
+        "168h (1 week)": 168,
+        "720h (1 month)": 720,
+        "Custom": "custom",
+    }
+    selected = options.get(str(label or "168h (1 week)"), 168)
+    if selected == "custom":
+        return max(int(custom_hours or DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS), 1)
+    return int(selected)
+
+
+def _activity_snapshot(
+    *,
+    chat_window_minutes,
+    active_job_max_age_hours,
+    last_active_window_minutes=15,
+    now=None,
+):
+    session = SessionLocal()
+    try:
+        return build_snapshot(
+            session,
+            last_active_window_minutes=last_active_window_minutes,
+            chat_window_minutes=chat_window_minutes,
+            active_job_max_age_hours=active_job_max_age_hours,
+            now=now,
+        )
+    finally:
+        session.close()
+
+
+def _activity_recommendation(snapshot):
+    return build_recommendation(snapshot)
+
+
+def _activity_report_text(
+    snapshot,
+    *,
+    chat_window_minutes,
+    active_job_max_age_hours,
+    last_active_window_minutes=15,
+):
+    return render_text_report(
+        snapshot,
+        last_active_window_minutes=last_active_window_minutes,
+        chat_window_minutes=chat_window_minutes,
+        active_job_max_age_hours=active_job_max_age_hours,
+    )
+
+
+def _parse_ui_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _ui_relative_label(value, *, now):
+    parsed = _parse_ui_datetime(value)
+    if parsed is None:
+        return "Unknown"
+    seconds = max(int((now - parsed).total_seconds()), 0)
+    if seconds < 60:
+        return f"{seconds} sec ago"
+    if seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes} min ago"
+    if seconds < 86400:
+        hours = seconds // 3600
+        return f"{hours} hr ago"
+    days = seconds // 86400
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _ui_started_label(job, *, now):
+    started_at = job.get("started_at")
+    if started_at:
+        return f"Started {_ui_relative_label(started_at, now=now)}"
+    runtime_duration = str(job.get("runtime_duration") or "unknown")
+    if runtime_duration != "unknown":
+        return f"Started {runtime_duration} ago"
+    return "Started unknown"
+
+
+def _activity_users_dataframe(snapshot, *, now):
+    return pd.DataFrame([
+        {
+            "Name": user.get("name", "—"),
+            "Email": user.get("email", "—"),
+            "Last activity": user.get("relative") or _ui_relative_label(user.get("last_activity_at"), now=now),
+            "Source": str(user.get("source") or "—").title(),
+        }
+        for user in snapshot.get("users", [])
+    ])
+
+
+def _activity_jobs_dataframe(rows, *, now):
+    return pd.DataFrame([
+        {
+            "Run UUID": row.get("run_uuid_short", "—"),
+            "Workflow": row.get("workflow_type", "—"),
+            "Owner": row.get("owner_email", "—"),
+            "Project": row.get("project_name", "—"),
+            "State": row.get("state", "—"),
+            "Started": _ui_started_label(row, now=now),
+            "Runtime": row.get("runtime_duration", "unknown"),
+        }
+        for row in rows
+    ])
+
+
+def _activity_chats_dataframe(snapshot, *, now):
+    return pd.DataFrame([
+        {
+            "Owner": chat.get("owner_email", "—"),
+            "Project": chat.get("project_name", "—"),
+            "Last message": _ui_relative_label(chat.get("last_message_at"), now=now),
+            "Messages": chat.get("message_count", 0),
+        }
+        for chat in snapshot.get("chats", [])
+    ])
+
+
+def _activity_transfers_dataframe(rows):
+    return pd.DataFrame([
+        {
+            "Source": row.get("source", "—"),
+            "Identifier": row.get("identifier", "—"),
+            "State": row.get("state", "—"),
+            "Owner": row.get("owner_email", "—"),
+            "Project": row.get("project_name", "—"),
+            "Workflow": row.get("workflow_type", "—"),
+            "Duration": row.get("duration", "unknown"),
+        }
+        for row in rows
+    ])
+
+
+def _cancellable_transfer_rows(rows):
+    return [
+        row
+        for row in rows
+        if row.get("source") == "dogme_job"
+        and str(row.get("state") or "").strip().lower() in CANCELLABLE_TRANSFER_STATES
+        and str(row.get("run_uuid") or "").strip()
+    ]
+
+
+def _render_activity_banner(recommendation):
+    status = str(recommendation.get("status") or "SAFE TO RESTART")
+    message = str(recommendation.get("message") or status)
+    safe = status == "SAFE TO RESTART"
+    background = "#1f7a4a" if safe else "#f1c26b"
+    color = "#ffffff" if safe else "#2f2413"
+    st.markdown(
+        (
+            f"<div style='background:{background};color:{color};padding:1rem 1.25rem;"
+            "border-radius:0.75rem;margin:0 0 1rem 0;font-weight:700;font-size:1.15rem;'>"
+            f"{message}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _fetch_maintenance_state(api_url):
+    try:
+        response = make_authenticated_request(
+            "GET",
+            f"{api_url}/admin/maintenance",
+            timeout=5,
+        )
+    except Exception as exc:
+        return None, str(exc)
+    if response.status_code != 200:
+        return None, f"{response.status_code}: {response.text}"
+    payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(payload, dict):
+        return None, "Maintenance endpoint returned an invalid payload."
+    return payload, None
+
+
+def _fetch_active_encode_downloads(api_url):
+    try:
+        response = make_authenticated_request(
+            "GET",
+            f"{api_url}/admin/downloads/active",
+            timeout=5,
+        )
+    except Exception as exc:
+        return [], str(exc)
+    if response.status_code != 200:
+        return [], f"HTTP {response.status_code}"
+    return [
+        row
+        for row in (response.json() or [])
+        if str(row.get("source") or "").strip().lower() == "encode"
+    ], None
+
+
+def _fetch_admin_projects(api_url):
+    try:
+        response = make_authenticated_request("GET", f"{api_url}/admin/projects", timeout=5)
+    except Exception as exc:
+        return [], str(exc)
+    if response.status_code != 200:
+        return [], f"HTTP {response.status_code}"
+    return response.json() or [], None
+
+
+def _enable_maintenance_mode(api_url, *, message="", starts_at=None):
+    normalized_starts_at = str(starts_at or "").strip() or None
+    return make_authenticated_request(
+        "POST",
+        f"{api_url}/admin/maintenance",
+        json={
+            "mode": True,
+            "message": str(message or ""),
+            "starts_at": normalized_starts_at,
+        },
+        timeout=5,
+    )
+
+
+def _disable_maintenance_mode(api_url):
+    return make_authenticated_request(
+        "DELETE",
+        f"{api_url}/admin/maintenance",
+        timeout=5,
+    )
+
+
+def _sync_maintenance_editor_state(state):
+    if "_admin_maintenance_message" not in st.session_state:
+        st.session_state["_admin_maintenance_message"] = str((state or {}).get("message") or "")
+    if "_admin_maintenance_starts_at" not in st.session_state:
+        st.session_state["_admin_maintenance_starts_at"] = str((state or {}).get("starts_at") or "")
 
 st.set_page_config(page_title="AGOUTIC Admin", layout="wide")
 
@@ -22,7 +303,7 @@ st.set_page_config(page_title="AGOUTIC Admin", layout="wide")
 user = require_auth(API_URL)
 
 # Check if user is admin
-if user.get('role') != 'admin':
+if not _is_admin_user(user):
     st.error("🚫 Admin access required")
     st.stop()
 
@@ -37,7 +318,14 @@ try:
         stat_tile("Total Users", len(users), icon="👥")
         
         # Filter users
-        tab1, tab2, tab3, tab4 = st.tabs(["Pending Approval", "Active Users", "All Users", "🪙 Token Usage"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+            "Pending Approval",
+            "Active Users",
+            "All Users",
+            "🪙 Token Usage",
+            "Activity",
+            "Projects",
+        ])
         
         with tab1:
             st.subheader("Users Pending Approval")
@@ -304,6 +592,378 @@ try:
                     st.code(tok_resp.text)
             except Exception as e:
                 st.error(f"Error fetching token usage: {e}")
+
+        with tab6:
+            st.subheader("Projects")
+            admin_projects, projects_error = _fetch_admin_projects(API_URL)
+            if projects_error:
+                st.error(f"Failed to load projects: {projects_error}")
+            elif not admin_projects:
+                st.info("No projects found.")
+            else:
+                projects_df = pd.DataFrame([
+                    {
+                        "Project": project.get("name", "—"),
+                        "Owner": project.get("owner_email", "—"),
+                        "Status": "Archived" if project.get("is_archived") else "Active",
+                        "Created": project.get("created_at") or "—",
+                        "Updated": project.get("updated_at") or "—",
+                    }
+                    for project in admin_projects
+                ])
+                st.dataframe(projects_df, hide_index=True, width="stretch")
+
+                project_options = {
+                    f"{project.get('name', 'Unnamed')} | {project.get('owner_email', '—')} | "
+                    f"{'Archived' if project.get('is_archived') else 'Active'}": project
+                    for project in admin_projects
+                }
+                selected_label = st.selectbox(
+                    "Project to manage",
+                    options=list(project_options),
+                    key="_admin_project_manage_select",
+                )
+                selected_project = project_options[selected_label]
+                selected_project_id = str(selected_project["id"])
+                archive_col, delete_col = st.columns(2)
+                with archive_col:
+                    if st.button(
+                        "Archive project",
+                        key=f"_admin_archive_project_{selected_project_id}",
+                        disabled=bool(selected_project.get("is_archived")),
+                    ):
+                        response = make_authenticated_request(
+                            "DELETE",
+                            f"{API_URL}/projects/{selected_project_id}",
+                            timeout=15,
+                        )
+                        if response.status_code == 200:
+                            st.success("Project archived.")
+                            st.rerun()
+                        else:
+                            st.error(f"Archive failed: {response.status_code} - {response.text[:200]}")
+                with delete_col:
+                    confirm_key = f"_admin_delete_project_confirm_{selected_project_id}"
+                    if st.session_state.get(confirm_key):
+                        st.warning("Permanently delete this project and all of its data?")
+                        confirm_col, keep_col = st.columns(2)
+                        with confirm_col:
+                            if st.button(
+                                "Delete permanently",
+                                type="primary",
+                                key=f"_admin_delete_project_yes_{selected_project_id}",
+                            ):
+                                response = make_authenticated_request(
+                                    "DELETE",
+                                    f"{API_URL}/projects/{selected_project_id}/permanent",
+                                    timeout=30,
+                                )
+                                if response.status_code == 200:
+                                    st.session_state.pop(confirm_key, None)
+                                    st.success("Project permanently deleted.")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Delete failed: {response.status_code} - {response.text[:200]}")
+                        with keep_col:
+                            if st.button("Keep project", key=f"_admin_delete_project_no_{selected_project_id}"):
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                    elif st.button("Delete permanently", key=f"_admin_delete_project_{selected_project_id}"):
+                        st.session_state[confirm_key] = True
+                        st.rerun()
+
+        with tab5:
+            st.subheader("Activity")
+
+            controls_left, controls_right = st.columns([4, 3])
+            with controls_right:
+                _refresh_now = st.button("Refresh now", key="_admin_activity_refresh_now")
+                _copy_report = st.button("Copy report", key="_admin_activity_copy_report")
+                _auto_refresh = st.toggle("Auto-refresh", value=True, key="_admin_activity_auto_refresh")
+                _interval_label = st.selectbox(
+                    "Interval",
+                    ["15s", "30s", "60s", "Off"],
+                    index=1,
+                    key="_admin_activity_interval",
+                )
+                _max_age_label = st.selectbox(
+                    "Active-job age threshold",
+                    ["24h", "168h (1 week)", "720h (1 month)", "Custom"],
+                    index=1,
+                    key="_admin_activity_max_age_label",
+                )
+                _custom_age_hours = DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS
+                if _max_age_label == "Custom":
+                    _custom_age_hours = st.number_input(
+                        "Custom threshold (hours)",
+                        min_value=1,
+                        value=DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS,
+                        step=24,
+                        key="_admin_activity_custom_max_age",
+                    )
+                _chat_window_label = st.selectbox(
+                    "Chat activity window",
+                    ["5min", "15min", "60min"],
+                    index=0,
+                    key="_admin_activity_chat_window",
+                )
+
+            with controls_left:
+                st.caption(
+                    "Live maintenance view for admins. Recently active users are inferred from chat and job records, not a presence heartbeat."
+                )
+
+            if _refresh_now:
+                st.rerun()
+
+            _active_job_max_age_hours = _activity_max_age_hours(_max_age_label, _custom_age_hours)
+            _chat_window_minutes = _activity_chat_window_minutes(_chat_window_label)
+            _refresh_interval = _activity_refresh_interval(_auto_refresh, _interval_label)
+
+            @st.fragment(run_every=_refresh_interval)
+            def _render_activity_tab():
+                snapshot = _activity_snapshot(
+                    chat_window_minutes=_chat_window_minutes,
+                    active_job_max_age_hours=_active_job_max_age_hours,
+                )
+                recommendation = _activity_recommendation(snapshot)
+                maintenance_state, maintenance_error = _fetch_maintenance_state(API_URL)
+                active_encode_downloads, active_downloads_error = _fetch_active_encode_downloads(API_URL)
+                maintenance_state = maintenance_state or {"mode": False, "message": "", "starts_at": None}
+                _sync_maintenance_editor_state(maintenance_state)
+                report_text = _activity_report_text(
+                    snapshot,
+                    chat_window_minutes=_chat_window_minutes,
+                    active_job_max_age_hours=_active_job_max_age_hours,
+                )
+                now_utc = datetime.now(timezone.utc)
+
+                _render_activity_banner(recommendation)
+
+                maintenance_summary_col, maintenance_controls_col = st.columns([3, 2])
+                with maintenance_summary_col:
+                    current_mode = bool(maintenance_state.get("mode"))
+                    status_label = "ON" if current_mode else "OFF"
+                    st.markdown(f"**Maintenance mode:** {status_label}")
+                    st.caption(
+                        "When ON, new workflow submissions, imports, and transfers are blocked for non-admin users while existing running jobs continue uninterrupted."
+                    )
+                    if maintenance_state.get("message"):
+                        st.caption(f"Message: {maintenance_state['message']}")
+                    if maintenance_state.get("starts_at"):
+                        st.caption(f"Countdown starts_at: {maintenance_state['starts_at']}")
+                    if maintenance_state.get("updated_at") or maintenance_state.get("updated_by_email"):
+                        updated_bits = []
+                        if maintenance_state.get("updated_at"):
+                            updated_bits.append(f"Updated {maintenance_state['updated_at']}")
+                        if maintenance_state.get("updated_by_email"):
+                            updated_bits.append(f"by {maintenance_state['updated_by_email']}")
+                        st.caption(" ".join(updated_bits))
+                    if maintenance_error:
+                        st.warning(f"Could not read maintenance state: {maintenance_error}")
+
+                with maintenance_controls_col:
+                    st.markdown("#### Maintenance control")
+                    _maintenance_message = st.text_input(
+                        "Banner message",
+                        key="_admin_maintenance_message",
+                        placeholder="Optional maintenance message",
+                    )
+                    _maintenance_starts_at = st.text_input(
+                        "Countdown starts_at (optional)",
+                        key="_admin_maintenance_starts_at",
+                        placeholder="2026-05-28T17:00:00+00:00",
+                    )
+                    _enable_col, _disable_col = st.columns(2)
+                    with _enable_col:
+                        if st.button(
+                            "Turn ON",
+                            key="_admin_activity_maintenance_on",
+                            disabled=bool(maintenance_state.get("mode")),
+                            width="stretch",
+                        ):
+                            resp = _enable_maintenance_mode(
+                                API_URL,
+                                message=_maintenance_message,
+                                starts_at=_maintenance_starts_at,
+                            )
+                            if resp.status_code == 200:
+                                st.success("Maintenance mode enabled.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to enable maintenance mode: {resp.text}")
+                    with _disable_col:
+                        if st.button(
+                            "Turn OFF",
+                            key="_admin_activity_maintenance_off",
+                            disabled=not bool(maintenance_state.get("mode")),
+                            width="stretch",
+                        ):
+                            resp = _disable_maintenance_mode(API_URL)
+                            if resp.status_code == 200:
+                                st.session_state["_admin_maintenance_message"] = ""
+                                st.session_state["_admin_maintenance_starts_at"] = ""
+                                st.success("Maintenance mode disabled.")
+                                st.rerun()
+                            else:
+                                st.error(f"Failed to disable maintenance mode: {resp.text}")
+
+                if _refresh_interval is not None:
+                    st.caption(
+                        f"Live auto-refresh every {_interval_label}. Last update: {datetime.now().strftime('%H:%M:%S')}"
+                    )
+                else:
+                    st.caption(
+                        f"Auto-refresh is off. Last update: {datetime.now().strftime('%H:%M:%S')}"
+                    )
+
+                if _copy_report:
+                    st.code(report_text, language="text")
+
+                st.markdown(
+                    "#### Recently active users (approximated from chat and job activity — AGOUTIC does not track presence)"
+                )
+                users_df = _activity_users_dataframe(snapshot, now=now_utc)
+                if users_df.empty:
+                    empty_state(
+                        "No recently active users",
+                        "No chat or job activity detected in the current window.",
+                        icon="🛌",
+                    )
+                else:
+                    st.dataframe(users_df, hide_index=True, width="stretch")
+
+                st.markdown("#### Currently running jobs")
+                jobs_df = _activity_jobs_dataframe(snapshot.get("jobs", []), now=now_utc)
+                if jobs_df.empty:
+                    empty_state(
+                        "No active jobs",
+                        "Stale RUNNING/PENDING rows are excluded by the current threshold.",
+                        icon="✅",
+                    )
+                else:
+                    st.dataframe(jobs_df, hide_index=True, width="stretch")
+
+                st.markdown("#### Active chat sessions")
+                chats_df = _activity_chats_dataframe(snapshot, now=now_utc)
+                if chats_df.empty:
+                    empty_state(
+                        "No active chats",
+                        "No conversations have messages in the configured chat window.",
+                        icon="💬",
+                    )
+                else:
+                    st.dataframe(chats_df, hide_index=True, width="stretch")
+
+                transfers_df = _activity_transfers_dataframe(snapshot.get("transfers", []))
+                if not transfers_df.empty:
+                    st.markdown("#### Active transfers and workflow imports")
+                    st.dataframe(transfers_df, hide_index=True, width="stretch")
+
+                cancellable_transfers = _cancellable_transfer_rows(snapshot.get("transfers", []))
+                if cancellable_transfers:
+                    st.markdown("#### Cancelable result downloads")
+                    for transfer in cancellable_transfers:
+                        run_uuid = str(transfer["run_uuid"])
+                        confirm_key = f"_admin_cancel_download_confirm_{run_uuid}"
+                        label = " | ".join(
+                            value
+                            for value in (
+                                str(transfer.get("owner_email") or ""),
+                                str(transfer.get("project_name") or ""),
+                                str(transfer.get("workflow_type") or ""),
+                            )
+                            if value and value != "—"
+                        )
+                        st.caption(label or str(transfer.get("identifier") or run_uuid[:8]))
+                        if st.session_state.get(confirm_key):
+                            st.warning("Cancel this user's in-progress result download?")
+                            confirm_col, keep_col = st.columns(2)
+                            with confirm_col:
+                                if st.button(
+                                    "Cancel download",
+                                    type="primary",
+                                    key=f"_admin_cancel_download_yes_{run_uuid}",
+                                ):
+                                    try:
+                                        response = make_authenticated_request(
+                                            "POST",
+                                            f"{API_URL}/jobs/{run_uuid}/cancel",
+                                            timeout=15,
+                                        )
+                                        if response.status_code == 200:
+                                            st.session_state.pop(confirm_key, None)
+                                            st.success((response.json() or {}).get("message", "Download cancellation requested."))
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Cancel failed: {response.status_code} - {response.text[:200]}")
+                                    except Exception as exc:
+                                        st.error(f"Error cancelling download: {exc}")
+                            with keep_col:
+                                if st.button("Keep download", key=f"_admin_cancel_download_no_{run_uuid}"):
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                        elif st.button("Cancel download", key=f"_admin_cancel_download_{run_uuid}"):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+
+                if active_encode_downloads:
+                    st.markdown("#### Active ENCODE downloads")
+                    for download in active_encode_downloads:
+                        download_id = str(download["download_id"])
+                        project_id = str(download["project_id"])
+                        confirm_key = f"_admin_cancel_encode_download_confirm_{download_id}"
+                        current_file = str(download.get("current_file") or "")
+                        st.caption(
+                            f"{download.get('owner_email', '—')} | {download.get('project_name', '—')} | "
+                            f"{download.get('downloaded', 0)}/{download.get('total_files', 0)} files"
+                            + (f" | {current_file}" if current_file else "")
+                        )
+                        if st.session_state.get(confirm_key):
+                            st.warning("Cancel this user's in-progress ENCODE download?")
+                            confirm_col, keep_col = st.columns(2)
+                            with confirm_col:
+                                if st.button(
+                                    "Cancel ENCODE download",
+                                    type="primary",
+                                    key=f"_admin_cancel_encode_download_yes_{download_id}",
+                                ):
+                                    try:
+                                        response = make_authenticated_request(
+                                            "DELETE",
+                                            f"{API_URL}/projects/{project_id}/downloads/{download_id}",
+                                            timeout=15,
+                                        )
+                                        if response.status_code == 200:
+                                            st.session_state.pop(confirm_key, None)
+                                            st.success("ENCODE download cancellation requested.")
+                                            st.rerun()
+                                        else:
+                                            st.error(f"Cancel failed: {response.status_code} - {response.text[:200]}")
+                                    except Exception as exc:
+                                        st.error(f"Error cancelling ENCODE download: {exc}")
+                            with keep_col:
+                                if st.button("Keep download", key=f"_admin_cancel_encode_download_no_{download_id}"):
+                                    st.session_state.pop(confirm_key, None)
+                                    st.rerun()
+                        elif st.button("Cancel ENCODE download", key=f"_admin_cancel_encode_download_{download_id}"):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                elif active_downloads_error:
+                    st.warning(f"Could not load active ENCODE downloads: {active_downloads_error}")
+
+                stale_jobs_df = _activity_jobs_dataframe(snapshot.get("stale_jobs", []), now=now_utc)
+                stale_transfers_df = _activity_transfers_dataframe(snapshot.get("stale_transfers", []))
+                if not stale_jobs_df.empty or not stale_transfers_df.empty:
+                    with st.expander("Stale rows excluded from recommendation", expanded=False):
+                        if not stale_jobs_df.empty:
+                            st.markdown("**Stale jobs**")
+                            st.dataframe(stale_jobs_df, hide_index=True, width="stretch")
+                        if not stale_transfers_df.empty:
+                            st.markdown("**Stale transfers**")
+                            st.dataframe(stale_transfers_df, hide_index=True, width="stretch")
+
+            _render_activity_tab()
 
     else:
         st.error(f"Failed to fetch users: {resp.status_code}")

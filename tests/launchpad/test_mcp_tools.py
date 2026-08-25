@@ -1,6 +1,8 @@
 """Tests for launchpad/mcp_tools.py."""
 
+import asyncio
 import json
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -86,6 +88,7 @@ class TestSubmitDogmeJob:
                 input_directory="/data/input",
                 reference_genome=["GRCh38", "mm39"],
                 input_type="pod5",
+                dogme_revision="devel",
                 modkit_filter_threshold=0.75,
                 min_cov=4,
                 per_mod=7,
@@ -96,6 +99,7 @@ class TestSubmitDogmeJob:
                 user_id="user-1",
                 username="alim",
                 project_slug="project-a",
+                parent_block_id="workflow-block-1",
                 execution_mode="slurm",
                 ssh_profile_id="prof-1",
                 slurm_account="lab",
@@ -130,6 +134,7 @@ class TestSubmitDogmeJob:
             "reference_genome": ["GRCh38", "mm39"],
             "execution_mode": "slurm",
             "input_type": "pod5",
+            "dogme_revision": "devel",
             "modkit_filter_threshold": 0.75,
             "min_cov": 4,
             "per_mod": 7,
@@ -140,6 +145,7 @@ class TestSubmitDogmeJob:
             "user_id": "user-1",
             "username": "alim",
             "project_slug": "project-a",
+            "parent_block_id": "workflow-block-1",
             "ssh_profile_id": "prof-1",
             "slurm_account": "lab",
             "slurm_partition": "gpu",
@@ -157,6 +163,33 @@ class TestSubmitDogmeJob:
         }
         assert "modifications" not in kwargs["json"]
         assert "entry_point" not in kwargs["json"]
+
+    @pytest.mark.asyncio
+    async def test_submit_dogme_job_includes_local_resource_caps_when_requested(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"run_uuid": "run-local", "status": "PENDING"}
+            )
+        )
+        monkeypatch.setenv("INTERNAL_API_SECRET", "secret")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            await tools.submit_dogme_job(
+                project_id="proj-local",
+                sample_name="sample-local",
+                mode="DNA",
+                input_directory="/data/input",
+                reference_genome=["mm39"],
+                execution_mode="local",
+                local_max_task_cpus=8,
+                local_max_task_memory_gb=48,
+            )
+
+        _, kwargs = fake_client.post_calls[0]
+        assert kwargs["json"]["execution_mode"] == "local"
+        assert kwargs["json"]["local_max_task_cpus"] == 8
+        assert kwargs["json"]["local_max_task_memory_gb"] == 48
 
     @pytest.mark.asyncio
     async def test_submit_dogme_job_passes_script_fields_when_provided(self):
@@ -187,6 +220,62 @@ class TestSubmitDogmeJob:
         assert kwargs["json"]["script_path"] == "/opt/agoutic/scripts/reconcile_bams.py"
         assert kwargs["json"]["script_args"] == ["--threads", "4"]
         assert kwargs["json"]["script_working_directory"] == "/opt/agoutic/scripts"
+
+
+class TestPreviewWorkflow:
+    @pytest.mark.asyncio
+    async def test_preview_workflow_posts_expected_payload(self, monkeypatch):
+        fake_client = FakeAsyncClient(
+            post_response=FakeResponse(
+                json_data={"workflow_key": "wf_pore_c", "command": "nextflow run epi2me-labs/wf-pore-c"}
+            )
+        )
+        monkeypatch.setenv("INTERNAL_API_SECRET", "secret")
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            result = await tools.preview_workflow(
+                workflow_key="wf_pore_c",
+                sample_name="POREC_A",
+                input_type="bam",
+                input_path="/data/pore-c.bam",
+                reference_fasta="/refs/reference.fa",
+                output_directory="/projects/demo/workflow4",
+            )
+
+        assert result == {"workflow_key": "wf_pore_c", "command": "nextflow run epi2me-labs/wf-pore-c"}
+        assert len(fake_client.post_calls) == 1
+        url, kwargs = fake_client.post_calls[0]
+        assert url == "http://launchpad.local/workflows/preview"
+        assert kwargs["headers"] == {"X-Internal-Secret": "secret"}
+        assert kwargs["timeout"] == 30.0
+        assert kwargs["json"] == {
+            "workflow_key": "wf_pore_c",
+            "sample_name": "POREC_A",
+            "input_type": "bam",
+            "input_path": "/data/pore-c.bam",
+            "reference_fasta": "/refs/reference.fa",
+            "output_directory": "/projects/demo/workflow4",
+        }
+
+    @pytest.mark.asyncio
+    async def test_preview_workflow_surfaces_unknown_workflow_key_error(self):
+        error = httpx.HTTPStatusError(
+            "bad request",
+            request=httpx.Request("POST", "http://launchpad.local/workflows/preview"),
+            response=httpx.Response(
+                400,
+                text="Unknown workflow_key 'mystery_workflow'. Known workflow keys: dogme, wf_pore_c.",
+            ),
+        )
+        fake_client = FakeAsyncClient(post_error=error)
+
+        with patch("launchpad.mcp_tools.httpx.AsyncClient", return_value=fake_client):
+            tools = LaunchpadMCPTools("http://launchpad.local")
+            with pytest.raises(RuntimeError) as exc_info:
+                await tools.preview_workflow(workflow_key="mystery_workflow")
+
+        assert "Unknown workflow_key 'mystery_workflow'" in str(exc_info.value)
 
 
 class TestRunAllowlistedScript:
@@ -254,6 +343,35 @@ class TestRunAllowlistedScript:
         assert result["success"] is True
         assert result["dataframe"]["row_count"] == 1
         assert result["dataframe"]["metadata"]["label"] == "BED chromosome counts"
+        assert result["script_output"]["row_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_preserves_large_json_payload(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "reconcile_bams.py"
+        script_path.write_text("print('ok')\n")
+        json_stdout = json.dumps({"inputs": {"bams": [{"path": f"/data/{index}.bam"} for index in range(2000)]}})
+
+        class _FakeProcess:
+            returncode = 0
+
+            async def communicate(self):
+                return (json_stdout.encode("utf-8"), b"")
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="reconcile_bams/reconcile_bams", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", AsyncMock(return_value=_FakeProcess()))
+
+        result = await LaunchpadMCPTools("http://launchpad.local").run_allowlisted_script(
+            script_id="reconcile_bams/reconcile_bams",
+            script_args=["--json"],
+        )
+
+        assert result["stdout"].endswith("... [truncated]")
+        assert len(result["script_output"]["inputs"]["bams"]) == 2000
 
     @pytest.mark.asyncio
     async def test_run_allowlisted_script_surfaces_json_error_payload(self, monkeypatch, tmp_path):
@@ -287,6 +405,56 @@ class TestRunAllowlistedScript:
         assert result["success"] is False
         assert "workflow2: missing" in result["error"]
         assert result["script_output"]["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_allowlisted_script_timeout_kills_process_group(self, monkeypatch, tmp_path):
+        script_path = tmp_path / "slow_script.py"
+        script_path.write_text("print('slow')\n")
+
+        class _FakeProcess:
+            def __init__(self):
+                self.pid = 4321
+                self.returncode = None
+                self.communicate = AsyncMock(
+                    side_effect=[
+                        asyncio.TimeoutError(),
+                        (b"partial stdout\n", b"partial stderr\n"),
+                    ]
+                )
+
+            def kill(self):
+                raise AssertionError("expected process-group termination")
+
+            def terminate(self):
+                raise AssertionError("expected process-group termination")
+
+        fake_process = _FakeProcess()
+        create_subprocess_exec = AsyncMock(return_value=fake_process)
+        terminate_calls = []
+
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.resolve_allowlisted_script",
+            lambda **_kwargs: SimpleNamespace(script_id="demo/slow", script_path=script_path.resolve()),
+        )
+        monkeypatch.setattr("launchpad.mcp_tools.normalize_script_args", lambda args: args or [])
+        monkeypatch.setattr("launchpad.mcp_tools.validate_script_working_directory", lambda _path: script_path.parent.resolve())
+        monkeypatch.setattr("launchpad.mcp_tools.asyncio.create_subprocess_exec", create_subprocess_exec)
+        monkeypatch.setattr(
+            "launchpad.mcp_tools.terminate_script_process_tree",
+            lambda **kwargs: terminate_calls.append(kwargs) or True,
+        )
+
+        tools = LaunchpadMCPTools("http://launchpad.local")
+        result = await tools.run_allowlisted_script(
+            script_id="demo/slow",
+            timeout_seconds=0.01,
+        )
+
+        assert result["success"] is False
+        assert result["error"] == "Script timed out"
+        assert "partial stdout" in result["stdout"]
+        assert create_subprocess_exec.await_args.kwargs["start_new_session"] is True
+        assert terminate_calls == [{"process": fake_process, "sig": signal.SIGKILL}]
 
     @pytest.mark.asyncio
     async def test_stage_remote_sample_posts_expected_payload(self, monkeypatch):

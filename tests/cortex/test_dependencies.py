@@ -18,7 +18,13 @@ from fastapi import HTTPException
 
 from common.database import Base
 from cortex.models import User, Project, ProjectAccess
-from cortex.dependencies import get_current_user, require_admin, require_project_access
+from cortex.dependencies import (
+    get_current_user,
+    require_admin,
+    require_project_access,
+    require_run_uuid_access,
+)
+from launchpad.models import DogmeJob
 
 
 @pytest.fixture()
@@ -222,3 +228,79 @@ class TestRequireProjectAccess:
         with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
             result = require_project_access("pub-1", stranger, min_role="viewer")
         assert result.role == "viewer"
+
+
+# ---------------------------------------------------------------------------
+# require_run_uuid_access
+# ---------------------------------------------------------------------------
+class TestRequireRunUuidAccess:
+    def test_shared_project_editor_can_access_job_with_different_user_id(self, dep_session, project_in_db, user_in_db, access_in_db):
+        editor = User(
+            id="editor-1", email="editor@test.com", role="user",
+            username="editor", is_active=True,
+        )
+        dep_session.add(editor)
+        dep_session.add(
+            ProjectAccess(
+                id=str(uuid.uuid4()),
+                user_id=editor.id,
+                project_id=project_in_db.id,
+                project_name=project_in_db.name,
+                role="editor",
+            )
+        )
+        dep_session.add(
+            DogmeJob(
+                run_uuid="run-shared",
+                project_id=project_in_db.id,
+                user_id=user_in_db.id,
+                sample_name="sample-1",
+                workflow_key="dogme",
+                input_directory="/tmp/input",
+            )
+        )
+        dep_session.commit()
+
+        with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
+            require_run_uuid_access("run-shared", editor)
+
+    def test_direct_job_owner_without_project_membership_is_denied(self, dep_session, user_in_db):
+        dep_session.add(
+            DogmeJob(
+                run_uuid="run-legacy",
+                project_id="missing-project",
+                user_id=user_in_db.id,
+                sample_name="sample-legacy",
+                workflow_key="dogme",
+                input_directory="/tmp/input",
+            )
+        )
+        dep_session.commit()
+
+        with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
+            with pytest.raises(HTTPException) as exc:
+                require_run_uuid_access("run-legacy", user_in_db)
+            assert exc.value.status_code == 403
+
+    def test_non_member_non_owner_is_denied(self, dep_session, project_in_db, user_in_db):
+        stranger = User(
+            id="stranger-run", email="stranger-run@test.com", role="user",
+            username="strangerrun", is_active=True,
+        )
+        dep_session.add(stranger)
+        dep_session.add(
+            DogmeJob(
+                run_uuid="run-private",
+                project_id=project_in_db.id,
+                user_id=user_in_db.id,
+                sample_name="sample-private",
+                workflow_key="dogme",
+                input_directory="/tmp/input",
+            )
+        )
+        dep_session.commit()
+
+        with patch("cortex.dependencies.SessionLocal", return_value=dep_session):
+            with pytest.raises(HTTPException) as exc:
+                require_run_uuid_access("run-private", stranger)
+            assert exc.value.status_code == 403

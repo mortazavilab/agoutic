@@ -21,6 +21,13 @@ from cortex.remote_orchestration import (
 logger = get_logger(__name__)
 
 PRIORITY = 800
+_WORKFLOW_ANALYSIS_SKILLS = {
+    "run_dogme_dna",
+    "run_dogme_rna",
+    "run_dogme_cdna",
+    "analyze_job_results",
+}
+_ENCODE_FILE_REQUEST_KEYWORDS = ("fastq", "bam", "pod5", "files", "download")
 
 
 def _suppress_all_tags(ctx: ChatContext) -> None:
@@ -45,6 +52,22 @@ class OverrideDetectionStage:
 
     async def run(self, ctx: ChatContext) -> None:
         _msg_lower = ctx.user_msg_lower
+
+        if ctx.is_multi_encode_file_override:
+            _encode_file_calls = _auto_generate_data_calls(
+                ctx.message, ctx.active_skill, ctx.conversation_history,
+                history_blocks=ctx.history_blocks,
+                project_dir=ctx.project_dir,
+                project_id=ctx.project_id,
+            )
+            _suppress_all_tags(ctx)
+            ctx.auto_calls = _encode_file_calls
+            ctx.clean_markdown = ""
+            logger.warning(
+                "Early ENCODE file-request override: generating deterministic calls",
+                calls=len(ctx.auto_calls),
+            )
+            return
 
         # ── Referential-word flag (used later for hallucination guard) ─
         _ref_words = [
@@ -140,14 +163,41 @@ class OverrideDetectionStage:
                            calls=len(ctx.auto_calls))
             return
 
-        # ── Auto-generate / hallucination guard ───────────────────────
-        if not ctx.has_any_tags and (not ctx.injected_previous_data or ctx.injected_was_capped):
-            ctx.auto_calls = _auto_generate_data_calls(
+        _generated_calls = []
+        _can_auto_generate = not ctx.injected_previous_data or ctx.injected_was_capped
+        _requires_encode_file_completeness_check = _is_multi_encode_file_request(ctx)
+        if _can_auto_generate or _requires_encode_file_completeness_check:
+            _generated_calls = _auto_generate_data_calls(
                 ctx.message, ctx.active_skill, ctx.conversation_history,
                 history_blocks=ctx.history_blocks,
                 project_dir=ctx.project_dir,
                 project_id=ctx.project_id,
             )
+            if _should_override_incomplete_encode_file_calls(ctx, _generated_calls):
+                _suppress_all_tags(ctx)
+                ctx.auto_calls = _generated_calls
+                ctx.clean_markdown = ""
+                logger.warning(
+                    "ENCODE file-request override: replacing incomplete model calls",
+                    calls=len(ctx.auto_calls),
+                )
+                return
+            if not _generated_calls:
+                _generated_calls = _promote_llm_workflow_summary_tags(ctx)
+            if _should_override_generic_workflow_summary_tags(ctx, _generated_calls):
+                _suppress_all_tags(ctx)
+                ctx.auto_calls = _generated_calls
+                ctx.clean_markdown = ""
+                logger.warning(
+                    "Workflow-analysis override: replacing generic summary tags with specific auto-generated calls",
+                    skill=ctx.active_skill,
+                    calls=len(ctx.auto_calls),
+                )
+                return
+
+        # ── Auto-generate / hallucination guard ───────────────────────
+        if not ctx.has_any_tags and _can_auto_generate:
+            ctx.auto_calls = _generated_calls
             if ctx.auto_calls:
                 logger.warning("LLM failed to generate DATA_CALL tags, auto-generating",
                                count=len(ctx.auto_calls), skill=ctx.active_skill)
@@ -243,6 +293,129 @@ def _format_size(sz: int) -> str:
     if sz > 0:
         return f"{sz / 1024:.0f} KB"
     return "—"
+
+
+def _should_override_generic_workflow_summary_tags(ctx: ChatContext, auto_calls: list[dict]) -> bool:
+    if not ctx.has_any_tags or not auto_calls:
+        return False
+    if ctx.legacy_encode_matches:
+        return False
+
+    auto_tools = [
+        call.get("tool")
+        for call in auto_calls
+        if call.get("source_key") == "analyzer"
+    ]
+    if not auto_tools or all(tool == "get_analysis_summary" for tool in auto_tools):
+        return False
+
+    llm_tools = [match.group(3) for match in ctx.data_call_matches]
+    llm_tools.extend(match.group(1) for match in ctx.legacy_analysis_matches)
+    if not llm_tools:
+        return False
+
+    return all(tool == "get_analysis_summary" for tool in llm_tools)
+
+
+def _should_override_incomplete_encode_file_calls(
+    ctx: ChatContext,
+    auto_calls: list[dict],
+) -> bool:
+    """Require a file lookup for every explicitly requested ENCODE experiment."""
+    requested = {
+        accession.upper()
+        for accession in re.findall(r"\b(ENCSR[A-Z0-9]{6})\b", ctx.message, re.IGNORECASE)
+    }
+    if len(requested) < 2:
+        return False
+
+    if not _is_multi_encode_file_request(ctx):
+        return False
+
+    generated = {
+        str(call.get("params", {}).get("accession", "")).upper()
+        for call in auto_calls
+        if call.get("source_key") == "encode"
+        and call.get("tool") == "get_files_by_type"
+    }
+    if not requested.issubset(generated):
+        return False
+
+    model_requested: set[str] = set()
+    for match in ctx.data_call_matches:
+        if match.group(1) != "consortium" or match.group(2) != "encode":
+            continue
+        if match.group(3) != "get_files_by_type":
+            continue
+        accession = str(_parse_tag_params(match.group(4)).get("accession", "")).upper()
+        if accession:
+            model_requested.add(accession)
+
+    return not requested.issubset(model_requested)
+
+
+def _is_multi_encode_file_request(ctx: ChatContext) -> bool:
+    requested = set(re.findall(r"\bENCSR[A-Z0-9]{6}\b", ctx.message, re.IGNORECASE))
+    return len(requested) >= 2 and any(
+        keyword in ctx.user_msg_lower for keyword in _ENCODE_FILE_REQUEST_KEYWORDS
+    )
+
+
+def _promote_llm_workflow_summary_tags(ctx: ChatContext) -> list[dict]:
+    if ctx.active_skill not in _WORKFLOW_ANALYSIS_SKILLS:
+        return []
+    if not ctx.has_any_tags or ctx.legacy_encode_matches:
+        return []
+
+    llm_tools = [match.group(3) for match in ctx.data_call_matches]
+    llm_tools.extend(match.group(1) for match in ctx.legacy_analysis_matches)
+    if not llm_tools or not all(tool == "get_analysis_summary" for tool in llm_tools):
+        return []
+
+    for match in ctx.data_call_matches:
+        if match.group(3) != "get_analysis_summary":
+            continue
+
+        params = _parse_tag_params(match.group(4))
+        work_dir = str(params.get("work_dir") or "").strip()
+        run_uuid = str(params.get("run_uuid") or "").strip()
+        if not (work_dir or run_uuid):
+            continue
+
+        summary_params: dict = {}
+        file_lookup_params: dict = {}
+        if work_dir:
+            summary_params["work_dir"] = work_dir
+            file_lookup_params["work_dir"] = work_dir
+        if run_uuid:
+            summary_params["run_uuid"] = run_uuid
+            if not file_lookup_params:
+                file_lookup_params["run_uuid"] = run_uuid
+
+        return [
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "get_analysis_summary",
+                "params": summary_params,
+            },
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {**file_lookup_params, "file_name": "final_stats"},
+                "_chain": "parse_csv_file",
+            },
+            {
+                "source_type": "service",
+                "source_key": "analyzer",
+                "tool": "find_file",
+                "params": {**file_lookup_params, "file_name": "qc_summary"},
+                "_chain": "parse_csv_file",
+            },
+        ]
+
+    return []
 
 
 def _validate_referential_accessions(ctx: ChatContext) -> None:

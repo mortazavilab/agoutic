@@ -2,7 +2,7 @@ import pytest
 import base64
 import pandas as pd
 
-from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute
+from cortex.plan_executor import STEP_TOOL_DEFAULTS, execute_step, should_auto_execute, _normalize_legacy_reconcile_auto_approvals
 
 
 class _FakeSession:
@@ -129,6 +129,33 @@ def test_run_script_is_not_auto_executed_by_default():
     step = {"kind": "RUN_SCRIPT", "requires_approval": False}
     assert should_auto_execute(step) is False
     assert STEP_TOOL_DEFAULTS["RUN_SCRIPT"] is None
+
+
+def test_normalize_legacy_reconcile_auto_approvals_repairs_completed_request_steps():
+    payload = {
+        "plan_type": "reconcile_bams",
+        "steps": [
+            {
+                "id": "approve_mm39",
+                "kind": "REQUEST_APPROVAL",
+                "status": "COMPLETED",
+                "requires_approval": False,
+                "auto_approve_from_shared_reconcile_authorization": True,
+            },
+            {
+                "id": "run_mm39",
+                "kind": "RUN_SCRIPT",
+                "status": "PENDING",
+                "requires_approval": True,
+                "depends_on": ["approve_mm39"],
+            },
+        ],
+    }
+
+    changed = _normalize_legacy_reconcile_auto_approvals(payload)
+
+    assert changed is True
+    assert payload["steps"][0]["requires_approval"] is True
 
 
 @pytest.mark.asyncio
@@ -988,6 +1015,94 @@ async def test_execute_step_write_summary_uses_pvalue_threshold_when_reported(mo
     assert "Significant genes at p-value < 0.01: 11 total (8 up, 3 down, 105 not significant)." in summary["markdown"]
     assert summary["deg_summary"]["significance_metric"] == "pvalue"
     assert summary["deg_summary"]["significance_threshold"] == 0.01
+
+
+@pytest.mark.asyncio
+async def test_execute_step_write_summary_reads_reconcile_summary_report(monkeypatch):
+    payload = {
+        "plan_type": "reconcile_bams",
+        "work_dir": "/tmp/project/workflow10",
+        "steps": [
+            {
+                "id": "run1",
+                "kind": "RUN_SCRIPT",
+                "title": "Run reconcile",
+                "status": "COMPLETED",
+                "work_directory": "/tmp/project/workflow10",
+            },
+            {
+                "id": "loc1",
+                "kind": "LOCATE_DATA",
+                "title": "Locate reconcile outputs",
+                "status": "COMPLETED",
+                "depends_on": ["run1"],
+                "result": {
+                    "success": True,
+                    "work_dir": "/tmp/project/workflow10",
+                    "files": [
+                        {"path": "reconciled_abundance.tsv", "name": "reconciled_abundance.tsv"},
+                        {"path": "reconciled.gtf", "name": "reconciled.gtf"},
+                        {"path": "reconciled_summary.txt", "name": "reconciled_summary.txt"},
+                    ],
+                },
+            },
+            {
+                "id": "summary1",
+                "kind": "WRITE_SUMMARY",
+                "title": "Summarize reconcile outputs",
+                "status": "PENDING",
+                "depends_on": ["loc1"],
+            },
+        ],
+    }
+
+    calls: list[tuple[str, str, dict]] = []
+
+    monkeypatch.setattr("cortex.plan_executor._persist_step_update", lambda *_args, **_kwargs: None)
+
+    async def _fake_call_mcp_tool(source, tool, params):
+        calls.append((source, tool, dict(params)))
+        assert source == "analyzer"
+        assert tool == "read_file_content"
+        assert params["work_dir"] == "/tmp/project/workflow10"
+        assert params["file_path"] == "reconciled_summary.txt"
+        return {
+            "success": True,
+            "file_path": "reconciled_summary.txt",
+            "content": "Reconciled 2 BAM inputs into 1 merged annotation.\nProduced 124 transcript models.",
+            "line_count": 2,
+            "is_truncated": False,
+            "file_size_bytes": 88,
+            "render_mode": "plain",
+            "source_extension": ".txt",
+        }
+
+    monkeypatch.setattr("cortex.plan_executor._call_mcp_tool", _fake_call_mcp_tool)
+
+    result = await execute_step(
+        _FakeSession(),
+        _FakeBlock(),
+        "summary1",
+        plan_payload=payload,
+        project_id="proj-1",
+    )
+
+    assert result.success is True
+    summary = payload["steps"][-1]["result"]
+    assert "Summary report: reconciled_summary.txt." in summary["markdown"]
+    assert "Reconciled 2 BAM inputs into 1 merged annotation." in summary["markdown"]
+    assert "Produced 124 transcript models." in summary["markdown"]
+    assert calls == [
+        (
+            "analyzer",
+            "read_file_content",
+            {
+                "work_dir": "/tmp/project/workflow10",
+                "file_path": "reconciled_summary.txt",
+                "preview_lines": 120,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

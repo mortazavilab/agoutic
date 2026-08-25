@@ -15,12 +15,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+from urllib.parse import unquote, urlsplit
 
 import pandas as pd
 
 from atlas.config import (
     CONSORTIUM_REGISTRY,
-    get_all_tool_aliases,
     get_all_param_aliases,
 )
 from common import MCPHttpClient
@@ -69,10 +69,24 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_BED_FILENAME_METADATA_RE = re.compile(
-    r"^(?P<sample>.+?)\.(?P<genome>[^.]+)\.(?P<strand>plus|minus)\.(?P<modification>[^.]+)\.filtered\.bed$",
+_INVALID_MOD_SUMMARY_TERMS = frozenset({
+    "mode", "modes", "model", "models", "module", "modules",
+})
+
+_MODIFICATION_SUMMARY_INTENT_RE = re.compile(
+    r"\bshow\s+me\s+(?:the\s+)?(?P<term1>mod[a-z0-9_+\-]*)\s+summary\b"
+    r"|\b(?P<term2>mod[a-z0-9_+\-]*)\s+summary\b"
+    r"|\bsummary\s+of\s+(?:the\s+)?(?P<term3>mod[a-z0-9_+\-]*)\b",
     re.IGNORECASE,
 )
+
+_BED_FILENAME_METADATA_RE = re.compile(
+    r"^(?P<sample>.+?)\.(?P<genome>[^.]+)\.(?P<strand>plus|minus)\.(?P<modification>[^.]+)\.filtered\.bed(?:\.gz)?$",
+    re.IGNORECASE,
+)
+
+_ENCODE_ACCESSION_RE = re.compile(r"\bENC[A-Z0-9]{5,}\b", re.IGNORECASE)
+_IGVF_ACCESSION_RE = re.compile(r"\bIGVF[A-Z0-9]{4,}\b", re.IGNORECASE)
 
 
 def _extract_modification_name(user_message: str) -> str | None:
@@ -82,11 +96,156 @@ def _extract_modification_name(user_message: str) -> str | None:
     return (match.group("mod") or match.group("mod2") or "").lower() or None
 
 
+def _looks_like_mod_summary_term(term: str | None) -> bool:
+    if not term:
+        return False
+    normalized = term.lower()
+    return normalized.startswith("mod") and normalized not in _INVALID_MOD_SUMMARY_TERMS
+
+
+def _is_modification_summary_intent(user_message: str) -> bool:
+    if _extract_modification_name(user_message):
+        return False
+    match = _MODIFICATION_SUMMARY_INTENT_RE.search(user_message)
+    if not match:
+        return False
+    return _looks_like_mod_summary_term(
+        match.group("term1") or match.group("term2") or match.group("term3")
+    )
+
+
 def _parse_bed_filename_metadata(file_path: str) -> dict[str, str] | None:
     match = _BED_FILENAME_METADATA_RE.match(Path(file_path).name)
     if not match:
         return None
     return {key: value for key, value in match.groupdict().items()}
+
+
+def _infer_consortium_from_accession(
+    source_type: str,
+    source_key: str,
+    params: dict[str, object] | None,
+    user_message: str,
+) -> str:
+    """Trust explicit accession prefixes over a mismatched consortium tag.
+
+    Only applies to consortium calls already targeting ENCODE or IGVF. If the
+    params or user message contain an unambiguous ENCODE (ENC...) or IGVF
+    (IGVF...) accession, use that source instead of the declared one.
+    """
+    if source_type != "consortium" or source_key not in {"encode", "igvf"}:
+        return source_key
+
+    candidates: list[str] = []
+    for value in (params or {}).values():
+        if isinstance(value, str):
+            candidates.append(value)
+        elif isinstance(value, list):
+            candidates.extend(item for item in value if isinstance(item, str))
+    candidates.append(user_message)
+
+    has_encode = any(_ENCODE_ACCESSION_RE.search(value) for value in candidates)
+    has_igvf = any(_IGVF_ACCESSION_RE.search(value) for value in candidates)
+
+    if has_encode and not has_igvf:
+        return "encode"
+    if has_igvf and not has_encode:
+        return "igvf"
+    return source_key
+
+
+def _build_modification_totals_rows(dataframe: dict | None) -> list[dict]:
+    """Aggregate per-chromosome BED counts into per-modification totals."""
+    if not isinstance(dataframe, dict):
+        return []
+
+    rows = dataframe.get("data")
+    if not isinstance(rows, list) or not rows:
+        return []
+
+    columns = dataframe.get("columns") or []
+    required_columns = {"Sample", "Genome", "Modification", "Count"}
+    if not required_columns.issubset(set(columns)):
+        return []
+
+    totals: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        modification = str(row.get("Modification") or "").strip()
+        if not modification:
+            continue
+        sample = str(row.get("Sample") or "").strip()
+        genome = str(row.get("Genome") or "").strip()
+        count_value = row.get("Count", 0)
+        try:
+            count = int(count_value)
+        except (TypeError, ValueError):
+            try:
+                count = int(float(count_value))
+            except (TypeError, ValueError):
+                continue
+        key = (sample, genome, modification)
+        totals[key] = totals.get(key, 0) + count
+
+    return [
+        {
+            "Sample": sample,
+            "Genome": genome,
+            "Modification": modification,
+            "Count": count,
+        }
+        for (sample, genome, modification), count in sorted(totals.items())
+    ]
+
+
+def _render_modification_totals_markdown(summary_rows: list[dict]) -> str | None:
+    """Render a compact markdown table of per-modification totals."""
+    if not summary_rows:
+        return None
+
+    lines = [
+        "Modification totals:",
+        "| Sample | Genome | Modification | Count |",
+        "|---|---|---|---|",
+    ]
+    for row in summary_rows:
+        lines.append(
+            "| {sample} | {genome} | {modification} | {count} |".format(
+                sample=row.get("Sample", ""),
+                genome=row.get("Genome", ""),
+                modification=row.get("Modification", ""),
+                count=row.get("Count", ""),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _augment_bed_counter_result(chain_result: dict | None) -> dict | None:
+    """Attach per-modification totals alongside the chromosome-level dataframe."""
+    if not isinstance(chain_result, dict):
+        return chain_result
+
+    summary_rows = _build_modification_totals_rows(chain_result.get("dataframe"))
+    if not summary_rows:
+        return chain_result
+
+    bundle = dict(chain_result.get("_dataframes") or {})
+    bundle["Modification totals"] = {
+        "columns": ["Sample", "Genome", "Modification", "Count"],
+        "data": summary_rows,
+        "row_count": len(summary_rows),
+        "metadata": {
+            "label": "Modification totals",
+            "visible": False,
+        },
+    }
+    chain_result["_dataframes"] = bundle
+    chain_result["modification_totals"] = summary_rows
+    summary_markdown = _render_modification_totals_markdown(summary_rows)
+    if summary_markdown:
+        chain_result["modification_totals_markdown"] = summary_markdown
+    return chain_result
 
 
 async def _run_bed_counter_script(
@@ -109,6 +268,8 @@ async def _run_bed_counter_script(
     finally:
         await launchpad_client.disconnect()
 
+    chain_result = _augment_bed_counter_result(chain_result)
+
     source_results.append({
         "tool": "run_allowlisted_script",
         "params": chain_params,
@@ -125,11 +286,9 @@ async def _chain_list_job_files(
     active_skill: str,
 ) -> None:
     """After list_job_files, optionally chain into modification BED counting."""
-    if active_skill != "analyze_job_results":
-        return
-
     modification_name = _extract_modification_name(user_message)
-    if not modification_name:
+    modification_summary_intent = _is_modification_summary_intent(user_message)
+    if not modification_name and not modification_summary_intent:
         return
 
     work_dir = result_data.get("work_dir")
@@ -147,7 +306,7 @@ async def _chain_list_job_files(
         metadata = _parse_bed_filename_metadata(relative_path)
         if not metadata:
             continue
-        if metadata["modification"].lower() != modification_name:
+        if modification_name and metadata["modification"].lower() != modification_name:
             continue
         bed_path = Path(relative_path).expanduser()
         if not bed_path.is_absolute():
@@ -164,7 +323,7 @@ async def _chain_list_job_files(
         "Chaining list_job_files follow-up",
         chain_tool="run_allowlisted_script",
         matched_files=deduped_paths,
-        modification=modification_name,
+        modification=modification_name or "all-filtered-modifications",
     )
     await _run_bed_counter_script(deduped_paths, source_results)
 
@@ -308,26 +467,44 @@ class ToolExecutionResult:
 # Build calls_by_source
 # ---------------------------------------------------------------------------
 
-def _get_aliases() -> tuple[dict[str, str], dict[str, dict[str, str]]]:
-    """Merge atlas registry aliases with our base aliases.
+def _get_aliases() -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Build per-source tool aliases and global param aliases.
 
-    Consortium-registered canonical tool names are protected: if a base alias
-    would remap a name that is itself a real consortium tool (i.e. appears as
-    an alias target or has param_aliases defined), the base alias is skipped
-    so the consortium tool remains reachable.
+    Tool aliases are scoped by source_key so that one consortium's aliases
+    (e.g. IGVF's ``"get_experiment": "get_dataset"``) do not pollute another
+    consortium's tool calls (e.g. ENCODE where ``get_experiment`` is valid).
+
+    Returns ``(source_tool_aliases, param_aliases)`` where
+    ``source_tool_aliases[source_key]`` is a dict of wrong_name -> correct_name.
     """
-    tool_aliases = get_all_tool_aliases()
+    from atlas.config import CONSORTIUM_REGISTRY
+
+    # Build per-source tool alias dicts
+    source_tool_aliases: dict[str, dict[str, str]] = {}
+    all_alias_values: set[str] = set()  # for canonical protection below
+    for _sk, _entry in CONSORTIUM_REGISTRY.items():
+        sa = _entry.get("tool_aliases", {})
+        if sa:
+            source_tool_aliases[_sk] = dict(sa)
+            all_alias_values.update(sa.values())
+
     # Canonical consortium tool names = alias targets + param_alias keys
-    _consortium_canonical: set[str] = set(tool_aliases.values())
+    _consortium_canonical: set[str] = set(all_alias_values)
     param_aliases = get_all_param_aliases()
     _consortium_canonical.update(param_aliases.keys())
-    # Add base aliases only when the alias key is not itself a consortium tool
+
+    # Add base aliases scoped to each source that doesn't already have the tool
     for _alias, _target in _BASE_TOOL_ALIASES.items():
-        if _alias not in _consortium_canonical and _alias not in tool_aliases:
-            tool_aliases[_alias] = _target
+        if _alias not in _consortium_canonical:
+            for _sk in source_tool_aliases:
+                if _alias not in source_tool_aliases[_sk]:
+                    source_tool_aliases.setdefault(_sk, {})[_alias] = _target
+
+    # Merge base param aliases into the global param_aliases dict
     for tool_name, pa in _BASE_PARAM_ALIASES.items():
         param_aliases.setdefault(tool_name, {}).update(pa)
-    return tool_aliases, param_aliases
+
+    return source_tool_aliases, param_aliases
 
 
 def build_calls_by_source(
@@ -353,7 +530,18 @@ def build_calls_by_source(
     calls_by_source: dict[str, list[dict]] = {}
 
     # --- From auto-generated tags (safety net) ---
-    if not has_any_tags and auto_calls:
+    # A multi-experiment ENCODE file request is generated deterministically.
+    # Preserve that complete batch even when an earlier stage leaves a stale
+    # has_any_tags flag behind; deduplication below handles any overlapping tag.
+    is_encode_file_batch = (
+        len(auto_calls) > 1
+        and all(
+            call.get("source_key") == "encode"
+            and call.get("tool") == "get_files_by_type"
+            for call in auto_calls
+        )
+    )
+    if auto_calls and (not has_any_tags or is_encode_file_batch):
         for ac in auto_calls:
             ac_tool = ac["tool"]
             ac_params = _hydrate_request_placeholders(
@@ -387,7 +575,29 @@ def build_calls_by_source(
         tool_name = match.group(3)
         params_str = match.group(4)
 
-        corrected_tool = tool_aliases.get(tool_name, tool_name)
+        params = _hydrate_request_placeholders(
+            _parse_tag_params(params_str),
+            user_id=user_id,
+            project_id=project_id,
+        )
+
+        inferred_source_key = _infer_consortium_from_accession(
+            source_type,
+            source_key,
+            params,
+            user_message,
+        )
+        if inferred_source_key != source_key:
+            logger.warning(
+                "Corrected consortium from accession prefix",
+                original_source=f"{source_type}/{source_key}",
+                corrected_source=f"{source_type}/{inferred_source_key}",
+            )
+            source_key = inferred_source_key
+
+        # Look up aliases scoped to this source so IGVF aliases don't pollute ENCODE calls
+        _source_aliases = tool_aliases.get(source_key, {})
+        corrected_tool = _source_aliases.get(tool_name, tool_name)
         if corrected_tool != tool_name:
             logger.warning("Corrected hallucinated tool name",
                            original=tool_name, corrected=corrected_tool)
@@ -405,12 +615,6 @@ def build_calls_by_source(
                            original_source=f"{source_type}/{source_key}")
             source_type = "service"
             source_key = "analyzer"
-
-        params = _hydrate_request_placeholders(
-            _parse_tag_params(params_str),
-            user_id=user_id,
-            project_id=project_id,
-        )
 
         # Fix hallucinated parameter names
         p_aliases = param_aliases.get(corrected_tool, {})
@@ -452,7 +656,8 @@ def build_calls_by_source(
             user_id=user_id,
             project_id=project_id,
         )
-        corrected_tool = tool_aliases.get(tool_name, tool_name)
+        encode_aliases = tool_aliases.get("encode", {})
+        corrected_tool = encode_aliases.get(tool_name, tool_name)
         if corrected_tool != tool_name:
             logger.warning("Corrected hallucinated tool name (legacy)",
                            original=tool_name, corrected=corrected_tool)
@@ -734,6 +939,31 @@ async def execute_tool_calls(
         # minutes for large result sets.  Use a generous timeout to avoid
         # killing transfers mid-stream.
         _mcp_timeout = REMOTE_STAGE_MCP_TIMEOUT if source_key == "launchpad" else 120.0
+
+        if source_key == "encode" and _is_encode_file_list_batch(calls):
+            source_results = await _execute_encode_file_list_batch(
+                calls,
+                url=url,
+                timeout=_mcp_timeout,
+                request_id=request_id,
+                is_cancelled=is_cancelled,
+                source_label=source_label,
+            )
+            for call, source_result in zip(calls, source_results):
+                if "data" not in source_result:
+                    continue
+                _handle_download_chain(
+                    call,
+                    source_result["tool"],
+                    source_result["params"],
+                    source_result["data"],
+                    user_message,
+                    result,
+                    source_key,
+                )
+            all_results[source_key] = source_results
+            continue
+
         mcp_client = MCPHttpClient(name=source_key, base_url=url, timeout=_mcp_timeout)
         source_results: list[dict] = []
 
@@ -873,6 +1103,67 @@ async def execute_tool_calls(
 
     result.all_results = all_results
     return result
+
+
+def _is_encode_file_list_batch(calls: list[dict]) -> bool:
+    """Return whether calls need isolated ENCODE MCP sessions."""
+    return len(calls) > 1 and all(call.get("tool") == "get_files_by_type" for call in calls)
+
+
+async def _execute_encode_file_list_batch(
+    calls: list[dict],
+    *,
+    url: str,
+    timeout: float,
+    request_id: str,
+    is_cancelled: Callable[[str], bool],
+    source_label: str,
+) -> list[dict]:
+    """Run each ENCODE file listing in a fresh MCP session.
+
+    ENCODELIB is stateful behind FastMCP's HTTP transport. Isolating requests
+    prevents one completed lookup from swallowing later experiment lookups.
+    """
+    source_results: list[dict] = []
+    for call in calls:
+        tool_name = call["tool"]
+        params = call["params"]
+        if is_cancelled(request_id):
+            raise ChatCancelled(
+                "tools",
+                f"Cancelled before running {tool_name} on {source_label}.",
+            )
+
+        mcp_client = MCPHttpClient(name="encode", base_url=url, timeout=timeout)
+        try:
+            await mcp_client.connect()
+            result_data = await _call_with_retry(
+                mcp_client, "encode", tool_name, params, source_results,
+            )
+            if result_data is not _SKIP_SENTINEL:
+                source_results.append({
+                    "tool": tool_name,
+                    "params": params,
+                    "data": result_data,
+                })
+        except ChatCancelled:
+            raise
+        except Exception as exc:
+            logger.error(
+                "ENCODE file-list batch call failed",
+                tool=tool_name,
+                params=params,
+                error=str(exc),
+            )
+            source_results.append({
+                "tool": tool_name,
+                "params": params,
+                "error": f"Connection failed: {exc}",
+            })
+        finally:
+            await mcp_client.disconnect()
+
+    return source_results
 
 
 # --- Sentinel to signal "skip this call" from _call_with_retry ---
@@ -1159,11 +1450,14 @@ def _handle_download_chain(
     result: ToolExecutionResult,
     source_key: str = "",
 ) -> None:
-    """After get_file_metadata / get_file_download_url, extract the download
-    URL and accumulate files for an approval-gated download."""
-    _download_tools = {"get_file_metadata", "get_file_download_url"}
-    if tool_name not in _download_tools or not isinstance(result_data, dict):
-        return
+    """Accumulate ENCODE/IGVF files for an approval-gated download."""
+    def _filename_from_url(url: str | None) -> str | None:
+        if not isinstance(url, str) or not url:
+            return None
+        candidate = Path(unquote(urlsplit(url).path)).name
+        if not candidate or "." not in candidate:
+            return None
+        return candidate
 
     msg_lower = user_message.lower()
     user_wants_download = any(
@@ -1177,42 +1471,87 @@ def _handle_download_chain(
     if not is_download_chain:
         return
 
-    dl_url = None
-    file_acc = params.get("file_accession", "")
-    file_size = result_data.get("file_size")
-    file_fmt = result_data.get("file_format", "")
-    file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
+    def _build_download_file(file_data: dict, fallback_accession: str = "") -> dict | None:
+        file_acc = file_data.get("accession") or fallback_accession
+        file_size = file_data.get("file_size")
+        file_fmt = file_data.get("file_format", "")
+        file_name = f"{file_acc}.{file_fmt}" if file_acc and file_fmt else file_acc
+        href = file_data.get("href")
+        cloud = file_data.get("cloud_metadata")
 
-    # IGVF: get_file_download_url returns a direct "download_url" field
-    if result_data.get("download_url"):
-        dl_url = result_data["download_url"]
-    # IGVF: get_file_metadata returns "href" (relative to api.data.igvf.org)
-    elif source_key == "igvf" and result_data.get("href"):
-        href = result_data["href"]
-        if href.startswith("http"):
-            dl_url = href
-        else:
-            dl_url = f"https://api.data.igvf.org{href}"
-    # ENCODE: cloud_metadata or href
-    else:
-        cloud = result_data.get("cloud_metadata")
-        if isinstance(cloud, dict) and cloud.get("url"):
+        if file_data.get("download_url"):
+            dl_url = file_data["download_url"]
+        elif source_key == "igvf" and href:
+            dl_url = href if href.startswith("http") else f"https://api.data.igvf.org{href}"
+        elif isinstance(cloud, dict) and cloud.get("url"):
             dl_url = cloud["url"]
-        elif result_data.get("href"):
-            dl_url = f"https://www.encodeproject.org{result_data['href']}"
+        elif href:
+            dl_url = f"https://www.encodeproject.org{href}"
+        else:
+            return None
 
-    if not dl_url:
+        filename_candidates = [
+            _filename_from_url(href),
+            _filename_from_url(file_data.get("download_url")),
+            _filename_from_url(cloud.get("url") if isinstance(cloud, dict) else None),
+            _filename_from_url(dl_url),
+        ]
+        for candidate in filename_candidates:
+            if candidate and file_acc and candidate.upper().startswith(file_acc.upper()):
+                file_name = candidate
+                break
+        else:
+            for candidate in filename_candidates:
+                if candidate and candidate.count(".") > file_name.count("."):
+                    file_name = candidate
+                    break
+
+        return {
+            "url": dl_url,
+            "filename": file_name,
+            "size_bytes": file_size,
+            "accession": file_acc,
+        }
+
+    if tool_name == "get_files_by_type" and isinstance(result_data, dict):
+        requested_types = {
+            file_type.lower()
+            for file_type in result_data
+            if file_type.lower().split()[0] in msg_lower
+        }
+        existing_accessions = {
+            str(file_info.get("accession") or "").upper()
+            for file_info in result.pending_download_files
+        }
+        for file_type in requested_types:
+            for file_data in result_data.get(file_type, []):
+                if not isinstance(file_data, dict):
+                    continue
+                if str(file_data.get("status") or "").lower() != "released":
+                    continue
+                download_file = _build_download_file(file_data)
+                if not download_file or download_file["accession"].upper() in existing_accessions:
+                    continue
+                result.pending_download_files.append(download_file)
+                existing_accessions.add(download_file["accession"].upper())
+        if result.pending_download_files:
+            result.active_skill = "download_files"
+            result.needs_approval = True
+            result.clean_markdown = _build_download_plan(result.pending_download_files)
         return
 
-    dl_file_info = {
-        "url": dl_url,
-        "filename": file_name,
-        "size_bytes": file_size,
-        "accession": file_acc,
-    }
+    _download_tools = {"get_file_metadata", "get_file_download_url"}
+    if tool_name not in _download_tools or not isinstance(result_data, dict):
+        return
+
+    dl_file_info = _build_download_file(result_data, params.get("file_accession", ""))
+    if not dl_file_info:
+        return
+
     result.pending_download_files.append(dl_file_info)
     logger.info("Download chain: resolved URL from file metadata",
-                file_accession=file_acc, url=dl_url, size_bytes=file_size,
+                file_accession=dl_file_info["accession"], url=dl_file_info["url"],
+                size_bytes=dl_file_info["size_bytes"],
                 source=source_key)
 
     result.active_skill = "download_files"
@@ -1233,9 +1572,23 @@ async def _chain_find_file(
     """After a successful find_file, chain into parse/read for the found file."""
     chain_tool = call.get("_chain")
     primary_path = result_data["primary_path"]
+
+    def _infer_read_file_render_mode(message: str, file_path: str) -> str | None:
+        lower_message = message.lower()
+        lower_path = file_path.lower()
+        if not lower_path.endswith((".html", ".htm")):
+            return None
+        if (
+            re.search(r"\braw\s+html\b", lower_message)
+            or re.search(r"\bhtml\s+source\b", lower_message)
+            or ("html" in lower_message and "source" in lower_message)
+        ):
+            return "html_raw"
+        return None
+
     if (
-        active_skill == "analyze_job_results"
-        and primary_path.lower().endswith(".bed")
+        active_skill in {"analyze_job_results", "run_dogme_rna", "run_dogme_dna", "run_dogme_cdna"}
+        and primary_path.lower().endswith((".bed", ".bed.gz"))
         and _BED_COUNT_INTENT_RE.search(user_message)
     ):
         chain_tool = "run_allowlisted_script"
@@ -1271,6 +1624,9 @@ async def _chain_find_file(
                 chain_params["max_records"] = 100
             elif chain_tool == "read_file_content":
                 chain_params["preview_lines"] = 50
+                render_mode = _infer_read_file_render_mode(user_message, primary_path)
+                if render_mode:
+                    chain_params["render_mode"] = render_mode
             chain_result = await mcp_client.call_tool(chain_tool, **chain_params)
         source_results.append({
             "tool": chain_tool, "params": chain_params, "data": chain_result,

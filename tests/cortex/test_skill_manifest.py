@@ -26,8 +26,16 @@ from cortex.skill_manifest import (
 # ---------------------------------------------------------------------------
 
 class TestRegistryIntegrity:
-    def test_all_15_skills_registered(self):
-        assert len(SKILL_MANIFESTS) == 15
+    def test_all_skill_folders_registered(self):
+        skills_root = Path(__file__).resolve().parents[2] / "skills"
+        expected_count = len(
+            [
+                child
+                for child in skills_root.iterdir()
+                if child.is_dir() and (child / "SKILL.md").exists()
+            ]
+        )
+        assert len(SKILL_MANIFESTS) == expected_count
 
     def test_every_skill_has_folder_local_yaml_manifest(self):
         skills_root = Path(__file__).resolve().parents[2] / "skills"
@@ -220,3 +228,24 @@ class TestManifestFields:
 
         assert manifest.plan_type == "run_enrichment"
         assert manifest.required_services == ("edgepython",)
+
+    def test_run_wf_pore_c_manifest_declares_planning_metadata(self):
+        manifest = get_manifest("run_wf_pore_c")
+
+        assert manifest is not None
+        assert manifest.plan_type == "run_wf_pore_c"
+        assert manifest.required_services == ("launchpad",)
+        assert "/pore-c" in manifest.slash_commands
+        assert OutputType.JOB in manifest.output_types
+
+
+class TestDogmeAnalysisSkillPrompts:
+    def test_dogme_analysis_skills_require_detailed_first_pass(self):
+        skills_root = Path(__file__).resolve().parents[2] / "skills"
+
+        for key in ("run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"):
+            content = (skills_root / key / "SKILL.md").read_text()
+            assert "Overall Assessment" in content
+            assert "Key Metrics" in content
+            assert "Recommended Next Steps" in content
+            assert "Stop after reporting file counts and file availability" in content

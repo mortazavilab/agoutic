@@ -95,13 +95,17 @@ def require_project_access(project_id: str, user: User, min_role: str = "viewer"
 
         if project and project.owner_id == user.id:
             # Owner's access row is missing — recreate it
+            now = datetime.datetime.utcnow()
             new_access = ProjectAccess(
                 id=str(uuid.uuid4()),
                 user_id=user.id,
                 project_id=project_id,
                 project_name=project.name,
                 role="owner",
-                last_accessed=datetime.datetime.utcnow(),
+                invited_by=None,
+                created_at=now,
+                updated_at=now,
+                last_accessed=now,
             )
             session.add(new_access)
             session.commit()
@@ -121,12 +125,35 @@ def require_project_access(project_id: str, user: User, min_role: str = "viewer"
         session.close()
 
 
+def require_project_owner_or_admin(project_id: str, user: User) -> Project:
+    """Require that the caller is the project's owner or a system admin."""
+    session = SessionLocal()
+    try:
+        project = session.execute(
+            select(Project).where(Project.id == project_id)
+        ).scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        if user.role == "admin":
+            return project
+
+        if project.owner_id != user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the project owner or an admin may manage collaborators.",
+            )
+
+        return project
+    finally:
+        session.close()
+
+
 def require_run_uuid_access(run_uuid: str, user: User) -> None:
     """
-    Verify the user owns the job identified by run_uuid.
+    Verify the user can access the job identified by run_uuid.
 
-    Checks dogme_jobs.user_id (if present) or falls back to checking
-    that the user has access to the job's project_id.
+    Run UUID authorization resolves through the job's project membership.
     """
     from launchpad.models import DogmeJob as LaunchpadDogmeJob
 
@@ -139,22 +166,8 @@ def require_run_uuid_access(run_uuid: str, user: User) -> None:
         if not job:
             raise HTTPException(status_code=404, detail="Job not found.")
 
-        # If job has user_id, check direct ownership
-        if hasattr(job, 'user_id') and job.user_id:
-            if job.user_id != user.id and user.role != "admin":
-                raise HTTPException(
-                    status_code=403,
-                    detail="You do not have access to this job."
-                )
-            return
-
-        # Fallback: check project access
         require_project_access(job.project_id, user, min_role="viewer")
     except HTTPException:
         raise
-    except Exception:
-        # If we can't verify (e.g., table doesn't have user_id yet), allow
-        # access for backward compat — the column migration may not have run
-        pass
     finally:
         session.close()

@@ -8,6 +8,7 @@ Provides user management functionality:
 - Set/change usernames (admin only)
 """
 
+import json
 import re
 from datetime import datetime
 from typing import List
@@ -16,16 +17,21 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, text
 
+from common.maintenance_mode import clear_maintenance_state, get_maintenance_state, set_maintenance_state
 from cortex.config import AGOUTIC_DATA
 from cortex.db import SessionLocal
+from cortex.dependencies import get_current_user
 from cortex.models import (
     User,
     Conversation,
     ConversationMessage,
     DeletedProjectTokenUsage,
     DeletedProjectTokenDaily,
+    Project,
+    ProjectBlock,
 )
 from cortex.dependencies import require_admin
+from cortex.schemas import MaintenanceStateOut, MaintenanceStateUpdate
 from cortex.user_jail import rename_user_dir
 
 
@@ -47,6 +53,119 @@ class UserListItem(BaseModel):
 class UserUpdateRequest(BaseModel):
     is_active: bool | None = None
     role: str | None = None
+
+
+@router.get("/projects")
+async def list_all_projects(admin: User = Depends(require_admin)):
+    """List every project, including archived projects, for administration."""
+    session = SessionLocal()
+    try:
+        rows = session.execute(
+            select(Project, User.email)
+            .outerjoin(User, User.id == Project.owner_id)
+            .order_by(Project.is_archived, Project.updated_at.desc())
+        ).all()
+        return [
+            {
+                "id": project.id,
+                "name": project.name,
+                "slug": project.slug,
+                "owner_id": project.owner_id,
+                "owner_email": str(owner_email or "—"),
+                "is_archived": bool(project.is_archived),
+                "created_at": project.created_at.isoformat() if project.created_at else None,
+                "updated_at": project.updated_at.isoformat() if project.updated_at else None,
+            }
+            for project, owner_email in rows
+        ]
+    finally:
+        session.close()
+
+
+@router.get("/downloads/active")
+async def list_active_downloads(admin: User = Depends(require_admin)):
+    """List cancellable file downloads running in this Cortex process."""
+    from cortex.routes.files import _active_downloads
+
+    active_downloads = list(_active_downloads.items())
+    if not active_downloads:
+        return []
+
+    session = SessionLocal()
+    try:
+        rows = []
+        for download_id, info in active_downloads:
+            if info.get("cancelled"):
+                continue
+            block = session.execute(
+                select(ProjectBlock).where(ProjectBlock.id == info.get("block_id"))
+            ).scalar_one_or_none()
+            if block is None or block.status != "RUNNING":
+                continue
+            payload = json.loads(block.payload_json or "{}")
+            if str(payload.get("status") or "").upper() != "RUNNING":
+                continue
+            owner = session.execute(select(User).where(User.id == block.owner_id)).scalar_one_or_none()
+            project = session.execute(select(Project).where(Project.id == block.project_id)).scalar_one_or_none()
+            rows.append(
+                {
+                    "download_id": download_id,
+                    "project_id": block.project_id,
+                    "source": str(payload.get("source") or "url"),
+                    "owner_email": str(getattr(owner, "email", "—") or "—"),
+                    "project_name": str(getattr(project, "name", "—") or "—"),
+                    "downloaded": int(payload.get("downloaded") or 0),
+                    "total_files": int(payload.get("total_files") or 0),
+                    "current_file": str(payload.get("current_file") or ""),
+                }
+            )
+        return rows
+    finally:
+        session.close()
+
+
+@router.get("/maintenance", response_model=MaintenanceStateOut)
+async def get_maintenance(user: User = Depends(get_current_user)):
+    """Return maintenance state for any authenticated user.
+
+    The path remains under `/admin` for consistency with the write endpoints,
+    but GET is intentionally readable by any authenticated user so the global
+    UI banner can show the configured maintenance details.
+    """
+    session = SessionLocal()
+    try:
+        return get_maintenance_state(session)
+    finally:
+        session.close()
+
+
+@router.post("/maintenance", response_model=MaintenanceStateOut)
+async def set_maintenance(
+    update: MaintenanceStateUpdate,
+    admin: User = Depends(require_admin),
+):
+    """Set maintenance mode state. Admin-only."""
+    session = SessionLocal()
+    try:
+        return set_maintenance_state(
+            session,
+            mode=update.mode,
+            message=update.message,
+            starts_at=update.starts_at,
+            updated_by=admin.id,
+        )
+    finally:
+        session.close()
+
+
+@router.delete("/maintenance", response_model=MaintenanceStateOut)
+async def delete_maintenance(admin: User = Depends(require_admin)):
+    """Clear maintenance mode state. Admin-only."""
+    session = SessionLocal()
+    try:
+        return clear_maintenance_state(session, updated_by=admin.id)
+    finally:
+        session.close()
 
 
 @router.get("/users", response_model=List[UserListItem])

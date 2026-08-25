@@ -51,6 +51,8 @@ def _content_payload():
         "line_count": 2,
         "is_truncated": False,
         "file_size": 22,
+        "render_mode": "plain",
+        "source_extension": ".csv",
     }
 
 
@@ -165,7 +167,30 @@ class TestAnalyzerApp:
 
         assert response.status_code == 200
         assert response.json()["file_path"] == "results.csv"
-        read_file_content.assert_called_once_with("run-1", "results.csv", 5)
+        read_file_content.assert_called_once_with(
+            "run-1",
+            "results.csv",
+            5,
+            work_dir_path=None,
+            render_mode="auto",
+        )
+
+    def test_get_file_content_passes_render_mode_and_work_dir(self):
+        client = TestClient(app, raise_server_exceptions=False)
+
+        with patch("analyzer.app.read_file_content", return_value=_content_payload()) as read_file_content:
+            response = client.get(
+                "/analysis/files/content?work_dir=/tmp/workflow9&file_path=report.html&render_mode=html_raw"
+            )
+
+        assert response.status_code == 200
+        read_file_content.assert_called_once_with(
+            None,
+            "report.html",
+            None,
+            work_dir_path="/tmp/workflow9",
+            render_mode="html_raw",
+        )
 
     def test_download_file_rejects_path_traversal(self, tmp_path):
         client = TestClient(app, raise_server_exceptions=False)

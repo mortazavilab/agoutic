@@ -58,6 +58,41 @@ def _plan_payload(*, sample_name: str, status: str = "PENDING") -> dict:
 # ------------------------------------------------------------------
 
 class TestWorkflowTaskIsolation:
+    def test_dogme_batch_projects_parent_and_sample_children(self, session_factory):
+        session = session_factory()
+        project_id = "proj-batch-tasks"
+        _create_block_internal(
+            session,
+            project_id,
+            "APPROVAL_GATE",
+            {
+                "batch_id": "batch-tasks",
+                "batch_status": "COMPLETED_WITH_FAILURES",
+                "requested_max_parallel": 2,
+                "batch_samples": [
+                    {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor", "status": "COMPLETED", "run_uuid": "run-a"},
+                    {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal", "status": "FAILED", "error": "Launchpad failed"},
+                ],
+            },
+            status="APPROVED",
+            owner_id="u1",
+        )
+
+        tasks = sync_project_tasks(session, project_id)
+        tasks_by_source = {task.source_key: task for task in tasks}
+        parent = next(task for task in tasks if task.kind == "dogme_batch")
+        tumor = next(task for task in tasks if task.source_key.endswith(":1"))
+        normal = next(task for task in tasks if task.source_key.endswith(":2"))
+
+        assert parent.status == "FAILED"
+        assert tumor.parent_task_id == parent.id
+        assert tumor.status == "COMPLETED"
+        assert normal.parent_task_id == parent.id
+        assert normal.status == "FAILED"
+        assert json.loads(normal.metadata_json)["error"] == "Launchpad failed"
+        assert len(tasks_by_source) == 3
+        session.close()
+
     def test_only_active_workflow_tasks_shown(self, session_factory):
         """When two workflows exist (one COMPLETED, one PENDING), sync
         returns only the active (PENDING) workflow's tasks."""
@@ -123,6 +158,47 @@ class TestWorkflowTaskIsolation:
         # Only the most recent (LWF) should be visible
         assert any("LWF" in t for t in titles), f"Expected LWF tasks, got: {titles}"
         assert not any("GKO" in t for t in titles), f"GKO should be archived, got: {titles}"
+
+        session.close()
+
+    def test_sync_project_tasks_skips_noop_commit(self, session_factory, monkeypatch):
+        session = session_factory()
+        pid = "proj-isolation-noop"
+
+        _create_block_internal(
+            session, pid, "WORKFLOW_PLAN",
+            _plan_payload(sample_name="EXC", status="PENDING"),
+            status="PENDING", owner_id="u1",
+        )
+
+        class _FrozenDateTime(datetime.datetime):
+            current = datetime.datetime(2026, 5, 24, 12, 0, 0)
+
+            @classmethod
+            def utcnow(cls):
+                return cls.current
+
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return cls.current
+                return cls.current.replace(tzinfo=datetime.timezone.utc).astimezone(tz)
+
+        monkeypatch.setattr("cortex.task_service.datetime.datetime", _FrozenDateTime)
+        monkeypatch.setattr(
+            "cortex.task_service._utc_now",
+            lambda: _FrozenDateTime.current.replace(tzinfo=datetime.timezone.utc),
+        )
+
+        first_tasks = sync_project_tasks(session, pid)
+        first_updated_at = {task.source_key: task.updated_at for task in first_tasks}
+
+        _FrozenDateTime.current = datetime.datetime(2026, 5, 24, 13, 0, 0)
+
+        second_tasks = sync_project_tasks(session, pid)
+        second_updated_at = {task.source_key: task.updated_at for task in second_tasks}
+
+        assert second_updated_at == first_updated_at
 
         session.close()
 

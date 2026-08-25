@@ -20,6 +20,7 @@ from cortex.user_jail import (
     get_user_home_dir_by_uuid,
     rename_user_dir,
     rename_project_dir,
+    transfer_project_dir,
 )
 
 
@@ -250,3 +251,38 @@ class TestRenameProjectDir:
 
         with pytest.raises(PermissionError, match="already has content"):
             rename_project_dir("alice", "proj1", "proj2")
+
+
+class TestTransferProjectDir:
+    def test_transfers_existing_slug_project_between_users(self, tmp_agoutic_data):
+        old_dir = get_user_project_dir("alice", "shared-proj")
+        (old_dir / "data").mkdir(exist_ok=True)
+        (old_dir / "data" / "sample.fastq").write_text("ACGT")
+
+        new_path = transfer_project_dir(
+            old_username="alice",
+            new_username="bob",
+            old_owner_id="owner-a",
+            new_owner_id="owner-b",
+            project_slug="shared-proj",
+            project_id="proj-1",
+        )
+
+        assert new_path.exists()
+        assert (new_path / "data" / "sample.fastq").read_text() == "ACGT"
+        assert not old_dir.exists()
+
+    def test_transfer_to_occupied_target_raises(self, tmp_agoutic_data):
+        get_user_project_dir("alice", "shared-proj")
+        target = get_user_project_dir("bob", "shared-proj")
+        (target / "results.txt").write_text("occupied")
+
+        with pytest.raises(PermissionError, match="already has content"):
+            transfer_project_dir(
+                old_username="alice",
+                new_username="bob",
+                old_owner_id="owner-a",
+                new_owner_id="owner-b",
+                project_slug="shared-proj",
+                project_id="proj-1",
+            )

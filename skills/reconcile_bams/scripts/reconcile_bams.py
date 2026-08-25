@@ -106,17 +106,25 @@ def _canonical_reference(reference_token: str) -> str:
         return "GRCh38"
     if lowered in {"mm39", "mm10", "mouse"}:
         return "mm39"
+    if lowered == "mad1":
+        return "mad1"
     return reference_token
 
 
-def _resolve_default_gtf(reference: str) -> Path | None:
+def _configured_reference_gtf(reference: str) -> Path | None:
     entry = REFERENCE_GENOMES.get(reference)
     if not isinstance(entry, dict):
         return None
     gtf = entry.get("gtf")
     if not gtf:
         return None
-    gtf_path = Path(str(gtf)).expanduser().resolve()
+    return Path(str(gtf)).expanduser().resolve()
+
+
+def _resolve_default_gtf(reference: str) -> Path | None:
+    gtf_path = _configured_reference_gtf(reference)
+    if gtf_path is None:
+        return None
     return gtf_path if gtf_path.exists() else None
 
 
@@ -127,7 +135,16 @@ def _normalized_gtf_name(path_like: str | Path) -> str:
     return name
 
 
-def _resolve_local_gtf_equivalent(raw_path: str | Path, reference: str) -> Path | None:
+def _build_missing_local_reference_message(reference: str, raw_path: str | Path) -> str:
+    configured_gtf = _configured_reference_gtf(reference)
+    expected = str(configured_gtf) if configured_gtf is not None else f"the configured local {reference} reference GTF"
+    return (
+        f"Reference-matched annotation path '{raw_path}' must resolve to the local {reference} reference GTF for reconcile, "
+        f"but that local reference is not available at {expected}. Install the local genome or provide a local annotation GTF."
+    )
+
+
+def _resolve_local_gtf_equivalent(raw_path: str | Path, reference: str) -> tuple[Path | None, str | None]:
     """Map a remote config/manual GTF to the local reference copy when safe.
 
     Reconcile preflight runs locally, but workflow configs may point at the
@@ -135,12 +152,14 @@ def _resolve_local_gtf_equivalent(raw_path: str | Path, reference: str) -> Path 
     When that remote path names the same canonical GTF file as the local
     reference catalog, use the local copy instead of forcing manual approval.
     """
-    default_gtf = _resolve_default_gtf(reference)
-    if default_gtf is None:
-        return None
-    if _normalized_gtf_name(raw_path) == _normalized_gtf_name(default_gtf):
-        return default_gtf
-    return None
+    configured_gtf = _configured_reference_gtf(reference)
+    if configured_gtf is None:
+        return None, None
+    if _normalized_gtf_name(raw_path) != _normalized_gtf_name(configured_gtf):
+        return None, None
+    if configured_gtf.exists() and configured_gtf.is_file():
+        return configured_gtf, None
+    return None, _build_missing_local_reference_message(reference, raw_path)
 
 
 def _manual_gtf_matches_reference(manual_gtf: Path, reference: str) -> bool:
@@ -158,8 +177,36 @@ def _next_workflow_number(project_dir: Path) -> int:
     return next_workflow_number(project_dir)
 
 
-def _ensure_reconcile_workflow_dir(output_root: Path) -> Path:
-    workflow_dir = output_root / workflow_dir_name(_next_workflow_number(output_root))
+def _resolve_output_root(project_dir: Path, workflow_dirs: list[Path], requested_output_dir: str) -> tuple[Path, Path | None]:
+    requested = (requested_output_dir or ".").strip()
+    if requested and requested != ".":
+        requested_path = Path(requested).expanduser().resolve()
+        if re.fullmatch(r"workflow\d+", requested_path.name, re.IGNORECASE):
+            return requested_path.parent, requested_path
+        return requested_path, None
+
+    if workflow_dirs:
+        workflow_parents = [str(path.parent) for path in workflow_dirs]
+        return Path(os.path.commonpath(workflow_parents)).expanduser().resolve(), None
+
+    script_dir = Path(__file__).resolve().parent
+    if project_dir.is_dir() and project_dir != script_dir:
+        return project_dir, None
+
+    cwd = Path.cwd().resolve()
+    if cwd != script_dir:
+        return cwd, None
+
+    raise ReconcileInputError(
+        "Unable to determine a writable reconcile output directory automatically. "
+        "Provide --output-dir explicitly."
+    )
+
+
+def _ensure_reconcile_workflow_dir(output_root: Path, explicit_workflow_dir: Path | None = None) -> Path:
+    workflow_dir = explicit_workflow_dir or (output_root / workflow_dir_name(_next_workflow_number(output_root)))
+    if workflow_dir.exists():
+        raise ReconcileInputError(f"Requested reconcile workflow directory already exists: {workflow_dir}")
     input_dir = workflow_dir / "input"
     output_dir = workflow_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=False)
@@ -195,15 +242,19 @@ def _collect_config_files(workflow_dir: Path) -> list[Path]:
     return ordered
 
 
-def _resolve_gtf_candidate(raw_path: str, base_dir: Path, reference: str) -> Path | None:
+def _resolve_gtf_candidate(raw_path: str, base_dir: Path, reference: str) -> tuple[Path | None, str | None]:
+    mapped_gtf, mapped_issue = _resolve_local_gtf_equivalent(raw_path, reference)
+    if mapped_gtf is not None or mapped_issue is not None:
+        return mapped_gtf, mapped_issue
+
     candidate = Path(raw_path).expanduser()
     if not candidate.is_absolute():
         candidate = (base_dir / candidate).resolve()
     else:
         candidate = candidate.resolve()
     if candidate.exists() and candidate.is_file():
-        return candidate
-    return _resolve_local_gtf_equivalent(raw_path, reference)
+        return candidate, None
+    return None, None
 
 
 def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str) -> tuple[Path | None, list[dict], str | None]:
@@ -212,6 +263,7 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
 
     for workflow_dir in workflow_dirs:
         workflow_candidates: set[Path] = set()
+        workflow_resolution_issue: str | None = None
         for config_path in _collect_config_files(workflow_dir):
             try:
                 lines = config_path.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -221,8 +273,21 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
                 if ".gtf" not in raw_line.lower():
                     continue
                 for match in _GTF_PATH_PATTERN.finditer(raw_line):
-                    candidate = _resolve_gtf_candidate(match.group("path"), config_path.parent, reference)
+                    configured_annotation_gtf = match.group("path")
+                    candidate, resolution_issue = _resolve_gtf_candidate(configured_annotation_gtf, config_path.parent, reference)
                     if candidate is None:
+                        if resolution_issue and workflow_resolution_issue is None:
+                            workflow_resolution_issue = resolution_issue
+                            evidence.append(
+                                {
+                                    "workflow": str(workflow_dir.resolve()),
+                                    "file": str(config_path),
+                                    "line": line_no,
+                                    "configured_annotation_gtf": configured_annotation_gtf,
+                                    "source": "workflow_config",
+                                    "resolution_issue": resolution_issue,
+                                }
+                            )
                         continue
                     workflow_candidates.add(candidate)
                     evidence.append(
@@ -230,11 +295,13 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
                             "workflow": str(workflow_dir.resolve()),
                             "file": str(config_path),
                             "line": line_no,
-                            "configured_annotation_gtf": match.group("path"),
+                            "configured_annotation_gtf": configured_annotation_gtf,
                             "annotation_gtf": str(candidate),
                             "source": "workflow_config",
                         }
                     )
+        if not workflow_candidates and workflow_resolution_issue:
+            return None, evidence, workflow_resolution_issue
         if len(workflow_candidates) > 1:
             return None, evidence, (
                 f"Workflow {workflow_dir.resolve()} references multiple annotation GTF files: "
@@ -259,29 +326,6 @@ def _discover_workflow_annotation_gtf(workflow_dirs: list[Path], reference: str)
             f"Workflow config annotation GTF appears to mismatch BAM reference '{reference}': {selected}"
         )
     return selected, evidence, None
-
-
-def _resolve_output_root(project_dir: Path, workflow_dirs: list[Path], requested_output_dir: str) -> Path:
-    requested = (requested_output_dir or ".").strip()
-    if requested and requested != ".":
-        return Path(requested).expanduser().resolve()
-
-    if workflow_dirs:
-        workflow_parents = [str(path.parent) for path in workflow_dirs]
-        return Path(os.path.commonpath(workflow_parents)).expanduser().resolve()
-
-    script_dir = Path(__file__).resolve().parent
-    if project_dir.is_dir() and project_dir != script_dir:
-        return project_dir
-
-    cwd = Path.cwd().resolve()
-    if cwd != script_dir:
-        return cwd
-
-    raise ReconcileInputError(
-        "Unable to determine a writable reconcile output directory automatically. "
-        "Provide --output-dir explicitly."
-    )
 
 
 def _create_symlinks(workflow_dir: Path, bam_paths: list[Path]) -> list[dict]:
@@ -323,11 +367,13 @@ def _resolve_selected_gtf(
 ) -> tuple[Path | None, str, str | None]:
     """Return (selected_gtf, source, resolution_issue)."""
     if annotation_gtf:
-        manual_gtf = Path(annotation_gtf).expanduser().resolve()
-        if (not manual_gtf.exists() or not manual_gtf.is_file()) and annotation_gtf:
-            mapped_gtf = _resolve_local_gtf_equivalent(annotation_gtf, reference)
-            if mapped_gtf is not None:
-                manual_gtf = mapped_gtf
+        mapped_gtf, mapped_issue = _resolve_local_gtf_equivalent(annotation_gtf, reference)
+        if mapped_gtf is not None:
+            manual_gtf = mapped_gtf
+        elif mapped_issue is not None:
+            return None, "manual", mapped_issue
+        else:
+            manual_gtf = Path(annotation_gtf).expanduser().resolve()
         if not manual_gtf.exists() or not manual_gtf.is_file():
             return None, "manual", f"Manual annotation GTF does not exist or is not a file: {manual_gtf}"
         if not _manual_gtf_matches_reference(manual_gtf, reference):
@@ -489,6 +535,118 @@ def _build_manual_gtf_needed_payload(
     }
 
 
+def _build_preflight_ready_payload(
+    *,
+    reference: str,
+    metadata: list[dict],
+    selected_gtf: Path,
+    gtf_source: str,
+    annotation_evidence: list[dict],
+    output_prefix: str,
+    output_root: Path,
+    threads: int,
+    gene_prefix: str,
+    tx_prefix: str,
+    id_tag: str,
+    gene_tag: str,
+    exon_merge_distance: int,
+    min_tpm: float,
+    min_samples: int,
+    filter_known: bool,
+) -> dict:
+    return {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Reconcile preflight validation passed. Ready for approval.",
+        "reference": reference,
+        "gtf": {
+            "path": str(selected_gtf),
+            "source": gtf_source,
+        },
+        "annotation_evidence": annotation_evidence,
+        "inputs": {
+            "count": len(metadata),
+            "bams": metadata,
+        },
+        "execution_defaults": {
+            "script_id": "reconcile_bams/reconcile_bams",
+            "underlying_script_id": "reconcile_bams/reconcileBams",
+            "gene_prefix": gene_prefix,
+            "tx_prefix": tx_prefix,
+            "id_tag": id_tag,
+            "gene_tag": gene_tag,
+            "threads": int(threads),
+            "exon_merge_distance": int(exon_merge_distance),
+            "min_tpm": float(min_tpm),
+            "min_samples": int(min_samples),
+            "filter_known": bool(filter_known),
+        },
+        "outputs": {
+            "output_prefix": output_prefix,
+            "output_root": str(output_root),
+            "artifacts": [],
+        },
+    }
+
+
+def _resolve_preflight_payload_for_reference(
+    *,
+    reference: str,
+    metadata: list[dict],
+    workflow_dirs: list[Path],
+    annotation_gtf: str | None,
+    output_prefix: str,
+    output_root: Path,
+    threads: int,
+    gene_prefix: str,
+    tx_prefix: str,
+    id_tag: str,
+    gene_tag: str,
+    exon_merge_distance: int,
+    min_tpm: float,
+    min_samples: int,
+    filter_known: bool,
+) -> dict:
+    workflow_gtf, annotation_evidence, workflow_gtf_issue = _discover_workflow_annotation_gtf(workflow_dirs, reference)
+    if workflow_gtf_issue:
+        raise ReconcileInputError(workflow_gtf_issue)
+
+    selected_gtf, gtf_source, gtf_issue = _resolve_selected_gtf(
+        reference,
+        annotation_gtf,
+        workflow_gtf,
+        require_workflow_gtf=bool(workflow_dirs),
+    )
+    if selected_gtf is None:
+        return _build_manual_gtf_needed_payload(
+            reference=reference,
+            metadata=metadata,
+            reason=gtf_issue or "No usable GTF could be resolved.",
+            output_prefix=output_prefix,
+            output_root=output_root,
+            annotation_evidence=annotation_evidence,
+        )
+
+    return _build_preflight_ready_payload(
+        reference=reference,
+        metadata=metadata,
+        selected_gtf=selected_gtf,
+        gtf_source=gtf_source,
+        annotation_evidence=annotation_evidence,
+        output_prefix=output_prefix,
+        output_root=output_root,
+        threads=threads,
+        gene_prefix=gene_prefix,
+        tx_prefix=tx_prefix,
+        id_tag=id_tag,
+        gene_tag=gene_tag,
+        exon_merge_distance=exon_merge_distance,
+        min_tpm=min_tpm,
+        min_samples=min_samples,
+        filter_known=filter_known,
+    )
+
+
 def _write_inputs_manifest(workflow_dir: Path, metadata: list[dict], symlinks: list[dict], output_prefix: str) -> Path:
     output_dir = workflow_dir / "output"
     manifest_path = output_dir / f"{output_prefix}.inputs.tsv"
@@ -510,6 +668,35 @@ def _write_inputs_manifest(workflow_dir: Path, metadata: list[dict], symlinks: l
     return manifest_path
 
 
+def _workflow_dirs_for_metadata(metadata: list[dict], fallback_workflow_dirs: list[Path]) -> list[Path]:
+    inferred: list[Path] = []
+    seen: set[Path] = set()
+
+    resolved_fallbacks = [path.expanduser().resolve() for path in fallback_workflow_dirs]
+    for item in metadata:
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        bam_path = Path(raw_path).expanduser().resolve()
+        workflow_dir: Path | None = None
+        if bam_path.parent.name == "annot":
+            workflow_dir = bam_path.parent.parent.resolve()
+        else:
+            for fallback in resolved_fallbacks:
+                try:
+                    bam_path.relative_to(fallback)
+                except ValueError:
+                    continue
+                workflow_dir = fallback
+                break
+        if workflow_dir is None or workflow_dir in seen:
+            continue
+        seen.add(workflow_dir)
+        inferred.append(workflow_dir)
+
+    return inferred
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Reconcile annotated BAM files across workflows.")
     parser.add_argument("--project-dir", default=".", help="Project directory containing workflow* folders.")
@@ -517,6 +704,7 @@ def main() -> int:
     parser.add_argument("--input-bam", action="append", default=[], help="Annotated BAM input path (repeatable).")
     parser.add_argument("--output-prefix", default="reconciled", help="Output prefix for generated artifacts.")
     parser.add_argument("--output-dir", default=".", help="Parent directory where reconcile workflow directory is created.")
+    parser.add_argument("--reference", help="Only reconcile BAMs for this reference genome (for example GRCh38, mm39, or mad1).")
     parser.add_argument("--annotation-gtf", help="Manual annotation GTF path. Only required when default resolution fails.")
     parser.add_argument("--gene-prefix", "--gene_prefix", dest="gene_prefix", default="CONSG", help="Consolidated novel gene ID prefix.")
     parser.add_argument("--tx-prefix", "--tx_prefix", dest="tx_prefix", default="CONST", help="Consolidated novel transcript ID prefix.")
@@ -538,7 +726,7 @@ def main() -> int:
         workflow_dirs = _discover_workflow_dirs(project_dir, list(args.workflow_dir or []))
         if args.workflow_dir:
             _validate_explicit_workflow_dirs(workflow_dirs)
-        output_root = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
+        output_root, explicit_workflow_dir = _resolve_output_root(project_dir, workflow_dirs, args.output_dir)
         output_root.mkdir(parents=True, exist_ok=True)
 
         input_bams: list[Path] = []
@@ -554,67 +742,95 @@ def main() -> int:
         if not input_bams:
             raise ReconcileInputError("No annotated BAM inputs found. Provide --input-bam or discoverable workflow annot outputs.")
 
+        payload: dict | None = None
         metadata = [_parse_bam_metadata(path) for path in input_bams]
+        requested_reference = _canonical_reference(args.reference) if args.reference else None
+        if requested_reference:
+            metadata = [item for item in metadata if _canonical_reference(item["reference"]) == requested_reference]
+            if not metadata:
+                raise ReconcileInputError(
+                    f"No annotated BAM inputs matched requested reference '{requested_reference}'."
+                )
+
         references = {_canonical_reference(item["reference"]) for item in metadata}
         if len(references) != 1:
-            raise ReconcileInputError(f"Mixed BAM references detected: {sorted(references)}")
+            if args.preflight_only and not requested_reference:
+                reference_groups: list[dict] = []
+                for reference in sorted(references):
+                    group_metadata = [item for item in metadata if _canonical_reference(item["reference"]) == reference]
+                    group_workflow_dirs = _workflow_dirs_for_metadata(group_metadata, workflow_dirs)
+                    group_payload = _resolve_preflight_payload_for_reference(
+                        reference=reference,
+                        metadata=group_metadata,
+                        workflow_dirs=group_workflow_dirs,
+                        annotation_gtf=args.annotation_gtf,
+                        output_prefix=args.output_prefix,
+                        output_root=output_root,
+                        threads=args.threads,
+                        gene_prefix=args.gene_prefix,
+                        tx_prefix=args.tx_prefix,
+                        id_tag=args.id_tag,
+                        gene_tag=args.gene_tag,
+                        exon_merge_distance=args.exon_merge_distance,
+                        min_tpm=args.min_tpm,
+                        min_samples=args.min_samples,
+                        filter_known=args.filter_known,
+                    )
+                    if group_payload.get("status") != "preflight_ready":
+                        payload = group_payload
+                        break
+                    reference_groups.append(group_payload)
+                if payload is None:
+                    payload = {
+                        "success": True,
+                        "status": "split_by_reference",
+                        "message": "Multiple BAM references detected. Reconcile will run as separate workflows for each reference.",
+                        "reference_groups": reference_groups,
+                        "outputs": {
+                            "output_prefix": args.output_prefix,
+                            "output_root": str(output_root),
+                            "artifacts": [],
+                        },
+                    }
+            else:
+                raise ReconcileInputError(f"Mixed BAM references detected: {sorted(references)}")
+
+        if payload is not None:
+            if args.json:
+                print(json.dumps(payload, indent=2))
+            else:
+                print(payload.get("message") or payload.get("status") or "ok")
+            return 0
+
         reference = next(iter(references))
-
-        workflow_gtf, annotation_evidence, workflow_gtf_issue = _discover_workflow_annotation_gtf(workflow_dirs, reference)
-        if workflow_gtf_issue:
-            raise ReconcileInputError(workflow_gtf_issue)
-
-        selected_gtf, gtf_source, gtf_issue = _resolve_selected_gtf(
-            reference,
-            args.annotation_gtf,
-            workflow_gtf,
-            require_workflow_gtf=bool(workflow_dirs),
+        selected_workflow_dirs = _workflow_dirs_for_metadata(metadata, workflow_dirs)
+        preflight_payload = _resolve_preflight_payload_for_reference(
+            reference=reference,
+            metadata=metadata,
+            workflow_dirs=selected_workflow_dirs,
+            annotation_gtf=args.annotation_gtf,
+            output_prefix=args.output_prefix,
+            output_root=output_root,
+            threads=args.threads,
+            gene_prefix=args.gene_prefix,
+            tx_prefix=args.tx_prefix,
+            id_tag=args.id_tag,
+            gene_tag=args.gene_tag,
+            exon_merge_distance=args.exon_merge_distance,
+            min_tpm=args.min_tpm,
+            min_samples=args.min_samples,
+            filter_known=args.filter_known,
         )
-        if selected_gtf is None:
-            payload = _build_manual_gtf_needed_payload(
-                reference=reference,
-                metadata=metadata,
-                reason=gtf_issue or "No usable GTF could be resolved.",
-                output_prefix=args.output_prefix,
-                output_root=output_root,
-                annotation_evidence=annotation_evidence,
-            )
+        if preflight_payload.get("status") != "preflight_ready":
+            payload = preflight_payload
         elif args.preflight_only:
-            payload = {
-                "success": True,
-                "status": "preflight_ready",
-                "message": "Reconcile preflight validation passed. Ready for approval.",
-                "reference": reference,
-                "gtf": {
-                    "path": str(selected_gtf),
-                    "source": gtf_source,
-                },
-                "annotation_evidence": annotation_evidence,
-                "inputs": {
-                    "count": len(metadata),
-                    "bams": metadata,
-                },
-                "execution_defaults": {
-                    "script_id": "reconcile_bams/reconcile_bams",
-                    "underlying_script_id": "reconcile_bams/reconcileBams",
-                    "gene_prefix": args.gene_prefix,
-                    "tx_prefix": args.tx_prefix,
-                    "id_tag": args.id_tag,
-                    "gene_tag": args.gene_tag,
-                    "threads": int(args.threads),
-                    "exon_merge_distance": int(args.exon_merge_distance),
-                    "min_tpm": float(args.min_tpm),
-                    "min_samples": int(args.min_samples),
-                    "filter_known": bool(args.filter_known),
-                },
-                "outputs": {
-                    "output_prefix": args.output_prefix,
-                    "output_root": str(output_root),
-                    "artifacts": [],
-                },
-            }
+            payload = preflight_payload
         else:
-            workflow_dir = _ensure_reconcile_workflow_dir(output_root)
+            gtf_info = preflight_payload.get("gtf") or {}
+            selected_gtf = Path(str(gtf_info.get("path") or "")).expanduser().resolve()
+            gtf_source = str(gtf_info.get("source") or "")
+            annotation_evidence = preflight_payload.get("annotation_evidence") or []
+            workflow_dir = _ensure_reconcile_workflow_dir(output_root, explicit_workflow_dir=explicit_workflow_dir)
             symlinks = _create_symlinks(workflow_dir, [Path(item["path"]) for item in metadata])
 
             manifest_path = _write_inputs_manifest(workflow_dir, metadata, symlinks, args.output_prefix)

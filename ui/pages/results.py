@@ -47,6 +47,7 @@ def _status_badge(status: str) -> str:
         "FAILED": "❌ Failed",
         "RUNNING": "⏳ Running",
         "PENDING": "⏳ Pending",
+        "STALE": "⚠️ Stale",
         "CANCELLED": "🛑 Cancelled",
         "DELETED": "🗑️ Deleted",
     }.get(normalized, f"❓ {normalized.title()}")

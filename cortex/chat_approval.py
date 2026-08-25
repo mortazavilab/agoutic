@@ -5,6 +5,7 @@ and plan step advancement — extracted from *app.py* for clarity.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import os
@@ -251,6 +252,12 @@ async def _ensure_workflow_plan_approval_gate(
     if current_step.get("kind") != "REQUEST_APPROVAL" or current_step.get("status") != "WAITING_APPROVAL":
         return None
 
+    auto_approve_reconcile = bool(
+        payload.get("plan_type") == "reconcile_bams"
+        and current_step.get("auto_approve_from_shared_reconcile_authorization")
+        and payload.get("shared_reconcile_approval_granted")
+    )
+
     existing_gate = session.execute(
         select(ProjectBlock)
         .where(
@@ -262,10 +269,31 @@ async def _ensure_workflow_plan_approval_gate(
         .order_by(ProjectBlock.seq.desc())
     ).scalar_one_or_none()
     if existing_gate is not None:
+        if auto_approve_reconcile:
+            existing_gate_payload = get_block_payload(existing_gate)
+            existing_gate_payload["auto_approved"] = True
+            existing_gate_payload["shared_reconcile_approval_gate_id"] = payload.get("shared_reconcile_approval_gate_id")
+            existing_gate.status = "APPROVED"
+            existing_gate.payload_json = json.dumps(existing_gate_payload)
+            session.commit()
+            session.refresh(existing_gate)
+            _mark_workflow_plan_approval_complete(session, workflow_block, existing_gate.id)
+            _advance_workflow_plan_to_step_kind(
+                session,
+                workflow_block,
+                kind="RUN_SCRIPT",
+                approval_gate_id=existing_gate.id,
+            )
+            from cortex import workflow_submission
+
+            asyncio.create_task(workflow_submission.submit_job_after_approval(workflow_block.project_id, existing_gate.id))
+            sync_project_tasks(session, workflow_block.project_id)
         return existing_gate
 
     plan_specific_context = (
-        _build_reconcile_plan_approval_context(workflow_block)
+        _build_wf_pore_c_plan_approval_context(workflow_block)
+        or _build_haplotype_with_vcf_plan_approval_context(workflow_block)
+        or _build_reconcile_plan_approval_context(workflow_block)
         or _build_compare_region_overlap_approval_context(workflow_block)
     )
     if plan_specific_context is not None:
@@ -274,6 +302,18 @@ async def _ensure_workflow_plan_approval_gate(
         gate_skill = plan_specific_context["skill"]
         gate_label = plan_specific_context["label"]
         cache_preflight = plan_specific_context.get("cache_preflight")
+    elif payload.get("plan_type") == "run_dogme_batch":
+        extracted_params = {
+            "batch_id": payload.get("batch_id") or workflow_block.id,
+            "batch_samples": payload.get("batch_samples") or [],
+            "shared_params": payload.get("shared_params") or {},
+            "requested_max_parallel": payload.get("requested_max_parallel"),
+            "retry_of_batch_id": payload.get("retry_of_batch_id"),
+        }
+        gate_action = "job"
+        gate_skill = payload.get("skill") or "analyze_local_sample"
+        gate_label = f"Do you authorize DOGME for {len(extracted_params['batch_samples'])} samples?"
+        cache_preflight = None
     else:
         extracted_params = await job_parameters.extract_job_parameters_from_conversation(session, workflow_block.project_id)
         gate_action = "job"
@@ -302,14 +342,31 @@ async def _ensure_workflow_plan_approval_gate(
             "skill": gate_skill,
             "model": model_name,
             "workflow_block_id": workflow_block.id,
+            **({
+                "auto_approved": True,
+                "shared_reconcile_approval_gate_id": payload.get("shared_reconcile_approval_gate_id"),
+            } if auto_approve_reconcile else {}),
         },
-        status="PENDING",
+        status="APPROVED" if auto_approve_reconcile else "PENDING",
         owner_id=owner_id,
     )
     gate_block.parent_id = workflow_block.id
     session.commit()
     session.refresh(gate_block)
     sync_project_tasks(session, workflow_block.project_id)
+
+    if auto_approve_reconcile:
+        _mark_workflow_plan_approval_complete(session, workflow_block, gate_block.id)
+        _advance_workflow_plan_to_step_kind(
+            session,
+            workflow_block,
+            kind="RUN_SCRIPT",
+            approval_gate_id=gate_block.id,
+        )
+        from cortex import workflow_submission
+
+        asyncio.create_task(workflow_submission.submit_job_after_approval(workflow_block.project_id, gate_block.id))
+
     return gate_block
 
 
@@ -434,6 +491,38 @@ def _mark_workflow_plan_approval_complete(session, workflow_block: ProjectBlock,
         return
 
 
+def _apply_shared_reconcile_approval(
+    session,
+    workflow_block: ProjectBlock,
+    gate_block_id: str,
+) -> None:
+    """Record that the first shared reconcile approval covers later per-reference approvals."""
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "reconcile_bams":
+        return
+
+    changed = False
+    if payload.get("shared_reconcile_approval_granted") is not True:
+        payload["shared_reconcile_approval_granted"] = True
+        changed = True
+    if payload.get("shared_reconcile_approval_gate_id") != gate_block_id:
+        payload["shared_reconcile_approval_gate_id"] = gate_block_id
+        changed = True
+    for step in payload.get("steps", []):
+        if step.get("kind") != "REQUEST_APPROVAL":
+            continue
+        if not step.get("auto_approve_from_shared_reconcile_authorization"):
+            continue
+        if step.get("status") not in {"PENDING", "WAITING_APPROVAL"}:
+            continue
+        step["shared_reconcile_approval_gate_id"] = gate_block_id
+        step["shared_reconcile_approval_granted"] = True
+        changed = True
+
+    if changed:
+        _persist_workflow_plan(session, workflow_block, payload)
+
+
 def _advance_workflow_plan_to_step_kind(
     session,
     workflow_block: ProjectBlock,
@@ -456,6 +545,38 @@ def _advance_workflow_plan_to_step_kind(
         return
 
 
+def _build_wf_pore_c_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    """Build a wf-pore-c dry-run approval payload directly from plan state."""
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "run_wf_pore_c":
+        return None
+
+    extracted_params = {
+        "workflow_key": "wf_pore_c",
+        "workflow_repo": payload.get("workflow_repo") or "epi2me-labs/wf-pore-c",
+        "workflow_version": payload.get("workflow_version") or "v1.3.1",
+        "report_filename": payload.get("report_filename") or "wf-pore-c-report.html",
+        "preview_only": True,
+        "sample_name": payload.get("sample_name") or "pore_c_sample",
+        "sample": payload.get("sample") or payload.get("sample_name") or "pore_c_sample",
+        "input_type": payload.get("input_type") or "",
+        "file_path": payload.get("file_path") or payload.get("source_path") or payload.get("input_directory") or "",
+        "input_directory": payload.get("input_directory") or payload.get("source_path") or payload.get("file_path") or "",
+        "reference_fasta": payload.get("reference_fasta") or "",
+        "vcf": payload.get("vcf") or "",
+        "sample_sheet": payload.get("sample_sheet") or "",
+        "cutter": payload.get("cutter") or "NlaIII",
+        "output_directory": payload.get("output_directory") or "",
+        "output_flags": dict(payload.get("output_flags") or {}),
+    }
+    return {
+        "label": "Do you want to generate the wf-pore-c dry-run preview?",
+        "gate_action": "workflow_dry_run_preview",
+        "skill": "run_wf_pore_c",
+        "extracted_params": extracted_params,
+    }
+
+
 def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
     """Build a reconcile-specific approval gate payload from plan state."""
     from cortex.plan_replanner import _extract_reconcile_preflight_payload
@@ -463,6 +584,23 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
     payload = get_block_payload(workflow_block)
     if payload.get("plan_type") != "reconcile_bams":
         return None
+
+    current_step_id = payload.get("current_step_id")
+    current_approval_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("id") == current_step_id and step.get("kind") == "REQUEST_APPROVAL"
+        ),
+        None,
+    )
+    if not isinstance(current_approval_step, dict):
+        current_approval_step = next(
+            (
+                step for step in payload.get("steps", [])
+                if step.get("kind") == "REQUEST_APPROVAL" and step.get("status") in {"WAITING_APPROVAL", "PENDING"}
+            ),
+            None,
+        )
 
     preflight_step = next(
         (
@@ -472,13 +610,26 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         None,
     )
     run_step = next(
-        (step for step in payload.get("steps", []) if step.get("kind") == "RUN_SCRIPT"),
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "RUN_SCRIPT"
+            and (
+                not isinstance(current_approval_step, dict)
+                or current_approval_step.get("id") in (step.get("depends_on") or [])
+            )
+        ),
         None,
     )
     if not isinstance(run_step, dict):
         return None
 
-    preflight_payload = _extract_reconcile_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+    if isinstance(current_approval_step, dict) and isinstance(current_approval_step.get("preflight_summary"), dict):
+        preflight_payload = current_approval_step.get("preflight_summary")
+    elif isinstance(run_step.get("preflight_summary"), dict):
+        preflight_payload = run_step.get("preflight_summary")
+    else:
+        preflight_payload = _extract_reconcile_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+
     tool_call = next(
         (
             call for call in (run_step.get("tool_calls") or [])
@@ -490,6 +641,7 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
     script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
 
     output_root = payload.get("output_directory")
+    current_step_output_directory = current_approval_step.get("output_directory") if isinstance(current_approval_step, dict) else None
     output_prefix = payload.get("output_prefix") or "reconciled"
     reference = None
     annotation_gtf = None
@@ -515,8 +667,73 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
             output_root = outputs_info.get("output_root") or output_root
             output_prefix = outputs_info.get("output_prefix") or output_prefix
 
+    run_step_output_directory = run_step.get("output_directory") if isinstance(run_step, dict) else None
+    effective_output_directory = str(current_step_output_directory or run_step_output_directory or output_root or "").strip() or None
+    approved_references = []
+    if isinstance(current_approval_step, dict):
+        approved_references = current_approval_step.get("approved_references") or []
+    if not approved_references:
+        approved_references = payload.get("reference_groups") or []
+    shared_reconcile_authorization = bool(
+        isinstance(current_approval_step, dict)
+        and current_approval_step.get("shared_reconcile_authorization")
+    )
+    reconcile_runs: list[dict] = []
+    if shared_reconcile_authorization:
+        for approval_step in payload.get("steps", []):
+            if not isinstance(approval_step, dict) or approval_step.get("kind") != "REQUEST_APPROVAL":
+                continue
+            step_preflight = approval_step.get("preflight_summary")
+            if not isinstance(step_preflight, dict):
+                continue
+            step_reference = str(step_preflight.get("reference") or "").strip()
+            if not step_reference:
+                continue
+            matching_run_step = next(
+                (
+                    step for step in payload.get("steps", [])
+                    if isinstance(step, dict)
+                    and step.get("kind") == "RUN_SCRIPT"
+                    and approval_step.get("id") in (step.get("depends_on") or [])
+                ),
+                None,
+            )
+            run_tool_call = next(
+                (
+                    call for call in ((matching_run_step or {}).get("tool_calls") or [])
+                    if call.get("tool") == "run_allowlisted_script"
+                ),
+                None,
+            )
+            run_params = dict((run_tool_call or {}).get("params") or {})
+            run_script_args = run_params.get("script_args") if isinstance(run_params.get("script_args"), list) else []
+            step_outputs = step_preflight.get("outputs") or {}
+            step_gtf = step_preflight.get("gtf") or {}
+            step_inputs = step_preflight.get("inputs") or {}
+            step_bam_inputs = step_inputs.get("bams") if isinstance(step_inputs.get("bams"), list) else []
+            step_output_prefix = step_outputs.get("output_prefix") or output_prefix
+            step_output_directory = str(
+                approval_step.get("output_directory")
+                or ((matching_run_step or {}).get("output_directory") if isinstance(matching_run_step, dict) else "")
+                or step_outputs.get("output_root")
+                or ""
+            ).strip() or None
+            reconcile_runs.append(
+                {
+                    "reference": step_reference,
+                    "output_directory": step_output_directory,
+                    "output_prefix": step_output_prefix,
+                    "annotation_gtf": step_gtf.get("path"),
+                    "annotation_gtf_source": step_gtf.get("source"),
+                    "bam_inputs": step_bam_inputs,
+                    "bam_count": len(step_bam_inputs),
+                    "script_args": run_script_args,
+                }
+            )
+
     extracted_params = {
         "plan_type": "reconcile_bams",
+        "workflow_key": "reconcile_bams",
         "workflow_block_id": workflow_block.id,
         "run_type": "script",
         "script_id": params.get("script_id"),
@@ -527,10 +744,13 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "mode": "RNA",
         "input_type": "bam",
         "input_directory": output_root or ".",
-        "output_directory": output_root,
+        "output_directory": effective_output_directory,
         "output_prefix": output_prefix,
         "reference_genome": [reference] if reference else [],
         "reference": reference,
+        "approve_all_references": shared_reconcile_authorization,
+        "approved_references": approved_references,
+        "reconcile_runs": reconcile_runs,
         "annotation_gtf": annotation_gtf,
         "annotation_gtf_source": annotation_gtf_source,
         "annotation_evidence": annotation_evidence,
@@ -549,12 +769,198 @@ def _build_reconcile_plan_approval_context(workflow_block: ProjectBlock) -> dict
         "preflight_summary": preflight_payload,
         "gate_action": "reconcile_bams",
     }
+    if shared_reconcile_authorization and approved_references:
+        gate_label = (
+            "Do you authorize the Agent to reconcile these annotated BAMs across all detected genomes "
+            f"({', '.join(approved_references)})?"
+        )
+    else:
+        gate_label = "Do you authorize the Agent to reconcile these annotated BAMs?"
     return {
-        "label": "Do you authorize the Agent to reconcile these annotated BAMs?",
+        "label": gate_label,
         "extracted_params": extracted_params,
         "cache_preflight": None,
         "gate_action": "reconcile_bams",
         "skill": "reconcile_bams",
+    }
+
+
+def _extract_haplotype_preflight_payload(results: list | dict) -> dict | None:
+    items = results if isinstance(results, list) else [results]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool") != "run_allowlisted_script":
+            continue
+        result_data = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if result_data.get("script_id") != "haplotype_with_vcf/haplotype_with_vcf":
+            continue
+        stdout_payload = result_data.get("stdout")
+        if not isinstance(stdout_payload, str) or not stdout_payload.strip():
+            continue
+        try:
+            parsed = json.loads(stdout_payload)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _build_haplotype_with_vcf_plan_approval_context(workflow_block: ProjectBlock) -> dict | None:
+    payload = get_block_payload(workflow_block)
+    if payload.get("plan_type") != "haplotype_with_vcf":
+        return None
+
+    current_step_id = payload.get("current_step_id")
+    current_approval_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("id") == current_step_id and step.get("kind") == "REQUEST_APPROVAL"
+        ),
+        None,
+    )
+    if not isinstance(current_approval_step, dict):
+        current_approval_step = next(
+            (
+                step for step in payload.get("steps", [])
+                if step.get("kind") == "REQUEST_APPROVAL" and step.get("status") in {"WAITING_APPROVAL", "PENDING"}
+            ),
+            None,
+        )
+
+    preflight_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "CHECK_EXISTING" and step.get("status") == "COMPLETED"
+        ),
+        None,
+    )
+    run_step = next(
+        (
+            step for step in payload.get("steps", [])
+            if step.get("kind") == "RUN_SCRIPT"
+            and (
+                not isinstance(current_approval_step, dict)
+                or current_approval_step.get("id") in (step.get("depends_on") or [])
+            )
+        ),
+        None,
+    )
+    if not isinstance(run_step, dict):
+        return None
+
+    if isinstance(current_approval_step, dict) and isinstance(current_approval_step.get("preflight_summary"), dict):
+        preflight_payload = current_approval_step.get("preflight_summary")
+    elif isinstance(run_step.get("preflight_summary"), dict):
+        preflight_payload = run_step.get("preflight_summary")
+    else:
+        preflight_payload = _extract_haplotype_preflight_payload(preflight_step.get("result")) if isinstance(preflight_step, dict) else None
+
+    tool_call = next(
+        (
+            call for call in (run_step.get("tool_calls") or [])
+            if call.get("tool") == "run_allowlisted_script"
+        ),
+        None,
+    )
+    params = dict((tool_call or {}).get("params") or {})
+    script_args = params.get("script_args") if isinstance(params.get("script_args"), list) else []
+
+    execution_defaults = {}
+    vcf_info = {}
+    label_info = {}
+    thresholds = {}
+    bam_inputs = []
+    mode = str(payload.get("input_type") or "").strip() or None
+    reference_genome = str(payload.get("reference_genome") or "").strip() or None
+    vcf_defaulted = bool(payload.get("vcf_defaulted"))
+    assignment_mode = None
+    outputs_info = {}
+    if isinstance(preflight_payload, dict):
+        execution_defaults = preflight_payload.get("execution_defaults") or {}
+        vcf_info = preflight_payload.get("vcf") or {}
+        label_info = preflight_payload.get("labels") or {}
+        thresholds = preflight_payload.get("thresholds") or {}
+        inputs_info = preflight_payload.get("inputs") or {}
+        if isinstance(inputs_info, dict):
+            bam_inputs = inputs_info.get("bams") or []
+        outputs_info = preflight_payload.get("outputs") or {}
+        mode = str(preflight_payload.get("mode") or mode or "").strip() or None
+        assignment_mode = preflight_payload.get("assignment_mode")
+
+    output_directory = str(
+        (current_approval_step or {}).get("output_directory")
+        or run_step.get("output_directory")
+        or outputs_info.get("output_root")
+        or payload.get("output_directory")
+        or ""
+    ).strip() or None
+    first_input_dir = None
+    if bam_inputs:
+        first_input = bam_inputs[0]
+        if isinstance(first_input, dict):
+            first_input_dir = str(first_input.get("workflow_dir") or Path(str(first_input.get("path") or "")).parent)
+
+    bam_names = []
+    for item in bam_inputs:
+        if not isinstance(item, dict):
+            continue
+        bam_names.append(str(item.get("name") or Path(str(item.get("path") or "")).name))
+    displayed_names = ", ".join(bam_names[:4])
+    if len(bam_names) > 4:
+        displayed_names = f"{displayed_names}, +{len(bam_names) - 4} more"
+
+    extracted_params = {
+        "plan_type": "haplotype_with_vcf",
+        "workflow_key": "haplotype_with_vcf",
+        "workflow_block_id": workflow_block.id,
+        "run_type": "script",
+        "script_id": params.get("script_id") or "haplotype_with_vcf/haplotype_with_vcf",
+        "script_path": params.get("script_path"),
+        "script_args": script_args,
+        "script_working_directory": params.get("script_working_directory"),
+        "sample_name": "haplotype_with_vcf",
+        "mode": mode,
+        "reference_genome": reference_genome,
+        "input_type": "bam",
+        "input_directory": first_input_dir or ".",
+        "output_directory": output_directory,
+        "vcf_path": vcf_info.get("path"),
+        "vcf_defaulted": vcf_defaulted,
+        "vcf_available_samples": vcf_info.get("available_samples") or [],
+        "vcf_selected_samples": vcf_info.get("selected_samples") or [],
+        "vcf_selected_sample_sources": vcf_info.get("selected_sample_sources") or {},
+        "assignment_mode": assignment_mode,
+        "assignment_labels": label_info.get("assignment_labels") or [],
+        "label_a": label_info.get("label_a"),
+        "label_b": label_info.get("label_b"),
+        "ambiguous_label": label_info.get("ambiguous"),
+        "bam_inputs": bam_inputs,
+        "bam_count": len(bam_inputs),
+        "min_informative_sites": thresholds.get("min_informative_sites"),
+        "min_mapq": thresholds.get("min_mapq"),
+        "progress_read_interval": execution_defaults.get("progress_read_interval") or 100000,
+        "timeout_seconds": params.get("timeout_seconds"),
+        "underlying_script_id": execution_defaults.get("underlying_script_id") or "haplotype_with_vcf/haplotype_with_vcf",
+        "preflight_summary": preflight_payload,
+        "gate_action": "haplotype_with_vcf",
+    }
+
+    gate_label = f"Do you authorize the Agent to haplotype these {mode or 'selected'} BAMs with the selected VCF?"
+    if vcf_defaulted and reference_genome:
+        gate_label = (
+            f"Do you authorize the Agent to haplotype these {mode or 'selected'} BAMs "
+            f"with the default {reference_genome} founder VCF?"
+        )
+    if displayed_names:
+        gate_label = f"{gate_label} BAMs: {displayed_names}"
+    return {
+        "label": gate_label,
+        "extracted_params": extracted_params,
+        "cache_preflight": None,
+        "gate_action": "haplotype_with_vcf",
+        "skill": "haplotype_with_vcf",
     }
 
 

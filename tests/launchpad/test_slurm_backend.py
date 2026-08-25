@@ -1,11 +1,16 @@
+import asyncio
+
 import pytest
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+from launchpad import config as launchpad_config
 from launchpad.backends.slurm_backend import SlurmBackend
-from launchpad.backends.base import SubmitParams
 from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.config import JobStatus
+from launchpad.backends.base import SubmitParams
+from launchpad.workflow_executors import get_workflow_executor
 
 
 class _FakeConn:
@@ -39,11 +44,41 @@ class _FakeWriteConn:
         self.mkdir_calls = []
         self.run_calls = []
 
+    async def path_exists(self, path):
+        return False
+
     async def mkdir_p(self, path):
         self.mkdir_calls.append(path)
 
     async def run(self, command, check=False):
         self.run_calls.append((command, check))
+
+
+class _FakeSubmitConn:
+    def __init__(self):
+        self.existing_paths = set()
+        self.mkdir_calls = []
+        self.run_calls = []
+        self.run_checked_calls = []
+        self.closed = False
+
+    async def path_exists(self, path):
+        return path in self.existing_paths
+
+    async def mkdir_p(self, path):
+        self.mkdir_calls.append(path)
+        self.existing_paths.add(path)
+
+    async def run(self, command, check=False):
+        self.run_calls.append((command, check))
+        return SimpleNamespace(stdout="", stderr="", exit_status=0)
+
+    async def run_checked(self, command):
+        self.run_checked_calls.append(command)
+        return "12345"
+
+    async def close(self):
+        self.closed = True
 
 
 @pytest.mark.asyncio
@@ -163,48 +198,209 @@ async def test_stage_sample_inputs_uses_async_signature_and_fingerprint_helpers(
 
 
 @pytest.mark.asyncio
-async def test_ensure_workflow_input_links_uses_unmapped_alias_for_bam_remap():
-    backend = SlurmBackend()
+async def test_dogme_remote_stage_inputs_uses_unmapped_alias_for_bam_remap():
+    executor = get_workflow_executor("dogme")
     params = SubmitParams(
         sample_name="C2C12r1",
         input_type="bam",
         entry_point="remap",
+        data_cache_path="/remote/cache/fingerprint1234",
+        remote_work_dir="/remote/project/workflow1",
     )
     conn = _FakeWriteConn()
 
-    await backend._ensure_workflow_input_links(
-        conn=conn,
+    stage_result = await executor.remote_stage_inputs(
+        request=params,
         params=params,
-        remote_work="/remote/project/workflow1",
-        remote_input="/remote/cache/fingerprint1234",
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
     )
 
     commands = [command for command, _ in conn.run_calls]
+    assert stage_result["workflow_remote_input"] == "/remote/project/workflow1/bams"
     assert any("rm -rf /remote/project/workflow1/bams" in command for command in commands)
     assert any("mkdir -p /remote/project/workflow1/bams" in command for command in commands)
     assert any("c2c12r1.unmapped.bam" in command for command in commands)
 
 
 @pytest.mark.asyncio
-async def test_ensure_workflow_input_links_preserves_default_linking_for_non_remap_bam():
-    backend = SlurmBackend()
+async def test_dogme_remote_stage_inputs_preserves_default_linking_for_non_remap_bam():
+    executor = get_workflow_executor("dogme")
     params = SubmitParams(
         sample_name="C2C12r1",
         input_type="bam",
         entry_point="annotateRNA",
+        data_cache_path="/remote/cache/fingerprint1234",
+        remote_work_dir="/remote/project/workflow1",
     )
     conn = _FakeWriteConn()
 
-    await backend._ensure_workflow_input_links(
-        conn=conn,
+    stage_result = await executor.remote_stage_inputs(
+        request=params,
         params=params,
-        remote_work="/remote/project/workflow1",
-        remote_input="/remote/cache/fingerprint1234",
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
     )
 
+    assert stage_result["workflow_remote_input"] == "/remote/project/workflow1/bams"
     assert conn.run_calls == [
         ("ln -sfn /remote/cache/fingerprint1234 /remote/project/workflow1/bams", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_dogme_remote_stage_inputs_uses_fastq_cdna_alias_for_fastq_input():
+    executor = get_workflow_executor("dogme")
+    params = SubmitParams(
+        sample_name="JamshidApproved",
+        input_type="fastq",
+        entry_point="fastqCDNA",
+        data_cache_path="/remote/cache/reads.fastq.gz",
+        remote_work_dir="/remote/project/workflow1",
+    )
+    conn = _FakeWriteConn()
+
+    stage_result = await executor.remote_stage_inputs(
+        request=params,
+        params=params,
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
+    )
+
+    commands = [command for command, _ in conn.run_calls]
+    assert stage_result["workflow_remote_input"] == "/remote/project/workflow1/fastqs"
+    assert any("JamshidApproved.fastq.gz" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_dogme_remote_stage_inputs_fastq_cdna_command_enforces_single_fastq_rule_for_directories():
+    executor = get_workflow_executor("dogme")
+    params = SubmitParams(
+        sample_name="JamshidApproved",
+        input_type="fastq",
+        entry_point="fastqCDNA",
+        data_cache_path="/remote/cache/fingerprint1234",
+        remote_work_dir="/remote/project/workflow1",
+    )
+    conn = _FakeWriteConn()
+
+    await executor.remote_stage_inputs(
+        request=params,
+        params=params,
+        profile=_make_profile(),
+        conn=conn,
+        run_uuid="run-1",
+    )
+
+    command = conn.run_calls[0][0]
+    assert "find /remote/cache/fingerprint1234" in command
+    assert "Dogme fastqCDNA currently supports one FASTQ file per sample" in command
+    assert "JamshidApproved.fastq.gz" in command
+
+
+@pytest.mark.asyncio
+async def test_submit_wf_pore_c_stages_executor_inputs_and_builds_remote_command(monkeypatch, tmp_path):
+    import launchpad.backends.slurm_backend as slurm_backend_module
+
+    backend = SlurmBackend()
+    conn = _FakeSubmitConn()
+    profile = _make_profile()
+    captured_sbatch = {}
+    sample_bam = tmp_path / "sample.bam"
+    sample_bam.write_text("bam", encoding="utf-8")
+    reference_fasta = tmp_path / "reference.fa"
+    reference_fasta.write_text(">chr1\nA\n", encoding="utf-8")
+    reference_fasta.with_suffix(reference_fasta.suffix + ".fai").write_text("chr1\t1\t0\t1\t2\n", encoding="utf-8")
+    sample_sheet = tmp_path / "sample_sheet.csv"
+    sample_sheet.write_text("sample,barcode\nA,1\n", encoding="utf-8")
+    vcf = tmp_path / "sample.vcf.gz"
+    vcf.write_text("##fileformat=VCFv4.2\n", encoding="utf-8")
+    params = SubmitParams(
+        project_id="proj-1",
+        project_slug="proj",
+        user_id="user-1",
+        sample_name="POREC_A",
+        workflow_key="wf_pore_c",
+        input_type="bam",
+        input_directory=str(sample_bam),
+        ssh_profile_id="profile-1",
+        remote_base_path="/remote/agoutic",
+        workflow_number=1,
+        reference_fasta=str(reference_fasta),
+        vcf=str(vcf),
+        sample_sheet=str(sample_sheet),
+        workflow_repo="epi2me-labs/wf-pore-c",
+        workflow_version="v1.3.1",
+        reference_genome=[],
+    )
+
+    async def _fake_validate_remote_paths(_conn, paths):
+        return {name: SimpleNamespace(error=None, exists=True, writable=True) for name in paths}
+
+    async def _fake_upload_inputs(**kwargs):
+        return {"ok": True, "message": "uploaded", "bytes_transferred": 1}
+
+    def _fail_dogme_config(**kwargs):
+        raise AssertionError("wf-pore-c remote submit should not invoke Dogme config generation")
+
+    real_generate_sbatch_script = slurm_backend_module.generate_sbatch_script
+
+    def _capture_generate_sbatch_script(**kwargs):
+        captured_sbatch.update(kwargs)
+        return real_generate_sbatch_script(**kwargs)
+
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+    monkeypatch.setattr(backend, "_load_profile", AsyncMock(return_value=profile))
+    monkeypatch.setattr(backend._ssh_manager, "connect", AsyncMock(return_value=conn))
+    monkeypatch.setattr("launchpad.workflow_executors.dogme.NextflowConfig.generate_config", _fail_dogme_config)
+    monkeypatch.setattr(slurm_backend_module, "generate_sbatch_script", _capture_generate_sbatch_script)
+    monkeypatch.setattr("launchpad.backends.slurm_backend.validate_remote_paths", _fake_validate_remote_paths)
+    monkeypatch.setattr("launchpad.backends.slurm_backend.check_all_paths_ok", lambda results: (True, []))
+    monkeypatch.setattr(
+        backend,
+        "_resolve_staging_cache",
+        AsyncMock(
+            return_value={
+                "remote_input": "/remote/agoutic/data/cache-input.bam",
+                "data_cache_path": "/remote/agoutic/data/cache-input.bam",
+                "remote_reference_paths": {},
+                "data_cache_status": "reused",
+                "reference_cache_statuses": {},
+                "detected_input_type": "bam",
+            }
+        ),
+    )
+    monkeypatch.setattr(backend, "_ensure_reference_assets_present", AsyncMock(return_value=({}, {})))
+    monkeypatch.setattr(backend, "_update_job_stage", AsyncMock(return_value=None))
+    monkeypatch.setattr(backend, "_update_job_slurm_info", AsyncMock(return_value=None))
+    monkeypatch.setattr("launchpad.backends.file_transfer.FileTransferManager.upload_inputs", AsyncMock(side_effect=_fake_upload_inputs))
+
+    run_uuid = await backend.submit("run-12345678", params)
+
+    assert run_uuid == "run-12345678"
+    assert params.remote_work_dir == "/remote/agoutic/proj/workflow1"
+    assert params.remote_output_dir == "/remote/agoutic/proj/workflow1/output"
+    assert params.remote_nextflow_work_dir == "/remote/agoutic/proj/.nextflow-work/wf-pore-c/workflow1"
+
+    commands = [command for command, _ in conn.run_calls]
+    assert any("/remote/agoutic/proj/workflow1/.agoutic/wf-pore-c/remote-submit-config.json" in command for command in commands)
+    submit_script = next(command for command, _ in conn.run_calls if "submit_run-1234.sh" in command)
+    normalized_nf_command = captured_sbatch["nextflow_command"].replace(" \\\n+    ", " ")
+    assert '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}"' in normalized_nf_command
+    assert "epi2me-labs/wf-pore-c -r v1.3.1" in normalized_nf_command
+    assert "--bam /remote/agoutic/proj/workflow1/.agoutic/wf-pore-c/staged-inputs/input/cache-input.bam" in normalized_nf_command
+    assert "--ref /remote/agoutic/ref/wf-pore-c/" in normalized_nf_command
+    assert "--sample_sheet /remote/agoutic/data/wf-pore-c/sample-sheet/" in normalized_nf_command
+    assert "--vcf /remote/agoutic/data/wf-pore-c/vcf/" in normalized_nf_command
+    assert "-work-dir /remote/agoutic/proj/.nextflow-work/wf-pore-c/workflow1" in normalized_nf_command
+    assert captured_sbatch["container_cache_dir"] == "/remote/agoutic"
+    assert "export NXF_APPTAINER_CACHEDIR=/remote/agoutic/.nxf-apptainer-cache" in submit_script
+    assert 'export NXF_SYNTAX_PARSER="${NXF_SYNTAX_PARSER:-v1}"' in submit_script
+    assert "dogme.profile" not in normalized_nf_command
+    assert all("dogme.profile" not in command for command in commands)
 
 
 class _FakeStageConn:
@@ -690,6 +886,23 @@ def test_result_sync_include_patterns_cover_required_folders_and_file_types():
     assert "*.tsv" in patterns
 
 
+def test_result_sync_include_patterns_cover_wf_pore_c_tree(monkeypatch):
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+
+    patterns = SlurmBackend._build_result_sync_include_patterns("wf_pore_c")
+
+    assert "pairs/***" in patterns
+    assert "cooler/***" in patterns
+    assert "hi-c/***" in patterns
+    assert "ingress_results/***" in patterns
+    assert "paired_end/***" in patterns
+    assert "paireds/***" in patterns
+    assert "chromunity/***" in patterns
+    assert "filtered_out/***" in patterns
+    assert "wf-pore-c-report.html" in patterns
+    assert ".agoutic.workflow.json" in patterns
+
+
 def test_needs_local_result_copy_only_for_local_or_both_destinations():
     remote_only = SimpleNamespace(result_destination="remote", remote_work_dir="/remote/workflow2", nextflow_work_dir="/local/workflow2")
     local_dest = SimpleNamespace(result_destination="local", remote_work_dir="/remote/workflow2", nextflow_work_dir="/local/workflow2")
@@ -1116,6 +1329,184 @@ async def test_copy_selected_results_falls_back_to_workflow_root_when_output_dir
 
 
 @pytest.mark.asyncio
+async def test_copy_selected_results_syncs_wf_pore_c_output_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        workflow_key="wf_pore_c",
+        nextflow_work_dir=str(tmp_path / "workflow-pore-c"),
+        remote_work_dir="/remote/workflow-pore-c",
+        remote_output_dir="/remote/workflow-pore-c/output",
+        input_directory=str(tmp_path / "input"),
+    )
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_root = Path(job.nextflow_work_dir)
+    local_root.mkdir(parents=True, exist_ok=True)
+    download_calls = []
+
+    async def fake_discover(**kwargs):
+        assert kwargs["workflow_key"] == "wf_pore_c"
+        return {
+            "directories": ["pairs", "cooler", "ingress_results"],
+            "files": ["wf-pore-c-report.html"],
+        }
+
+    async def fake_update(*_args, **_kwargs):
+        return None
+
+    async def fake_download_outputs(**kwargs):
+        download_calls.append(kwargs)
+        remote_path = kwargs["remote_path"]
+        if remote_path.endswith("/pairs"):
+            (local_root / "pairs").mkdir(parents=True, exist_ok=True)
+        elif remote_path.endswith("/cooler"):
+            (local_root / "cooler").mkdir(parents=True, exist_ok=True)
+        elif remote_path.endswith("/ingress_results"):
+            (local_root / "ingress_results").mkdir(parents=True, exist_ok=True)
+        else:
+            (local_root / "wf-pore-c-report.html").write_text("<html></html>\n", encoding="utf-8")
+        return {"ok": True, "bytes_transferred": 42}
+
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fake_discover)
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-pore-c", job=job, profile=profile)
+
+    assert result["success"] is True
+    assert [call["remote_path"] for call in download_calls] == [
+        "/remote/workflow-pore-c/output/pairs",
+        "/remote/workflow-pore-c/output/cooler",
+        "/remote/workflow-pore-c/output/ingress_results",
+        "/remote/workflow-pore-c/output",
+    ]
+    assert download_calls[-1]["include_patterns"] == [
+        "wf-pore-c-report.html",
+        ".agoutic.workflow.json",
+        "*.html",
+        "*.txt",
+        "*.csv",
+        "*.tsv",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_results_to_local_retries_failed_wf_pore_c_copy_when_forced(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        workflow_key="wf_pore_c",
+        result_destination="local",
+        remote_work_dir="/remote/workflow9",
+        remote_output_dir="/remote/workflow9/output",
+        nextflow_work_dir="/local/workflow9",
+        transfer_state="transfer_failed",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+        status="FAILED",
+    )
+    updates = []
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_update_job_fields(_run_uuid, fields):
+        updates.append(fields)
+        for key, value in fields.items():
+            setattr(job, key, value)
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend, "_copy_selected_results_to_local", AsyncMock(return_value=None))
+
+    result = await backend.sync_results_to_local(run_uuid="run-9", force=True)
+
+    assert result["success"] is True
+    assert result["status"] == "sync_started"
+    assert result["transfer_state"] == "downloading_outputs"
+    assert updates[-1]["transfer_state"] == "downloading_outputs"
+    assert updates[-1]["status"] == JobStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_copy_selected_results_full_copy_uses_remote_workflow_root(tmp_path, monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    local_work_dir = tmp_path / "workflow8"
+    local_work_dir.mkdir()
+    job = SimpleNamespace(
+        remote_work_dir="/remote/workflow8",
+        nextflow_work_dir=str(local_work_dir),
+        input_directory="/input/pod5",
+        imported_copy_mode="full",
+    )
+
+    download_calls = []
+
+    async def fake_download_outputs(**kwargs):
+        download_calls.append(kwargs["remote_path"])
+        (local_work_dir / "nextflow.config").write_text("ok\n", encoding="utf-8")
+        return {"ok": True, "message": "ok", "bytes_transferred": 123}
+
+    async def fake_update(*_args, **_kwargs):
+        return None
+
+    async def fail_discover(**_kwargs):
+        raise AssertionError("artifact discovery should not run for full-copy imports")
+
+    monkeypatch.setattr(backend._transfer_manager, "download_outputs", fake_download_outputs)
+    monkeypatch.setattr(backend, "_update_job_transfer_state", fake_update)
+    monkeypatch.setattr(backend, "_discover_remote_result_artifacts", fail_discover)
+    monkeypatch.setattr(backend, "_resolve_local_symlinks", lambda **_kwargs: None)
+
+    result = await backend._copy_selected_results_to_local(run_uuid="run-8", job=job, profile=profile)
+
+    assert result["success"] is True
+    assert download_calls == ["/remote/workflow8"]
+
+
+@pytest.mark.asyncio
 async def test_sync_results_to_local_returns_not_applicable_for_remote_only_destination(monkeypatch):
     backend = SlurmBackend()
     job = SimpleNamespace(
@@ -1171,6 +1562,10 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
     async def fake_load_profile(_profile_id, _user_id):
         return profile
 
+    async def fake_update_job_fields(_run_uuid, fields):
+        for key, value in fields.items():
+            setattr(job, key, value)
+
     async def fake_copy(*, run_uuid, job, profile):
         return {
             "success": True,
@@ -1182,6 +1577,7 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
         }
 
     monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
     monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
     monkeypatch.setattr(backend, "_copy_selected_results_to_local", fake_copy)
 
@@ -1194,9 +1590,199 @@ async def test_sync_results_to_local_retries_copy_when_force_enabled(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_sync_results_to_local_does_not_restart_while_sync_is_active(monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        result_destination="local",
+        remote_work_dir="/remote/workflow2",
+        nextflow_work_dir="/local/workflow2",
+        transfer_state="downloading_outputs",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+    )
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        raise AssertionError("active sync should not load a new profile")
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    backend._result_sync_tasks["run-2"] = active_task
+    try:
+        result = await backend.sync_results_to_local(run_uuid="run-2", force=True)
+    finally:
+        active_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await active_task
+        backend._result_sync_tasks.pop("run-2", None)
+
+    assert result["success"] is False
+    assert result["status"] == "sync_in_progress"
+    assert "already in progress" in result["message"]
+    assert "Wait for the current copy to finish" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_check_status_preserves_active_copyback_on_scheduler_poll_failure(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        slurm_job_id="50052940",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+        status="RUNNING",
+        progress_percent=0,
+        run_stage="completed",
+        slurm_state="COMPLETED",
+        transfer_state="downloading_outputs",
+        result_destination="local",
+        remote_work_dir="/remote/project/workflow2",
+        nextflow_work_dir="/local/project/workflow2",
+        workflow_usage_json={"cpu_queue_seconds": 120.0},
+        workflow_usage_synced_at=None,
+    )
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_connect(_profile):
+        raise ConnectionRefusedError(111, "Connection refused")
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", fake_connect)
+    backend._transfer_progress["run-2"] = {
+        "current_folder": "bams",
+        "folders_done": 1,
+        "folders_total": 4,
+        "current_file": "sample1.bam",
+        "files_done": 2,
+        "files_total": 5,
+    }
+
+    try:
+        result = await backend.check_status("run-2")
+    finally:
+        backend._transfer_progress.pop("run-2", None)
+
+    assert result.status == "RUNNING"
+    assert result.transfer_state == "downloading_outputs"
+    assert result.message == "bams/ (2/4 folders) — sample1.bam"
+    assert result.transfer_detail == "bams/ (2/4 folders) — sample1.bam"
+    assert result.progress_percent == 95
+    assert result.workflow_usage == {"cpu_queue_seconds": 120.0}
+    assert result.work_directory == "/local/project/workflow2"
+
+
+@pytest.mark.asyncio
+async def test_cancel_result_sync_marks_run_cancelled(monkeypatch):
+    backend = SlurmBackend()
+    job = SimpleNamespace(
+        remote_work_dir="/remote/workflow3",
+        nextflow_work_dir="/local/workflow3",
+        transfer_state="downloading_outputs",
+    )
+    updates = []
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_update_job_fields(_run_uuid, fields):
+        updates.append(fields)
+        for key, value in fields.items():
+            setattr(job, key, value)
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
+
+    active_task = asyncio.create_task(asyncio.Event().wait())
+    backend._result_sync_tasks["run-3"] = active_task
+
+    result = await backend.cancel_result_sync(run_uuid="run-3")
+
+    assert result["success"] is True
+    assert result["status"] == "sync_cancelled"
+    assert result["transfer_state"] == "sync_cancelled"
+    assert updates[-1]["status"] == JobStatus.CANCELLED
+    assert updates[-1]["transfer_state"] == "sync_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_sync_results_to_local_resets_cancelled_status_before_restart(monkeypatch):
+    backend = SlurmBackend()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+    job = SimpleNamespace(
+        result_destination="local",
+        remote_work_dir="/remote/workflow4",
+        nextflow_work_dir="/local/workflow4",
+        transfer_state="sync_cancelled",
+        status="CANCELLED",
+        ssh_profile_id="profile-1",
+        user_id="user-1",
+        error_message="Result synchronization cancelled. Run sync again to resume copying outputs.",
+    )
+    updates = []
+
+    async def fake_get_job(_run_uuid):
+        return job
+
+    async def fake_load_profile(_profile_id, _user_id):
+        return profile
+
+    async def fake_update_job_fields(_run_uuid, fields):
+        updates.append(fields)
+        for key, value in fields.items():
+            setattr(job, key, value)
+
+    monkeypatch.setattr("launchpad.db.get_job_by_uuid", fake_get_job)
+    monkeypatch.setattr("launchpad.db.update_job_fields", fake_update_job_fields)
+    monkeypatch.setattr(backend, "_load_profile", fake_load_profile)
+    monkeypatch.setattr(backend, "_copy_selected_results_to_local", AsyncMock(return_value=None))
+
+    result = await backend.sync_results_to_local(run_uuid="run-4", force=False)
+
+    assert result["success"] is True
+    assert result["status"] == "sync_started"
+    assert updates[-1]["status"] == JobStatus.COMPLETED
+    assert updates[-1]["transfer_state"] == "downloading_outputs"
+
+
+@pytest.mark.asyncio
 async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately_from_gpu(monkeypatch):
     backend = SlurmBackend()
     params = SubmitParams(
+        workflow_executor=get_workflow_executor("dogme"),
         sample_name="sample-1",
         mode="RNA",
         input_directory="/remote/input",
@@ -1228,7 +1814,7 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
         captured.update(kwargs)
         return "process {}"
 
-    monkeypatch.setattr("launchpad.backends.slurm_backend.NextflowConfig.generate_config", fake_generate_config)
+    monkeypatch.setattr("launchpad.workflow_executors.dogme.NextflowConfig.generate_config", fake_generate_config)
 
     config_path = await backend._write_remote_nextflow_config(
         params=params,
@@ -1250,6 +1836,7 @@ async def test_write_remote_nextflow_config_uses_profile_cpu_defaults_separately
 async def test_write_remote_nextflow_config_prefers_explicit_account_overrides(monkeypatch):
     backend = SlurmBackend()
     params = SubmitParams(
+        workflow_executor=get_workflow_executor("dogme"),
         sample_name="sample-override",
         mode="DNA",
         input_directory="/remote/input",
@@ -1283,7 +1870,7 @@ async def test_write_remote_nextflow_config_prefers_explicit_account_overrides(m
         captured.update(kwargs)
         return "process {}"
 
-    monkeypatch.setattr("launchpad.backends.slurm_backend.NextflowConfig.generate_config", fake_generate_config)
+    monkeypatch.setattr("launchpad.workflow_executors.dogme.NextflowConfig.generate_config", fake_generate_config)
 
     config_path = await backend._write_remote_nextflow_config(
         params=params,
@@ -1304,6 +1891,7 @@ async def test_write_remote_nextflow_config_prefers_explicit_account_overrides(m
 async def test_write_remote_nextflow_config_forwards_explicit_cpu_resource_overrides(monkeypatch):
     backend = SlurmBackend()
     params = SubmitParams(
+        workflow_executor=get_workflow_executor("dogme"),
         sample_name="sample-resources",
         mode="DNA",
         input_directory="/remote/input",
@@ -1340,7 +1928,7 @@ async def test_write_remote_nextflow_config_forwards_explicit_cpu_resource_overr
         captured.update(kwargs)
         return "process {}"
 
-    monkeypatch.setattr("launchpad.backends.slurm_backend.NextflowConfig.generate_config", fake_generate_config)
+    monkeypatch.setattr("launchpad.workflow_executors.dogme.NextflowConfig.generate_config", fake_generate_config)
 
     config_path = await backend._write_remote_nextflow_config(
         params=params,
@@ -1358,6 +1946,79 @@ async def test_write_remote_nextflow_config_forwards_explicit_cpu_resource_overr
     assert captured["slurm_cpus"] == 4
     assert captured["slurm_memory_gb"] == 16
     assert captured["slurm_walltime"] == "48:00:00"
+
+
+def test_build_nextflow_command_delegates_to_workflow_executor():
+    backend = SlurmBackend()
+
+    class _FakeExecutor:
+        def remote_build_command(self, **kwargs):
+            assert kwargs["staged_inputs"]["remote_input"] == "/remote/input"
+            assert kwargs["rendered_files"]["nextflow.config"] == "/remote/work/nextflow.config"
+            return "custom remote command"
+
+    params = SubmitParams(
+        workflow_key="custom",
+        workflow_executor=_FakeExecutor(),
+    )
+
+    command = backend._build_nextflow_command(
+        params,
+        "/remote/input",
+        "/remote/output",
+        "/remote/work/nextflow.config",
+    )
+
+    assert command == "custom remote command"
+
+
+@pytest.mark.asyncio
+async def test_write_remote_workflow_artifacts_delegates_to_workflow_executor():
+    backend = SlurmBackend()
+    conn = _FakeWriteConn()
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+
+    class _FakeExecutor:
+        async def remote_config_artifacts(self, **kwargs):
+            assert kwargs["remote_work"] == "/remote/agoutic/workflow1"
+            return {
+                "nextflow.config": "process {}",
+                ".agoutic/custom/config.json": "{}",
+            }
+
+    params = SubmitParams(
+        workflow_key="custom",
+        workflow_executor=_FakeExecutor(),
+    )
+
+    rendered_files = await backend._write_remote_workflow_artifacts(
+        params=params,
+        profile=profile,
+        conn=conn,
+        remote_work="/remote/agoutic/workflow1",
+        staged_inputs={},
+        reference_assets={},
+    )
+
+    assert rendered_files == {
+        "nextflow.config": "/remote/agoutic/workflow1/nextflow.config",
+        ".agoutic/custom/config.json": "/remote/agoutic/workflow1/.agoutic/custom/config.json",
+    }
+    commands = [command for command, _ in conn.run_calls]
+    assert any("/remote/agoutic/workflow1/nextflow.config" in command for command in commands)
+    assert any("/remote/agoutic/workflow1/.agoutic/custom/config.json" in command for command in commands)
 
 
 @pytest.mark.asyncio

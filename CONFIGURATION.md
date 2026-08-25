@@ -41,6 +41,46 @@ export DOGME_REPO=$AGOUTIC_CODE/dogme        # Or custom path
 export NEXTFLOW_BIN=/usr/local/bin/nextflow   # Or custom path
 ```
 
+## UI and Auth Topologies
+
+AGOUTIC supports both a hosted Streamlit deployment and a local Streamlit client talking to a remote Cortex server.
+
+### Hosted Streamlit
+
+- Streamlit is served from the same server or reverse-proxy boundary as Cortex.
+- Cortex sets the browser `session` cookie and redirects back to `FRONTEND_URL` after OAuth.
+
+### Local Streamlit Against Remote Cortex
+
+- Streamlit runs on the user's machine.
+- Set `AGOUTIC_API_URL` in the local UI environment to the remote Cortex base URL.
+- The login flow returns to the local Streamlit origin with a short-lived auth code, which the UI exchanges for a bearer session.
+- The UI only talks to Cortex. It does not need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET` locally.
+
+### Relevant Variables
+
+```bash
+# Streamlit client: remote Cortex base URL
+# Default inside UI code: http://127.0.0.1:8000
+export AGOUTIC_API_URL=http://remote-cortex-host:8000
+
+# Cortex: hosted Streamlit/browser origin for cookie-based login
+export FRONTEND_URL=http://localhost:8501
+
+# Cortex: optional comma-separated allowlist for non-loopback local UI origins
+# Loopback origins (localhost / 127.0.0.1) are already allowed.
+export LOCAL_UI_ALLOWED_ORIGINS=http://my-dev-box:8501
+
+# Server-side only: Cortex-to-Launchpad communication
+export LAUNCHPAD_REST_URL=http://localhost:8003
+export INTERNAL_API_SECRET=replace-me
+```
+
+Notes:
+- `FRONTEND_URL` is for hosted Streamlit, not the local Streamlit client case.
+- `GOOGLE_REDIRECT_URI` is derived automatically from `AGOUTIC_API_URL` (`{AGOUTIC_API_URL}/auth/callback`) and no longer needs a separate env var. Ensure the Google Cloud OAuth app is configured with this callback URL.
+- `LAUNCHPAD_REST_URL` and `INTERNAL_API_SECRET` should stay on the server side. Remote profile management and other UI flows now go through Cortex.
+
 ## Derived Paths
 
 All other paths are **automatically derived** from the two root variables:

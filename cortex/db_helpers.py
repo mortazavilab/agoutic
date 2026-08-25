@@ -280,6 +280,7 @@ async def track_project_access(session, user_id: str, project_id: str, project_n
     if access:
         # Update last accessed time; preserve existing role
         access.last_accessed = datetime.datetime.utcnow()
+        access.updated_at = datetime.datetime.utcnow()
         if project_name:
             access.project_name = project_name
         # Only update role if explicitly provided (don't downgrade on re-access)
@@ -287,13 +288,17 @@ async def track_project_access(session, user_id: str, project_id: str, project_n
             access.role = role
     else:
         # Create new access record — default to owner if not specified
+        now = datetime.datetime.utcnow()
         access = ProjectAccess(
             id=str(uuid.uuid4()),
             user_id=user_id,
             project_id=project_id,
             project_name=project_name or project_id,
             role=role or "owner",
-            last_accessed=datetime.datetime.utcnow()
+            invited_by=None,
+            created_at=now,
+            updated_at=now,
+            last_accessed=now,
         )
         session.add(access)
 

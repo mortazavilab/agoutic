@@ -502,6 +502,41 @@ class TestBuildAutoAnalysisContext:
         assert "1" in result
         assert "4" in result
 
+    def test_wf_pore_c_context_formats_artifacts_metrics_and_warnings(self, monkeypatch):
+        monkeypatch.setattr("cortex.analysis_helpers.cortex_config.WF_PORE_C_ENABLED", True)
+        summary = {
+            "workflow_key": "wf_pore_c",
+            "workflow_summary": {
+                "sample_alias": "POREC_A",
+                "metadata": {
+                    "workflow_version": "v1.3.1",
+                    "reference_fasta": "/refs/grch38.fa",
+                    "cutter": "NlaIII",
+                },
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True, "matches": ["wf-pore-c-report.html"]},
+                    "pairs": {"requested": True, "present": True, "matches": ["pairs/sample.pairs.gz"]},
+                    "mcool": {"requested": True, "present": False, "matches": []},
+                    "hic": {"requested": False, "present": False, "matches": []},
+                },
+                "pairs_stats": {"total_pairs": 100, "cis_trans_ratio": 4.0, "duplicate_rate": 0.1},
+                "requested_outputs": [
+                    {"expected": "pairs/{alias}.pairs.gz", "present": True},
+                    {"expected": "cooler/{alias}.mcool", "present": False},
+                ],
+            },
+            "warnings": ["Missing requested output: cooler/{alias}.mcool"],
+        }
+
+        result = _build_auto_analysis_context("POREC_A", "DNA", "u", summary, {})
+
+        assert "Workflow key: wf_pore_c" in result
+        assert "Pairs: present" in result
+        assert "Multi-resolution cooler: missing" in result
+        assert "Total pairs: 100" in result
+        assert "Duplicate rate: 10.000%" in result
+        assert "Missing requested output: cooler/{alias}.mcool" in result
+
 
 # ======================================================================
 # _build_static_analysis_summary
@@ -546,3 +581,36 @@ class TestBuildStaticAnalysisSummary:
     def test_follow_up_prompts_always_present(self):
         result = _build_static_analysis_summary("s", "DNA", "u", {})
         assert "QC report" in result
+
+    def test_wf_pore_c_static_summary_formats_contact_map_card(self, monkeypatch):
+        monkeypatch.setattr("cortex.analysis_helpers.cortex_config.WF_PORE_C_ENABLED", True)
+        summary = {
+            "workflow_key": "wf_pore_c",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "sample_alias": "POREC_A",
+                "metadata": {
+                    "workflow_version": "v1.3.1",
+                    "reference_fasta": "/refs/grch38.fa",
+                    "cutter": "NlaIII",
+                },
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True},
+                    "pairs": {"requested": True, "present": True},
+                    "mcool": {"requested": True, "present": False},
+                    "hic": {"requested": False, "present": False},
+                },
+                "pairs_stats": {"total_pairs": 100, "cis_trans_ratio": 4.0, "duplicate_rate": 0.1},
+            },
+            "warnings": ["Missing requested output: cooler/{alias}.mcool"],
+        }
+
+        result = _build_static_analysis_summary("POREC_A", "DNA", "u", summary, "/proj/workflow8")
+
+        assert "Contact Map Summary: POREC_A" in result
+        assert "Workflow key:** wf_pore_c" in result
+        assert "Revision:** v1.3.1" in result
+        assert "Pairs: present" in result
+        assert "Multi-resolution cooler: missing" in result
+        assert "Total pairs: 100" in result
+        assert "Missing requested output: cooler/{alias}.mcool" in result

@@ -9,7 +9,11 @@ from fastapi.concurrency import run_in_threadpool
 from common.logging_config import get_logger
 from cortex.chat_context import ChatContext
 from cortex.plan_classifier import _detect_plan_type
-from cortex.plan_params import _extract_plan_params, build_de_group_clarification
+from cortex.plan_params import (
+    _extract_plan_params,
+    build_de_group_clarification,
+    resolve_reconcile_project_workflow_paths,
+)
 from cortex.chat_stages import register_stage
 from cortex.chat_sync_handler import _emit_progress, _is_cancelled
 from cortex.db import row_to_dict
@@ -131,10 +135,18 @@ class PlanDetectionStage:
 
             _emit_progress(ctx.request_id, "planning",
                            "Generating execution plan...")
+            _reconcile_project_workflow_paths = None
+            if _plan_type == "reconcile_bams":
+                _reconcile_project_workflow_paths = resolve_reconcile_project_workflow_paths(
+                    ctx.message,
+                    ctx.session,
+                    ctx.user,
+                )
             _plan_payload = await run_in_threadpool(
                 generate_plan, ctx.message, ctx.active_skill, ctx.conv_state,
                 ctx.engine, ctx.conversation_history,
                 project_dir=ctx.project_dir,
+                project_workflow_paths=_reconcile_project_workflow_paths,
             )
             if _plan_payload:
                 _workflow_block = _create_block_internal(
@@ -173,6 +185,9 @@ class PlanDetectionStage:
                     },
                     model_name=ctx.engine.model_name,
                 )
+
+                # Persist the new plan before a background executor opens its own session.
+                ctx.session.commit()
 
                 from cortex.chat_downloads import _auto_execute_plan_steps
                 if _plan_payload.get("auto_execute_safe_steps", True):

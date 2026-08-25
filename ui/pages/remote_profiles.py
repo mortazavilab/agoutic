@@ -1,7 +1,7 @@
 """
 Remote Connection Profiles Page
 Manage SSH connection profiles used for HPC/SLURM remote execution.
-All requests go through the Launchpad REST API.
+All requests go through Cortex — the UI never contacts Launchpad directly.
 """
 
 import streamlit as st
@@ -16,15 +16,11 @@ from datetime import datetime
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from auth import require_auth, make_authenticated_request
+from auth import require_auth, make_authenticated_request, build_auth_request_kwargs
 from components.cards import section_header, empty_state, status_chip
 
-# Launchpad REST URL for SSH profile management
-LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
-# Cortex API URL for authentication
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
-# Internal API secret for service-to-service auth with Launchpad
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+REMOTE_PROFILES_URL = f"{API_URL}/remote-profiles"
 REMOTE_PROFILE_TEST_TIMEOUT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_TIMEOUT_SECONDS", "630"))
 REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS = int(os.getenv("REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS", "600"))
 
@@ -32,21 +28,13 @@ st.set_page_config(page_title="Remote Profiles", page_icon="🔌", layout="wide"
 
 # Require authentication
 user = require_auth(API_URL)
-user_id = user.get("id") or user.get("user_id", "")
+is_admin = str((user or {}).get("role") or "").strip().lower() == "admin"
 
 section_header("Remote Connection Profiles", "Manage SSH profiles for remote HPC/SLURM execution", icon="🔌")
 st.caption("Remote base path may use placeholders like {ssh_username}, {project_slug}, {sample_name}, and {workflow_slug}.")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
-def _launchpad_headers() -> dict:
-    """Return headers required for Launchpad service-to-service auth."""
-    h = {"Content-Type": "application/json"}
-    if INTERNAL_API_SECRET:
-        h["X-Internal-Secret"] = INTERNAL_API_SECRET
-    return h
-
 
 def _fmt_datetime(val: str) -> str:
     """Format an ISO datetime string for display."""
@@ -59,13 +47,11 @@ def _fmt_datetime(val: str) -> str:
 
 
 def _load_profiles() -> list[dict]:
-    """Fetch SSH profiles for the current user from Launchpad."""
+    """Fetch SSH profiles for the current user from Cortex."""
     try:
         resp = make_authenticated_request(
             "GET",
-            f"{LAUNCHPAD_URL}/ssh-profiles",
-            params={"user_id": user_id},
-            headers=_launchpad_headers(),
+            REMOTE_PROFILES_URL,
             timeout=10,
         )
         if resp.status_code == 200:
@@ -77,7 +63,7 @@ def _load_profiles() -> list[dict]:
             st.error(f"Failed to load profiles: {resp.status_code}")
             return []
     except Exception as e:
-        st.error(f"Cannot connect to Launchpad API: {e}")
+        st.error(f"Cannot connect to Cortex remote profile API: {e}")
         return []
 
 
@@ -86,9 +72,7 @@ def _load_auth_session(profile_id: str) -> dict:
     try:
         resp = make_authenticated_request(
             "GET",
-            f"{LAUNCHPAD_URL}/ssh-profiles/{profile_id}/auth-session",
-            params={"user_id": user_id},
-            headers=_launchpad_headers(),
+            f"{REMOTE_PROFILES_URL}/{profile_id}/auth-session",
             timeout=10,
         )
         if resp.status_code == 200:
@@ -118,8 +102,16 @@ def _response_error_text(resp) -> str:
 def _run_request_with_elapsed(method: str, url: str, *, status_label: str, timeout: int, **kwargs):
     status_box = st.empty()
     started = time.time()
+    auth_kwargs = build_auth_request_kwargs()
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(make_authenticated_request, method, url, timeout=timeout, **kwargs)
+        future = executor.submit(
+            make_authenticated_request,
+            method,
+            url,
+            timeout=timeout,
+            auth_kwargs=auth_kwargs,
+            **kwargs,
+        )
         while not future.done():
             elapsed = int(time.time() - started)
             status_box.info(f"{status_label} Elapsed: {elapsed}s / {REMOTE_PROFILE_TEST_MAX_WAIT_SECONDS}s")
@@ -138,6 +130,10 @@ with st.expander("➕ Create Profile", expanded=False):
         cp_col1, cp_col2 = st.columns(2)
         with cp_col1:
             ssh_host = st.text_input("SSH Host *", help="Hostname or IP address")
+            transfer_host = st.text_input(
+                "Transfer Host (optional)",
+                help="Host used for rsync transfers. Leave blank to use the SSH Host.",
+            )
             ssh_username = st.text_input("SSH Username *")
         with cp_col2:
             ssh_port = st.number_input("SSH Port", min_value=1, max_value=65535, value=22)
@@ -183,13 +179,14 @@ with st.expander("➕ Create Profile", expanded=False):
                     st.error(err)
             else:
                 payload = {
-                    "user_id": user_id,
                     "nickname": nickname.strip(),
                     "ssh_host": ssh_host.strip(),
                     "ssh_port": ssh_port,
                     "ssh_username": ssh_username.strip(),
                     "auth_method": auth_method,
                 }
+                if transfer_host.strip():
+                    payload["transfer_host"] = transfer_host.strip()
                 if auth_method == "key_file" and key_file_path.strip():
                     payload["key_file_path"] = key_file_path.strip()
                 if local_username.strip():
@@ -208,9 +205,8 @@ with st.expander("➕ Create Profile", expanded=False):
                 try:
                     resp = make_authenticated_request(
                         "POST",
-                        f"{LAUNCHPAD_URL}/ssh-profiles",
+                        REMOTE_PROFILES_URL,
                         json=payload,
-                        headers=_launchpad_headers(),
                         timeout=10,
                     )
                     if resp.status_code in (200, 201):
@@ -231,6 +227,9 @@ if not profiles:
     empty_state("No SSH profiles yet", "Create one above to get started.", icon="🔌")
     st.stop()
 
+if is_admin:
+    st.caption("Showing profiles for all users. Profiles owned by other users are read-only here.")
+
 # Display profiles as a table
 rows = []
 for p in profiles:
@@ -238,22 +237,34 @@ for p in profiles:
         "Nickname": p.get("nickname", "—"),
         "Host": p.get("ssh_host", p.get("host", "—")),
         "Username": p.get("ssh_username", p.get("username", "—")),
+        "Owner": p.get("owner_email", "You") if is_admin else None,
         "Port": p.get("ssh_port", p.get("port", 22)),
         "Auth Method": p.get("auth_method", "—"),
         "Enabled": "✅" if p.get("is_enabled", True) else "❌",
         "Created": _fmt_datetime(p.get("created_at", "")),
     })
 
-st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+profiles_df = pd.DataFrame(rows)
+if not is_admin:
+    profiles_df = profiles_df.drop(columns=["Owner"])
+st.dataframe(profiles_df, width="stretch", hide_index=True)
 
 # ── Per-profile actions ──────────────────────────────────────────────
 
 for idx, profile in enumerate(profiles):
     pid = profile.get("id", "")
     nick = profile.get("nickname", f"Profile {idx}")
+    is_foreign_profile = is_admin and profile.get("user_id") != user.get("id")
+    test_result: dict | None = None
+    test_error: str | None = None
+    test_warning: str | None = None
 
     with st.container():
         st.markdown(f"---\n**{nick}** (`{profile.get('ssh_host', profile.get('host', ''))}`)")
+
+        if is_foreign_profile:
+            st.caption(f"Owned by {profile.get('owner_email', 'another user')}. Management controls are available only to the owner.")
+            continue
 
         act_col1, act_col2, act_col3 = st.columns(3)
 
@@ -283,10 +294,8 @@ for idx, profile in enumerate(profiles):
                                 try:
                                     resp = make_authenticated_request(
                                         "POST",
-                                        f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
-                                        params={"user_id": user_id},
+                                        f"{REMOTE_PROFILES_URL}/{pid}/auth-session",
                                         json={"local_password": local_auth_pwd},
-                                        headers=_launchpad_headers(),
                                         timeout=30,
                                     )
                                     if resp.status_code == 200:
@@ -302,9 +311,7 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "DELETE",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/auth-session",
-                                params={"user_id": user_id},
-                                headers=_launchpad_headers(),
+                                f"{REMOTE_PROFILES_URL}/{pid}/auth-session",
                                 timeout=10,
                             )
                             if resp.status_code == 200:
@@ -317,31 +324,46 @@ for idx, profile in enumerate(profiles):
 
             if st.button("🔌 Test Connection", key=f"test_{idx}"):
                 if needs_password and not (local_auth_pwd or session_info.get("active")):
-                    st.warning("Unlock the local auth session first, or enter the password for a one-off test")
+                    test_warning = "Unlock the local auth session first, or enter the password for a one-off test"
                 else:
                     try:
                         resp = _run_request_with_elapsed(
                             "POST",
-                            f"{LAUNCHPAD_URL}/ssh-profiles/{pid}/test",
+                            f"{REMOTE_PROFILES_URL}/{pid}/test",
                             status_label="Testing connection…",
-                            params={"user_id": user_id},
                             json={"local_password": local_auth_pwd},
-                            headers=_launchpad_headers(),
                             timeout=REMOTE_PROFILE_TEST_TIMEOUT_SECONDS,
                         )
                         if resp.status_code == 200:
-                            result = resp.json()
-                            if result.get("success", result.get("ok", False)):
-                                msg = result.get("message", "")
-                                if result.get("session_started") and result.get("session_expires_at"):
-                                    msg = f"{msg} Session unlocked until {_fmt_datetime(result['session_expires_at'])}".strip()
-                                st.success(f"✅ Connection successful! {msg}")
-                            else:
-                                st.warning(f"⚠️ Test returned: {result.get('message', result)}")
+                            test_result = resp.json()
                         else:
-                            st.error(f"Test failed ({resp.status_code}): {_response_error_text(resp)}")
+                            test_error = f"Test failed ({resp.status_code}): {_response_error_text(resp)}"
                     except Exception as e:
-                        st.error(f"Connection test error: {e}")
+                        test_error = f"Connection test error: {e}"
+
+        if test_warning:
+            st.warning(test_warning)
+        elif test_error:
+            st.error(test_error)
+        elif isinstance(test_result, dict):
+            if test_result.get("success", test_result.get("ok", False)):
+                msg = test_result.get("message", "")
+                if test_result.get("session_started") and test_result.get("session_expires_at"):
+                    msg = f"{msg} Session unlocked until {_fmt_datetime(test_result['session_expires_at'])}".strip()
+                st.success(f"✅ Connection successful! {msg}")
+                balance_rows = test_result.get("slurm_balance_rows") or []
+                balance_raw = test_result.get("slurm_balance_raw")
+                balance_error = test_result.get("slurm_balance_error")
+                if balance_rows:
+                    st.caption("Current SLURM account balances")
+                    st.dataframe(pd.DataFrame(balance_rows), width="stretch", hide_index=True)
+                elif balance_raw:
+                    st.caption("Current SLURM account balances")
+                    st.code(balance_raw, language="text")
+                elif balance_error:
+                    st.info(f"Connected, but could not load SLURM balances: {balance_error}")
+            else:
+                st.warning(f"⚠️ Test returned: {test_result.get('message', test_result)}")
 
         # ── Delete ───────────────────────────────────────────────────
         with act_col3:
@@ -354,9 +376,7 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "DELETE",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}",
-                                params={"user_id": user_id},
-                                headers=_launchpad_headers(),
+                                f"{REMOTE_PROFILES_URL}/{pid}",
                                 timeout=10,
                             )
                             if resp.status_code in (200, 204):
@@ -395,6 +415,12 @@ for idx, profile in enumerate(profiles):
                             "SSH Host",
                             value=profile.get("ssh_host", profile.get("host", "")),
                             key=f"eh_{idx}",
+                        )
+                        new_transfer_host = st.text_input(
+                            "Transfer Host (optional)",
+                            value=profile.get("transfer_host", "") or "",
+                            key=f"eth_{idx}",
+                            help="Host used for rsync transfers. Leave blank to use the SSH Host.",
                         )
                         new_username = st.text_input(
                             "SSH Username",
@@ -471,6 +497,7 @@ for idx, profile in enumerate(profiles):
                         update_payload = {
                             "nickname": new_nickname.strip(),
                             "ssh_host": new_host.strip(),
+                            "transfer_host": new_transfer_host.strip() or None,
                             "ssh_port": new_port,
                             "ssh_username": new_username.strip(),
                             "auth_method": new_auth,
@@ -489,10 +516,8 @@ for idx, profile in enumerate(profiles):
                         try:
                             resp = make_authenticated_request(
                                 "PUT",
-                                f"{LAUNCHPAD_URL}/ssh-profiles/{pid}",
-                                params={"user_id": user_id},
+                                f"{REMOTE_PROFILES_URL}/{pid}",
                                 json=update_payload,
-                                headers=_launchpad_headers(),
                                 timeout=10,
                             )
                             if resp.status_code == 200:
@@ -506,4 +531,4 @@ for idx, profile in enumerate(profiles):
 
 # Footer
 st.divider()
-st.caption(f"Connected to Launchpad API: {LAUNCHPAD_URL}")
+st.caption(f"Connected to Cortex API: {API_URL}")

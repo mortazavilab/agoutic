@@ -7,11 +7,12 @@ import os
 import re
 import shutil
 import httpx
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Request
+from fastapi import Body, FastAPI, HTTPException, Path as FastAPIPath, Query, Request
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.concurrency import run_in_threadpool  # To run LLM without blocking
 from pydantic import BaseModel
 from sqlalchemy import select, desc, func, text
@@ -20,7 +21,14 @@ from sqlalchemy.exc import OperationalError
 # ✅ Import from your package
 from cortex.schemas import BlockCreate, BlockOut, BlockStreamOut, BlockUpdate
 from cortex.agent_engine import AgentEngine
-from cortex.config import SKILLS_REGISTRY, GENOME_ALIASES, AVAILABLE_GENOMES, AGOUTIC_DATA
+from cortex.config import (
+    SKILLS_REGISTRY,
+    GENOME_ALIASES,
+    AVAILABLE_GENOMES,
+    AGOUTIC_DATA,
+    LLM_MODELS,
+    get_reference_genome_catalog,
+)
 from cortex.db import SessionLocal, init_db_sync, next_seq_sync, row_to_dict
 from cortex.models import ProjectBlock, Conversation, ConversationMessage, JobResult, User, ProjectAccess, Project, UserFile
 from cortex.middleware import AuthMiddleware
@@ -112,6 +120,7 @@ from cortex.routes.analyzer_proxy import (
 )
 from cortex.routes.user_data import router as user_data_router
 from cortex.routes.cross_project import router as cross_project_router
+from cortex.routes.inventory import router as inventory_router
 from cortex.routes.memories import router as memories_router
 from cortex.task_service import sync_project_tasks, clear_project_tasks
 from cortex.remote_orchestration import (
@@ -204,6 +213,7 @@ app.include_router(files_router)
 app.include_router(analyzer_proxy_router)
 app.include_router(user_data_router)
 app.include_router(cross_project_router)
+app.include_router(inventory_router)
 app.include_router(memories_router)
 
 # Initialize database on startup
@@ -222,11 +232,11 @@ async def _recover_orphaned_background_tasks() -> None:
             inner_status = payload.get("job_status", {}).get("status", "")
             if not run_uuid:
                 continue
-            if inner_status in ("COMPLETED", "FAILED"):
+            if inner_status in ("COMPLETED", "FAILED", "STALE"):
                 block.status = "DONE" if inner_status == "COMPLETED" else "FAILED"
                 recovery_session.commit()
                 logger.info(
-                    "Startup recovery: marked stale RUNNING block as done",
+                    "Startup recovery: reconciled stale RUNNING block to terminal state",
                     run_uuid=run_uuid,
                     inner_status=inner_status,
                 )
@@ -242,7 +252,12 @@ async def _recover_orphaned_background_tasks() -> None:
                     logger.info("Startup recovery: triggered auto-analysis", run_uuid=run_uuid)
             else:
                 asyncio.create_task(
-                    job_polling.poll_job_status(block.project_id, block.id, run_uuid)
+                    job_polling.poll_job_status(
+                        block.project_id,
+                        block.id,
+                        run_uuid,
+                        initial_delay_seconds=0.0,
+                    )
                 )
                 logger.info(
                     "Startup recovery: resumed polling for orphaned job",
@@ -389,7 +404,38 @@ from cortex.chat_sync_handler import (  # noqa: F401 — re-exported for backwar
 @app.get("/health")
 async def health_check():
     """Health check endpoint (no auth required)"""
-    return {"status": "ok", "service": "cortex", "version": AGOUTIC_VERSION}
+    session = SessionLocal()
+    try:
+        maintenance_state = get_maintenance_state(session)
+    finally:
+        session.close()
+    return {
+        "status": "ok",
+        "service": "cortex",
+        "version": AGOUTIC_VERSION,
+        "maintenance_mode": bool(maintenance_state.get("mode")),
+    }
+
+
+@app.get("/config/llm-models")
+async def get_llm_models():
+    """Return the configured LLM aliases and their resolved model names."""
+    return {
+        "models": [
+            {"key": key, "model": model_name}
+            for key, model_name in LLM_MODELS.items()
+        ]
+    }
+
+
+@app.get("/config/reference-genomes")
+async def get_reference_genomes():
+    """Return the configured reference genome catalog for UI clients."""
+    catalog = get_reference_genome_catalog()
+    return {
+        **catalog,
+        "count": len(catalog["genomes"]),
+    }
 
 @app.get("/skills")
 async def get_available_skills():
@@ -398,6 +444,335 @@ async def get_available_skills():
         "skills": list(SKILLS_REGISTRY.keys()),
         "count": len(SKILLS_REGISTRY)
     }
+
+
+class RemoteProfileCreateBody(BaseModel):
+    nickname: Optional[str] = None
+    ssh_host: str
+    transfer_host: Optional[str] = None
+    ssh_port: int = 22
+    ssh_username: str
+    auth_method: Literal["key_file", "ssh_agent"] = "key_file"
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    remote_base_path: Optional[str] = None
+
+
+class RemoteProfileUpdateBody(BaseModel):
+    nickname: Optional[str] = None
+    ssh_host: Optional[str] = None
+    transfer_host: Optional[str] = None
+    ssh_port: Optional[int] = None
+    ssh_username: Optional[str] = None
+    auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
+    key_file_path: Optional[str] = None
+    local_username: Optional[str] = None
+    default_slurm_account: Optional[str] = None
+    default_slurm_partition: Optional[str] = None
+    default_slurm_gpu_account: Optional[str] = None
+    default_slurm_gpu_partition: Optional[str] = None
+    remote_base_path: Optional[str] = None
+    is_enabled: Optional[bool] = None
+
+
+class RemoteProfilePasswordBody(BaseModel):
+    local_password: str = ""
+
+
+def _proxy_error_detail(resp: httpx.Response) -> str:
+    try:
+        payload = resp.json()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("message")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+    except Exception:
+        pass
+    return str(resp.text or "Upstream request failed").strip() or "Upstream request failed"
+
+
+async def _proxy_remote_profile_request(
+    method: str,
+    path: str,
+    *,
+    user_id: str,
+    timeout: float,
+    json_body: dict | None = None,
+    include_user_id_param: bool = True,
+):
+    params = {"user_id": user_id} if include_user_id_param else None
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.request(
+                method,
+                f"{_launchpad_rest_base_url()}{path}",
+                params=params,
+                headers=_launchpad_internal_headers(),
+                json=json_body,
+            )
+    except Exception as exc:
+        logger.warning("Failed to proxy remote profile request",
+                       method=method, path=path, user_id=user_id, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {exc}")
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail=_proxy_error_detail(resp))
+
+    if not resp.content:
+        return JSONResponse(status_code=resp.status_code, content={})
+
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {"message": resp.text}
+    return JSONResponse(status_code=resp.status_code, content=payload)
+
+
+@app.get("/remote-profiles")
+async def list_remote_profiles(request: Request):
+    user = request.state.user
+    include_all = user.role == "admin"
+    response = await _proxy_remote_profile_request(
+        "GET",
+        "/ssh-profiles",
+        user_id=user.id,
+        timeout=10.0,
+        include_user_id_param=not include_all,
+    )
+    if not include_all:
+        return response
+
+    profiles = json.loads(response.body)
+    owner_ids = {str(profile.get("user_id") or "") for profile in profiles}
+    session = SessionLocal()
+    try:
+        owner_emails = {
+            owner.id: owner.email
+            for owner in session.execute(select(User).where(User.id.in_(owner_ids))).scalars()
+        } if owner_ids else {}
+    finally:
+        session.close()
+    for profile in profiles:
+        profile["owner_email"] = str(owner_emails.get(profile.get("user_id")) or "—")
+    return JSONResponse(status_code=response.status_code, content=profiles)
+
+
+@app.post("/remote-profiles")
+async def create_remote_profile(request: Request, body: RemoteProfileCreateBody):
+    user = request.state.user
+    payload = body.model_dump(exclude_none=True)
+    payload["user_id"] = user.id
+    return await _proxy_remote_profile_request(
+        "POST",
+        "/ssh-profiles",
+        user_id=user.id,
+        timeout=10.0,
+        json_body=payload,
+        include_user_id_param=False,
+    )
+
+
+@app.put("/remote-profiles/{profile_id}")
+async def update_remote_profile(
+    request: Request,
+    body: RemoteProfileUpdateBody,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "PUT",
+        f"/ssh-profiles/{profile_id}",
+        user_id=user.id,
+        timeout=10.0,
+        json_body=body.model_dump(exclude_unset=True),
+    )
+
+
+@app.delete("/remote-profiles/{profile_id}")
+async def delete_remote_profile(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "DELETE",
+        f"/ssh-profiles/{profile_id}",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+@app.post("/remote-profiles/{profile_id}/test")
+async def test_remote_profile(
+    request: Request,
+    body: RemoteProfilePasswordBody = Body(default_factory=RemoteProfilePasswordBody),
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "POST",
+        f"/ssh-profiles/{profile_id}/test",
+        user_id=user.id,
+        timeout=float(os.getenv("REMOTE_PROFILE_TEST_TIMEOUT_SECONDS", "630")),
+        json_body={"local_password": body.local_password},
+    )
+
+
+@app.get("/remote-profiles/{profile_id}/auth-session")
+async def get_remote_profile_auth_session(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "GET",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+@app.post("/remote-profiles/{profile_id}/auth-session")
+async def create_remote_profile_auth_session(
+    request: Request,
+    body: RemoteProfilePasswordBody,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "POST",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=30.0,
+        json_body={"local_password": body.local_password},
+    )
+
+
+@app.delete("/remote-profiles/{profile_id}/auth-session")
+async def delete_remote_profile_auth_session(
+    request: Request,
+    profile_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    return await _proxy_remote_profile_request(
+        "DELETE",
+        f"/ssh-profiles/{profile_id}/auth-session",
+        user_id=user.id,
+        timeout=10.0,
+    )
+
+
+def _repair_terminal_job_and_workflow_state_from_status(
+    run_uuid: str,
+    status_payload: dict | None,
+) -> list[tuple[str, str, dict, str | None]]:
+    if not run_uuid or not isinstance(status_payload, dict):
+        return []
+
+    job_status = str(status_payload.get("status") or "").upper()
+    completed_ready = job_polling._completed_job_results_ready(status_payload)
+    completed_sync_terminal = job_polling._completed_job_result_sync_is_terminal(status_payload)
+    if job_status not in {"COMPLETED", "FAILED", "CANCELLED", "STALE"}:
+        return []
+    if job_status == "COMPLETED" and not (completed_ready or completed_sync_terminal):
+        return []
+
+    scheduled_analysis: list[tuple[str, str, dict, str | None]] = []
+    session = SessionLocal()
+    try:
+        blocks = session.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        for block in blocks:
+            payload = get_block_payload(block)
+            if payload.get("run_uuid") != run_uuid:
+                continue
+
+            resolved_work_directory = job_polling._resolved_job_work_directory(
+                payload.get("work_directory"),
+                status_payload,
+            )
+            merged_status = dict(status_payload)
+            if resolved_work_directory:
+                merged_status["work_directory"] = resolved_work_directory
+                payload["work_directory"] = resolved_work_directory
+            payload["job_status"] = merged_status
+            payload["last_updated"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+            if job_status == "COMPLETED":
+                block.status = "DONE"
+            elif job_status == "FAILED":
+                block.status = "FAILED"
+            elif job_status == "CANCELLED":
+                block.status = "CANCELLED"
+            else:
+                block.status = "FAILED"
+
+            block.payload_json = json.dumps(payload)
+            session.commit()
+            session.refresh(block)
+            sync_project_tasks(session, block.project_id)
+
+            workflow_block_id = payload.get("workflow_plan_block_id")
+            workflow_block = _find_workflow_plan(
+                session,
+                block.project_id,
+                workflow_block_id=workflow_block_id if isinstance(workflow_block_id, str) else None,
+                run_uuid=run_uuid,
+            )
+            if workflow_block is None:
+                continue
+
+            workflow_payload = get_block_payload(workflow_block)
+            if workflow_payload.get("run_uuid") != run_uuid:
+                workflow_payload["run_uuid"] = run_uuid
+                _persist_workflow_plan(session, workflow_block, workflow_payload)
+                workflow_payload = get_block_payload(workflow_block)
+
+            run_step_id = _resolve_workflow_step_id(
+                workflow_payload,
+                "run_dogme",
+                kinds=("RUN_SCRIPT", "run"),
+            )
+            if run_step_id:
+                workflow_payload = _set_workflow_step_status(
+                    session,
+                    workflow_block,
+                    run_step_id,
+                    "COMPLETED" if job_status == "COMPLETED" else ("CANCELLED" if job_status == "CANCELLED" else "FAILED"),
+                    extra={
+                        "run_uuid": run_uuid,
+                        "block_id": block.id,
+                        **({"work_directory": resolved_work_directory} if resolved_work_directory else {}),
+                    },
+                )
+
+            if job_status != "COMPLETED" or not completed_ready or payload.get("run_type") == "script":
+                continue
+
+            analysis_idx = _workflow_step_index(workflow_payload, "analyze_results")
+            if analysis_idx is None:
+                continue
+            analysis_step = workflow_payload["steps"][analysis_idx]
+            if analysis_step.get("status") != "PENDING":
+                continue
+
+            _set_workflow_step_status(
+                session,
+                workflow_block,
+                "analyze_results",
+                "RUNNING",
+                extra={"run_uuid": run_uuid},
+            )
+            scheduled_analysis.append((block.project_id, run_uuid, dict(payload), block.owner_id))
+    finally:
+        session.close()
+
+    return scheduled_analysis
+
 
 @app.get("/jobs/{run_uuid}/status")
 async def get_job_status_proxy(run_uuid: str, request: Request):
@@ -426,6 +801,19 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
         headers["X-Internal-Secret"] = INTERNAL_API_SECRET
     cached_status = job_polling.get_cached_job_status(run_uuid)
     if _cache_hit_is_authoritative(cached_status):
+        for project_id, scheduled_run_uuid, payload, owner_id in _repair_terminal_job_and_workflow_state_from_status(
+            run_uuid,
+            cached_status,
+        ):
+            asyncio.create_task(
+                job_polling._auto_trigger_analysis(
+                    project_id,
+                    scheduled_run_uuid,
+                    payload,
+                    owner_id,
+                    force=True,
+                )
+            )
         return cached_status
 
     status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
@@ -441,6 +829,20 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
             if isinstance(payload, dict):
                 job_polling.cache_job_status(run_uuid, payload)
                 cached_payload = job_polling.get_cached_job_status(run_uuid, max_age_seconds=0)
+                repair_source = cached_payload if cached_payload is not None else payload
+                for project_id, scheduled_run_uuid, scheduled_payload, owner_id in _repair_terminal_job_and_workflow_state_from_status(
+                    run_uuid,
+                    repair_source,
+                ):
+                    asyncio.create_task(
+                        job_polling._auto_trigger_analysis(
+                            project_id,
+                            scheduled_run_uuid,
+                            scheduled_payload,
+                            owner_id,
+                            force=True,
+                        )
+                    )
                 if cached_payload is not None:
                     return cached_payload
             return payload
@@ -455,6 +857,38 @@ async def get_job_status_proxy(run_uuid: str, request: Request):
             return cached_status
         logger.warning("Failed to proxy job status from Launchpad",
                        run_uuid=run_uuid, error=str(e))
+        raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
+
+
+@app.get("/jobs/{run_uuid}/clean-status")
+async def get_job_clean_status_proxy(run_uuid: str, request: Request, remote: bool = False):
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from cortex.config import INTERNAL_API_SECRET
+    launchpad_rest = SERVICE_REGISTRY.get("launchpad", {}).get(
+        "rest_url", os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
+    )
+    headers = {}
+    if INTERNAL_API_SECRET:
+        headers["X-Internal-Secret"] = INTERNAL_API_SECRET
+
+    status_proxy_timeout = float(os.getenv("CORTEX_JOB_STATUS_PROXY_TIMEOUT_SECONDS", "150"))
+
+    try:
+        async with httpx.AsyncClient(timeout=status_proxy_timeout) as client:
+            resp = await client.get(
+                f"{launchpad_rest}/jobs/{run_uuid}/clean-status",
+                headers=headers,
+                params={"remote": str(bool(remote)).lower()},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Clean status not found")
+        raise HTTPException(status_code=502, detail=f"Launchpad clean-status proxy failed: {e}")
+    except Exception as e:
         raise HTTPException(status_code=502, detail=f"Launchpad unreachable: {e}")
 
 
@@ -1384,6 +1818,83 @@ async def rerun_job_proxy(run_uuid: str, request: Request):
         session.close()
 
 
+@app.post("/jobs/{run_uuid}/sync-results")
+async def sync_job_results_proxy(
+    run_uuid: str,
+    request: Request,
+    force: bool = Query(False),
+):
+    """Trigger an explicit result sync and refresh matching EXECUTION_JOB blocks."""
+    user = request.state.user
+    require_run_uuid_access(run_uuid, user)
+
+    from launchpad.models import DogmeJob as LaunchpadDogmeJob
+
+    session = SessionLocal()
+    try:
+        source_job = session.execute(
+            select(LaunchpadDogmeJob).where(LaunchpadDogmeJob.run_uuid == run_uuid)
+        ).scalar_one_or_none()
+        if not source_job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                f"{_launchpad_rest_base_url()}/jobs/{run_uuid}/sync-results",
+                headers=_launchpad_internal_headers(),
+                params={"force": str(bool(force)).lower()},
+            )
+        if resp.status_code == 400:
+            raise HTTPException(status_code=400, detail=resp.json().get("detail", "Cannot sync job results"))
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail="Job not found")
+        resp.raise_for_status()
+        result = resp.json() or {}
+
+        transfer_state = str(result.get("transfer_state") or "").strip().lower()
+        message = str(result.get("message") or "").strip()
+        import_warning = result.get("import_warning_message")
+        matched_blocks: list[ProjectBlock] = []
+
+        blocks = session.query(ProjectBlock).filter(ProjectBlock.project_id == source_job.project_id).all()
+        for blk in blocks:
+            if blk.block_type != "EXECUTION_JOB":
+                continue
+            payload = get_block_payload(blk)
+            if payload.get("run_uuid") != run_uuid:
+                continue
+            job_status = payload.get("job_status") if isinstance(payload.get("job_status"), dict) else {}
+            if not isinstance(job_status, dict):
+                job_status = {}
+            if transfer_state:
+                job_status["transfer_state"] = transfer_state
+            if message:
+                job_status["message"] = message
+            if import_warning is not None:
+                job_status["import_warning_message"] = import_warning
+            payload["job_status"] = job_status
+
+            if transfer_state == "downloading_outputs":
+                blk.status = "RUNNING"
+            elif transfer_state == "transfer_failed":
+                blk.status = "FAILED"
+            else:
+                blk.status = "DONE"
+
+            blk.payload = json.dumps(payload) if isinstance(payload, dict) else payload
+            matched_blocks.append(blk)
+
+        session.commit()
+
+        if transfer_state == "downloading_outputs":
+            for blk in matched_blocks:
+                asyncio.create_task(job_polling.poll_job_status(source_job.project_id, blk.id, run_uuid))
+
+        return result
+    finally:
+        session.close()
+
+
 class WorkflowRenameBody(BaseModel):
     new_name: str
 
@@ -1463,7 +1974,7 @@ async def resubmit_job(run_uuid: str, request: Request):
         ).scalar_one_or_none()
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-        if job.status not in ("COMPLETED", "FAILED", "CANCELLED", "DELETED"):
+        if job.status not in ("COMPLETED", "FAILED", "CANCELLED", "STALE", "DELETED"):
             raise HTTPException(status_code=400, detail=f"Cannot resubmit a {job.status} job")
 
         # Reconstruct the original parameters
@@ -1483,6 +1994,8 @@ async def resubmit_job(run_uuid: str, request: Request):
             "input_directory": job.input_directory,
             "reference_genome": _ref_genome,
             "execution_mode": job.execution_mode or "local",
+            "local_max_task_cpus": getattr(job, "local_max_task_cpus", None),
+            "local_max_task_memory_gb": getattr(job, "local_max_task_memory_gb", None),
             "ssh_profile_id": job.ssh_profile_id,
             "slurm_account": job.slurm_account,
             "slurm_partition": job.slurm_partition,
@@ -1567,22 +2080,38 @@ async def create_block(block_in: BlockCreate, request: Request):
         session.close()
 
 @app.get("/blocks", response_model=BlockStreamOut)
-async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limit: int = 500):
+async def get_blocks(
+    project_id: str,
+    request: Request,
+    since_seq: int = 0,
+    before_seq: int = 0,
+    limit: int = 500,
+):
     user = request.state.user
     require_project_access(project_id, user, min_role="viewer")
     session = SessionLocal()
     try:
-        # Count total blocks for this project above since_seq
+        if before_seq and since_seq:
+            raise HTTPException(
+                status_code=400,
+                detail="Use either since_seq or before_seq, not both",
+            )
+
+        # Count blocks in the requested direction. A before_seq request is
+        # used by the UI to page backwards through project history.
         total_query = select(func.count(ProjectBlock.id))\
-            .where(ProjectBlock.project_id == project_id)\
-            .where(ProjectBlock.seq > since_seq)
+            .where(ProjectBlock.project_id == project_id)
+        if before_seq:
+            total_query = total_query.where(ProjectBlock.seq < before_seq)
+        else:
+            total_query = total_query.where(ProjectBlock.seq > since_seq)
         total_count = session.execute(total_query).scalar() or 0
 
         if total_count <= limit:
             # Everything fits — simple ascending query
             query = select(ProjectBlock)\
                 .where(ProjectBlock.project_id == project_id)\
-                .where(ProjectBlock.seq > since_seq)\
+                .where(ProjectBlock.seq < before_seq if before_seq else ProjectBlock.seq > since_seq)\
                 .order_by(ProjectBlock.seq.asc())\
                 .limit(limit)
         else:
@@ -1591,7 +2120,7 @@ async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limi
             # chronological order.
             subq = select(ProjectBlock)\
                 .where(ProjectBlock.project_id == project_id)\
-                .where(ProjectBlock.seq > since_seq)\
+                .where(ProjectBlock.seq < before_seq if before_seq else ProjectBlock.seq > since_seq)\
                 .order_by(ProjectBlock.seq.desc())\
                 .limit(limit)\
                 .subquery()
@@ -1603,12 +2132,25 @@ async def get_blocks(project_id: str, request: Request, since_seq: int = 0, limi
         blocks = result.scalars().all()
         
         new_latest = since_seq
+        oldest_seq = before_seq
         if blocks:
             new_latest = blocks[-1].seq
+            oldest_seq = blocks[0].seq
+
+        has_older = bool(
+            oldest_seq
+            and session.execute(
+                select(func.count(ProjectBlock.id))
+                .where(ProjectBlock.project_id == project_id)
+                .where(ProjectBlock.seq < oldest_seq)
+            ).scalar()
+        )
             
         return {
             "blocks": [row_to_dict(b) for b in blocks],
-            "latest_seq": new_latest
+            "latest_seq": new_latest,
+            "oldest_seq": oldest_seq,
+            "has_older": has_older,
         }
     finally:
         session.close()
@@ -1662,12 +2204,28 @@ async def update_block(
             if gate_payload.get("gate_action") == "download":
                 asyncio.create_task(download_after_approval(block.project_id, block_id))
             else:
-                asyncio.create_task(workflow_submission.submit_job_after_approval(block.project_id, block_id))
+                submission = (
+                    workflow_submission.submit_dogme_batch_after_approval
+                    if isinstance(extracted_params, dict) and extracted_params.get("batch_samples")
+                    else workflow_submission.submit_job_after_approval
+                )
+                asyncio.create_task(submission(block.project_id, block_id))
             # If this gate belongs to a plan, resume plan execution after the job
             if block.parent_id:
                 _plan_block = _find_workflow_plan(session, block.project_id,
                                                   workflow_block_id=block.parent_id)
                 if _plan_block:
+                    if gate_payload.get("gate_action") == "reconcile_bams":
+                        _plan_payload = get_block_payload(_plan_block)
+                        _current_step = next(
+                            (
+                                step for step in _plan_payload.get("steps", [])
+                                if step.get("id") == _plan_payload.get("current_step_id")
+                            ),
+                            None,
+                        )
+                        if isinstance(_current_step, dict) and _current_step.get("shared_reconcile_authorization"):
+                            _apply_shared_reconcile_approval(session, _plan_block, block.id)
                     _mark_workflow_plan_approval_complete(session, _plan_block, block.id)
                     if is_script_plan_gate:
                         _advance_workflow_plan_to_step_kind(
@@ -1707,6 +2265,53 @@ async def update_block(
         session.close()
 
 
+@app.post("/dogme-batches/{gate_block_id}/cancel")
+async def cancel_dogme_batch_endpoint(
+    request: Request,
+    gate_block_id: str = FastAPIPath(..., min_length=1),
+):
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        gate_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == gate_block_id)
+        ).scalar_one_or_none()
+        if gate_block is None:
+            raise HTTPException(status_code=404, detail="DOGME batch not found")
+        require_project_access(gate_block.project_id, user, min_role="editor")
+        return await workflow_submission.cancel_dogme_batch(gate_block.project_id, gate_block_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
+@app.post("/dogme-batches/{gate_block_id}/retry")
+async def retry_dogme_batch_endpoint(
+    request: Request,
+    gate_block_id: str = FastAPIPath(..., min_length=1),
+    review_before_submit: bool = True,
+):
+    user = request.state.user
+    session = SessionLocal()
+    try:
+        gate_block = session.execute(
+            select(ProjectBlock).where(ProjectBlock.id == gate_block_id)
+        ).scalar_one_or_none()
+        if gate_block is None:
+            raise HTTPException(status_code=404, detail="DOGME batch not found")
+        require_project_access(gate_block.project_id, user, min_role="editor")
+        return await workflow_submission.retry_dogme_batch(
+            gate_block.project_id,
+            gate_block_id,
+            review_before_submit=review_before_submit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        session.close()
+
+
 @app.delete("/projects/{project_id}/blocks")
 async def clear_project_blocks(project_id: str, request: Request):
     """
@@ -1737,6 +2342,7 @@ from cortex.chat_approval import (  # noqa: F401 — re-exported for backward co
     handle_rejection, _ensure_workflow_plan_approval_gate,
     _handle_workflow_plan_remote_profile_auth,
     _mark_workflow_plan_approval_complete,
+    _apply_shared_reconcile_approval,
     _advance_workflow_plan_to_step_kind,
     _build_reconcile_plan_approval_context,
 )
@@ -1779,11 +2385,13 @@ async def cancel_chat(request_id: str):
 # --- CHAT & AGENT LOGIC ---
 from cortex.chat_context import ChatContext  # noqa: E402
 from cortex.chat_pipeline import run_chat_pipeline  # noqa: E402
+from common.maintenance_mode import get_maintenance_state  # noqa: E402
 
 @app.post("/chat")
 async def chat_with_agent(req: ChatRequest, request: Request):
     """Dispatch a user chat message through the registered pipeline stages."""
     user = request.state.user
+    session = SessionLocal()
     ctx = ChatContext(
         project_id=req.project_id,
         message=req.message,
@@ -1791,6 +2399,7 @@ async def chat_with_agent(req: ChatRequest, request: Request):
         model=req.model,
         request_id=req.request_id,
         user=user,
+        session=session,
     )
     try:
         return await run_chat_pipeline(ctx)
@@ -1825,7 +2434,13 @@ async def chat_with_agent(req: ChatRequest, request: Request):
             }
         finally:
             session.close()
-    except HTTPException:
+    except HTTPException as exc:
+        if (
+            exc.status_code == 503
+            and isinstance(exc.detail, dict)
+            and exc.detail.get("error") == "maintenance_mode"
+        ):
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
         raise
     except Exception as e:
         import traceback

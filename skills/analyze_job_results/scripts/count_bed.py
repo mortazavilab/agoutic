@@ -1,13 +1,29 @@
 import argparse
 import collections
+import gzip
 import json
 import sys
 from pathlib import Path
 
 
+def _strip_bed_suffix(file_name):
+    lower_name = file_name.lower()
+    if lower_name.endswith('.bed.gz'):
+        return file_name[:-7]
+    if lower_name.endswith('.bed'):
+        return file_name[:-4]
+    return file_name
+
+
+def _open_bed_file(bed_path):
+    if Path(bed_path).name.lower().endswith('.bed.gz'):
+        return gzip.open(bed_path, 'rt', encoding='utf-8')
+    return open(bed_path, 'r', encoding='utf-8')
+
+
 def _parse_bed_metadata(bed_file):
     file_name = Path(bed_file).name
-    stem = file_name[:-4] if file_name.lower().endswith('.bed') else file_name
+    stem = _strip_bed_suffix(file_name)
     parts = stem.split('.')
 
     metadata = {
@@ -36,7 +52,7 @@ def count_chromosomes(bed_files):
         input_files.append(metadata)
 
         try:
-            with open(bed_path, 'r', encoding='utf-8') as handle:
+            with _open_bed_file(bed_path) as handle:
                 for line in handle:
                     if line.startswith(('#', 'track', 'browser')) or not line.strip():
                         continue
@@ -97,10 +113,10 @@ def print_table(dataframe):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description='Count BED regions per chromosome, aggregating by sample, genome, and modification.',
+        description='Count BED or BED.GZ regions per chromosome, aggregating by sample, genome, and modification.',
     )
     parser.add_argument('--json', action='store_true', dest='as_json', help='Emit structured JSON output for downstream dataframe extraction.')
-    parser.add_argument('bed_files', nargs='+', help='One or more BED files to count.')
+    parser.add_argument('bed_files', nargs='+', help='One or more .bed or .bed.gz files to count.')
     args = parser.parse_args(argv)
 
     counts, input_files = count_chromosomes(args.bed_files)

@@ -79,22 +79,165 @@ def _render_profile_path_template(template: str | None, context: dict[str, str])
 
 
 def _is_help_intent(message: str) -> bool:
+    import re as _re
+
     q = (message or "").strip().lower()
     if not q:
         return False
+    q = _re.sub(r"[?.!,]+$", "", q)
+    q = _re.sub(r"\s+", " ", q)
     deterministic = {
-        "help",
-        "what can you do",
-        "show commands",
-        "show slash commands",
-        "what slash commands are available",
-        "how do i run a workflow",
-        "how do i use remote slurm",
-        "how do i use dataframes",
-        "how do i compare reconcile samples",
-        "show dataframe commands",
+        "show local help",
+        "open local help",
+        "local help",
+        "local quick reference",
     }
     return q in deterministic
+
+
+def _is_share_intent(message: str) -> bool:
+    import re as _re
+
+    q = (message or "").strip().lower()
+    if not q:
+        return False
+    q = _re.sub(r"[?.!,]+$", "", q)
+    q = _re.sub(r"\s+", " ", q)
+
+    patterns = [
+        r"\bshare\b.*\bproject\b",
+        r"\badd\b.*\bcollaborator\b",
+        r"\bgive\b.*\baccess\b",
+        r"\bgrant\b.*\baccess\b",
+        r"\bcollaborator\b.*\bproject\b",
+    ]
+    return any(_re.search(pattern, q) for pattern in patterns)
+
+
+def _is_list_users_intent(message: str) -> bool:
+    import re as _re
+
+    q = (message or "").strip().lower()
+    if not q:
+        return False
+    q = _re.sub(r"[?.!,]+$", "", q)
+    q = _re.sub(r"\s+", " ", q)
+
+    deterministic = {
+        "list users",
+        "list project users",
+        "list collaborators",
+        "show collaborators",
+        "show project users",
+        "who is in this project",
+        "who is on this project",
+        "who has access to this project",
+    }
+    return q in deterministic
+
+
+def _project_membership_label(project: dict | None) -> str:
+    role = str((project or {}).get("role") or "").strip().lower()
+    if role == "owner":
+        return "Owned by me"
+    if role == "editor":
+        return "Shared with me · Editor"
+    if role == "viewer":
+        return "Shared with me · Viewer"
+    return "Shared with me"
+
+
+def _project_can_mutate(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role in {"owner", "editor"}
+
+
+def _project_can_manage_collaborators(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role == "owner"
+
+
+def _collaborator_activity_status(collaborator: dict | None, now=None) -> tuple[str, str]:
+    import datetime as _dt
+
+    current = now or _dt.datetime.now(_dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_dt.timezone.utc)
+
+    raw_value = str((collaborator or {}).get("last_accessed") or "").strip()
+    if not raw_value:
+        return "unknown", "No recent activity recorded"
+
+    try:
+        parsed = _dt.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+        parsed = parsed.astimezone(_dt.timezone.utc)
+    except Exception:
+        return "unknown", "No recent activity recorded"
+
+    age_seconds = max((current - parsed).total_seconds(), 0.0)
+    if age_seconds <= 300:
+        return "active", "Active now"
+    if age_seconds <= 3600:
+        return "recent", "Active within the last hour"
+    if age_seconds <= 86400:
+        return "idle", "Active today"
+    return "idle", f"Last active {parsed.astimezone().strftime('%Y-%m-%d %H:%M')}"
+
+
+def _shared_project_activity_warning(collaborators: list[dict] | None, current_user_id: str | None, can_mutate: bool, now=None) -> str | None:
+    import datetime as _dt
+
+    current = now or _dt.datetime.now(_dt.timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_dt.timezone.utc)
+
+    active_names: list[str] = []
+    for collaborator in collaborators or []:
+        collaborator_user_id = str(collaborator.get("user_id") or "").strip()
+        if collaborator_user_id and collaborator_user_id == str(current_user_id or "").strip():
+            continue
+
+        raw_value = str(collaborator.get("last_accessed") or "").strip()
+        if not raw_value:
+            continue
+        try:
+            parsed = _dt.datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+            parsed = parsed.astimezone(_dt.timezone.utc)
+        except Exception:
+            continue
+        if max((current - parsed).total_seconds(), 0.0) > 300:
+            continue
+
+        label = str(
+            collaborator.get("display_name")
+            or collaborator.get("username")
+            or collaborator.get("email")
+            or collaborator_user_id
+            or "another collaborator"
+        ).strip()
+        if label:
+            active_names.append(label)
+
+    if not active_names:
+        return None
+
+    shown = ", ".join(active_names[:2])
+    if len(active_names) > 2:
+        shown = f"{shown}, and {len(active_names) - 2} more"
+
+    if can_mutate:
+        return f"{shown} active in this project right now. Refresh before renaming, uploading, or continuing shared edits so you do not overwrite each other."
+    return f"{shown} active in this project right now. This project is shared, so expect changes from other collaborators."
 
 
 def _render_local_help_response() -> None:
@@ -104,23 +247,40 @@ def _render_local_help_response() -> None:
         st.divider()
         with st.expander("Getting Started", expanded=True):
             st.markdown("1. Pick or create a project in the sidebar.")
-            st.markdown("2. Ask for a workflow run using natural language.")
+            st.markdown("2. Ask for a workflow run using natural language, or use `/help <topic>` to ask how to phrase a request first.")
             st.markdown("3. Review approval parameters and approve to execute.")
+        with st.expander("Prompt Coach", expanded=False):
+            st.markdown("- Use `/help` for an overview of AGOUTIC prompting patterns.")
+            st.markdown("- Use `/help <topic>` for task-specific guidance such as `/help remote slurm`, `/help /haplotype`, `/help /list files`, or `/help remote_execution`.")
+            st.markdown("- Natural language also works: `how do I stage a sample on hpc3`, `how do I prompt you to run Dogme with a staged sample`, `how do I sync workflow12 back from the cluster`, `how do I haplotype workflow7 with a VCF`, `how do I haplotype mouse workflow7 without typing the founder VCF path`.")
+            st.markdown("- Prompt-coach answers include what to provide, example prompts, useful slash commands, and what AGOUTIC will do internally.")
         with st.expander("Common Actions", expanded=False):
             st.markdown("- run dna workflow for sample X from /path")
             st.markdown("- stage sample to remote slurm profile hpc3")
+            st.markdown("- run Dogme on hpc3 using a staged sample and sync results locally")
+            st.markdown("- clean workflow7 or clean remote workflow7; cleanup now runs in the background and job status/logs will show `CLEANING_*`, `CLEANED_*`, or `CLEAN_FAILED`")
+            st.markdown("- sync workflow12 back from the cluster or resume a previous sync")
+            st.markdown("- clean workflow12 locally or clean remote workflows after a cluster run")
+            st.markdown("- show my local samples, staged samples, or imported workflows")
+            st.markdown("- list workflows or files for the active project")
             st.markdown("- show job status and next steps")
             st.markdown("- parse results for run UUID")
             st.markdown("- compare reconcile abundance samples with edgePython")
+            st.markdown("- haplotype workflow BAMs with an indexed VCF")
         with st.expander("Slash Commands", expanded=False):
+            st.markdown("- Help: `/help`, `/help <topic>`, `/commands`")
             st.markdown("- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`")
-            st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`")
+            st.markdown("- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`")
+            st.markdown("- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`, `/clean [remote] [workflow[, workflow2, ...]]`")
+            st.markdown("- Haplotyping: `/haplotype <DNA|RNA|cDNA> <workflow> [vcf]`")
             st.markdown("- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`")
             st.markdown("- Memory: `/remember`, `/remember-global`, `/remember-df`, `/memories`, `/forget`, `/pin`, `/unpin`, `/restore`, `/annotate`, `/search-memories`, `/upgrade-to-global`")
             st.markdown("- Hyphenated memory commands also accept underscore variants such as `/remember_global`, `/remember_df`, and `/upgrade_global`")
+            st.markdown("- Natural language inventory requests also work: `show my samples`, `show staged samples on hpc3`, `what imported samples do i have`, `show workflows in this project`, `list files in workflow7/annot`")
         with st.expander("Execution Modes", expanded=False):
             st.markdown("- Local: run on AGOUTIC host")
             st.markdown("- SLURM: submit via remote profile and queue")
+            st.markdown("- Ask `/help remote slurm` for prompting guidance on stage-only prep, full remote submission, and result sync workflows")
         with st.expander("Dataframe Commands", expanded=False):
             st.markdown("- `list dfs` lists the dataframes currently available in the chat")
             st.markdown("- `head DF5` or `head DF5 20` previews the first rows of a dataframe")

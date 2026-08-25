@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -6,12 +7,25 @@ from common.logging_config import get_logger
 from cortex.config import AGOUTIC_DATA, GENOME_ALIASES
 from cortex.llm_validators import get_block_payload
 from cortex.models import Project, ProjectBlock, User
-from cortex.remote_orchestration import _prepare_remote_execution_params
+from cortex.remote_orchestration import _extract_remote_profile_nickname, _prepare_remote_execution_params
 from cortex.user_jail import get_user_data_dir
 
 logger = get_logger(__name__)
 
+_GENOME_STOP_WORDS = {
+    str(token).lower()
+    for token in {*(GENOME_ALIASES.keys()), *(GENOME_ALIASES.values())}
+}
+
 _REMOTE_INPUT_PATTERNS = [
+    re.compile(
+        r"\b(?:existing|already\s+(?:present|available)|remote)\s+(?:remote\s+)?(?:[\w.-]+\s+)?(?:data|folder|path|input(?:\s+folder)?|directory)\s*(?:at|in|:)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bremote\s+(?:[\w.-]+\s+)?file\s+(?:at|in)?\s*(/[\w./-]+)",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\b(?:use|using|with|from|at)\s+(?:the\s+)?remote\s+(?:data|folder|path|input(?:\s+folder)?|directory)\s+(?:at|in)?\s*(/[\w./-]+)",
         re.IGNORECASE,
@@ -25,6 +39,216 @@ _REMOTE_INPUT_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+
+_RELATIVE_INPUT_PATH_PATTERN = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq(?:\.gz)?|fq(?:\.gz)?|fast5))\b'
+_ABSOLUTE_INPUT_PATH_PATTERN = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
+
+_DOGME_BATCH_SAMPLE_STATES = frozenset({
+    "PENDING",
+    "VALIDATING",
+    "SUBMITTING",
+    "QUEUED",
+    "RUNNING",
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "SKIPPED",
+})
+
+
+def normalize_dogme_batch_params(params: dict | None) -> tuple[dict, list[str]]:
+    """Normalize an explicit DOGME batch request without accessing project files."""
+    raw_params = params if isinstance(params, dict) else {}
+    raw_samples = raw_params.get("batch_samples")
+    errors: list[str] = []
+    if not isinstance(raw_samples, list) or not raw_samples:
+        return {"batch_samples": [], "shared_params": {}, "requested_max_parallel": None}, [
+            "At least one batch sample is required."
+        ]
+
+    shared_params = raw_params.get("shared_params")
+    if shared_params is None:
+        shared_params = {
+            key: value
+            for key, value in raw_params.items()
+            if key not in {"batch_id", "batch_samples", "requested_max_parallel", "retry_of_batch_id"}
+        }
+    if not isinstance(shared_params, dict):
+        errors.append("Shared DOGME settings must be an object.")
+        shared_params = {}
+
+    requested_max_parallel = raw_params.get("requested_max_parallel")
+    if requested_max_parallel in (None, ""):
+        normalized_parallelism = None
+    else:
+        try:
+            normalized_parallelism = int(requested_max_parallel)
+        except (TypeError, ValueError):
+            errors.append("Requested batch parallelism must be a positive integer.")
+            normalized_parallelism = None
+        else:
+            if normalized_parallelism < 1:
+                errors.append("Requested batch parallelism must be a positive integer.")
+
+    normalized_samples: list[dict] = []
+    seen_sample_ids: set[str] = set()
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            errors.append(f"Batch sample {index + 1} must be an object.")
+            continue
+
+        sample_id = str(raw_sample.get("sample_id") or index + 1).strip()
+        sample_name = str(raw_sample.get("sample_name") or "").strip()
+        input_directory = str(raw_sample.get("input_directory") or "").strip()
+        status = str(raw_sample.get("status") or "PENDING").upper()
+
+        if not sample_id:
+            errors.append(f"Batch sample {index + 1} needs a sample ID.")
+        elif sample_id in seen_sample_ids:
+            errors.append(f"Batch sample ID '{sample_id}' is duplicated.")
+        else:
+            seen_sample_ids.add(sample_id)
+        if not sample_name:
+            errors.append(f"Batch sample {index + 1} needs a sample name.")
+        if not input_directory:
+            errors.append(f"Batch sample {index + 1} needs an input directory.")
+        if status not in _DOGME_BATCH_SAMPLE_STATES:
+            errors.append(f"Batch sample {index + 1} has unsupported status '{status}'.")
+
+        normalized_samples.append({
+            "sample_id": sample_id,
+            "sample_name": sample_name,
+            "input_directory": input_directory,
+            "status": status,
+            "run_uuid": raw_sample.get("run_uuid"),
+            "execution_block_id": raw_sample.get("execution_block_id"),
+            "error": raw_sample.get("error"),
+        })
+
+    return {
+        "batch_id": raw_params.get("batch_id"),
+        "batch_samples": normalized_samples,
+        "shared_params": dict(shared_params),
+        "requested_max_parallel": normalized_parallelism,
+        "retry_of_batch_id": raw_params.get("retry_of_batch_id"),
+    }, errors
+
+
+def _input_type_signals(*, user_text_original: str, user_text: str) -> dict[str, bool]:
+    original_lower = str(user_text_original or "").lower()
+    lowered = str(user_text or "").lower()
+    return {
+        "pod5": any(token in original_lower or token in lowered for token in (".pod5", ".fast5", " pod5", "pod5 ", "fast5")),
+        "bam": ".bam" in original_lower or " bam" in lowered or lowered.startswith("bam "),
+        "fastq": any(token in original_lower or token in lowered for token in (".fastq", ".fq", " fastq", "fastq ", " fq ")),
+    }
+
+
+def _fastq_approval_clarification(*, kind: str, requested_mode: str | None = None) -> dict:
+    if kind == "prefill_cdna":
+        return {
+            "kind": kind,
+            "blocking": False,
+            "assistant_text": (
+                "I found FASTQ input in this project. Dogme only supports FASTQ input for cDNA mode. "
+                "I prefilled the approval for cDNA fastqCDNA below. If you intended RNA or DNA instead, "
+                "switch the input to pod5 or BAM before submitting."
+            ),
+            "banner_text": (
+                "FASTQ input is only supported for Dogme cDNA mode. "
+                "The approval below has been prefilled for fastqCDNA."
+            ),
+            "options": [],
+        }
+
+    normalized_mode = str(requested_mode or "RNA").strip().upper() or "RNA"
+    return {
+        "kind": kind,
+        "blocking": True,
+        "requested_mode": normalized_mode,
+        "assistant_text": (
+            "Dogme only supports FASTQ input for cDNA mode. "
+            f"Your request mentions FASTQ together with {normalized_mode}. "
+            "Choose one of the options below before submitting: keep FASTQ and switch to cDNA fastqCDNA, "
+            f"or keep {normalized_mode} and provide pod5/BAM instead."
+        ),
+        "banner_text": (
+            "FASTQ input is only supported for Dogme cDNA mode. "
+            f"To continue, either switch this request to cDNA fastqCDNA or change the input type to pod5/BAM for {normalized_mode}."
+        ),
+        "options": [
+            {"id": "use_fastq_cdna", "label": "Use FASTQ for cDNA (fastqCDNA)"},
+            {"id": "provide_supported_input", "label": f"I will provide pod5/BAM for {normalized_mode}"},
+        ],
+    }
+
+
+def _fastq_prefill_params() -> dict[str, str]:
+    return {
+        "input_type": "fastq",
+        "entry_point": "fastqCDNA",
+        "mode": "CDNA",
+    }
+
+
+def _sample_name_from_input_path(input_path: str | None) -> str | None:
+    cleaned = str(input_path or "").strip()
+    if not cleaned or cleaned.startswith("remote:"):
+        return None
+    path = Path(cleaned)
+    filename = path.name
+    lower_name = filename.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if lower_name.endswith(suffix):
+            return filename[: -len(suffix)] or None
+    return None
+
+
+def _looks_like_slash_command_message(user_text: str) -> bool:
+    stripped = str(user_text or "").strip()
+    if not stripped.startswith("/"):
+        return False
+
+    token = stripped.split(None, 1)[0]
+    if "/" in token[1:]:
+        return False
+    return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", token))
+
+
+def _looks_like_slash_command_path(path_text: str | None) -> bool:
+    stripped = str(path_text or "").strip().rstrip('.,;:!?')
+    if not stripped.startswith("/"):
+        return False
+    if "/" in stripped[1:]:
+        return False
+    return bool(re.match(r"^/[a-zA-Z][a-zA-Z0-9-]*$", stripped))
+
+
+def _extract_explicit_input_candidate(
+    user_messages: list[str],
+    *,
+    remote_input_path: str | None,
+) -> tuple[str, bool] | None:
+    for message in reversed(user_messages):
+        if _looks_like_slash_command_message(message):
+            continue
+
+        rel_paths = re.findall(_RELATIVE_INPUT_PATH_PATTERN, message)
+        abs_paths = re.findall(_ABSOLUTE_INPUT_PATH_PATTERN, message)
+        filtered_abs_paths = [
+            candidate.rstrip('.,;:!?') for candidate in abs_paths
+            if (
+                (not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path)
+                and not _looks_like_slash_command_path(candidate)
+            )
+        ]
+
+        if filtered_abs_paths:
+            return filtered_abs_paths[0], False
+        if rel_paths:
+            return rel_paths[0].rstrip('.,;:!?'), True
+
+    return None
 
 
 def _extract_remote_input_path(user_text: str) -> str | None:
@@ -130,7 +354,6 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 "slurm_gpu_account": seed_params.get("slurm_gpu_account"),
                 "slurm_gpu_partition": seed_params.get("slurm_gpu_partition"),
                 "slurm_cpus": seed_params.get("slurm_cpus"),
-                "slurm_memory_gb": seed_params.get("slurm_memory_gb"),
                 "slurm_walltime": seed_params.get("slurm_walltime"),
                 "slurm_gpus": seed_params.get("slurm_gpus"),
                 "slurm_gpu_type": seed_params.get("slurm_gpu_type"),
@@ -165,18 +388,22 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     params = {
         "sample_name": None,
         "mode": None,
+        "mode_explicit": False,
         "input_directory": None,
         "input_directory_explicit": False,
         "remote_input_path": None,
         "input_type": "pod5",  # Default to pod5
+        "input_type_explicit": False,
         "entry_point": None,  # Dogme entry point
+        "approval_prefill": None,
+        "approval_clarification": None,
         "reference_genome": [],  # Now a list for multi-genome support
         "modifications": None,
         # Advanced parameters (optional)
         "modkit_filter_threshold": None,  # Will use default 0.9 if not specified
         "min_cov": None,  # Will default based on mode if not specified
         "per_mod": None,  # Will use default 5 if not specified
-        "accuracy": None,  # Will use default "sup" if not specified
+        "accuracy": None,  # Will use mode-dependent default (HAC for DNA/CDNA, SUP for RNA)
         "max_gpu_tasks": slurm_reuse_seed.get("max_gpu_tasks"),  # Will use default 1 if not specified
         "execution_mode": slurm_reuse_seed.get("execution_mode") or "local",
         "ssh_profile_id": slurm_reuse_seed.get("ssh_profile_id"),
@@ -206,17 +433,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["execution_mode"] = "slurm"
         params["remote_input_path"] = remote_input_path
 
-    profile_target_match = re.search(
-        r"\b(?:on\s+(?!the\b|slurm\b|remote\b|local\b|my\b|your\b|this\b|that\b)([a-zA-Z0-9_-]+)(?:\s+profile)?(?:[?.!,]|$)|(?:using|via)\s+(?:the\s+)?([a-zA-Z0-9_-]+)\s+profile)\b",
-        all_user_text_original,
-        re.IGNORECASE,
-    )
-    if profile_target_match:
+    profile_target_nickname = _extract_remote_profile_nickname(all_user_text_original)
+    if profile_target_nickname:
         params["execution_mode"] = "slurm"
-        params["ssh_profile_nickname"] = profile_target_match.group(1) or profile_target_match.group(2)
+        params["ssh_profile_nickname"] = profile_target_nickname
 
     if re.search(r"\bstage(?:\s+only)?\b", all_user_text) and (
-        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_match
+        re.search(r"\b(slurm|cluster|remote)\b", all_user_text) or profile_target_nickname
     ):
         params["execution_mode"] = "slurm"
         params["remote_action"] = "stage_only"
@@ -278,6 +501,12 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     if gpus_match:
         params["slurm_gpus"] = int(gpus_match.group(1))
 
+    input_signals = _input_type_signals(
+        user_text_original=all_user_text_original,
+        user_text=all_user_text,
+    )
+    params["input_type_explicit"] = any(input_signals.values())
+
     # Detect Dogme entry point from conversation
     if "only basecall" in all_user_text or "just basecalling" in all_user_text or "basecall only" in all_user_text:
         params["entry_point"] = "basecall"
@@ -307,9 +536,11 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
             params["input_type"] = "bam"
     elif ".fastq" in all_user_text_original or ".fq" in all_user_text_original or "fastq" in all_user_text:
         params["input_type"] = "fastq"
+    elif input_signals["pod5"] and not input_signals["bam"] and not input_signals["fastq"]:
+        params["input_type"] = "pod5"
 
     # Detect genome from keywords - support multiple genomes
-    genome_keywords = ["human", "mouse", "hg38", "mm39", "mm10", "grch38"]
+    genome_keywords = list(GENOME_ALIASES.keys())
     found_genomes = set()
 
     # Find all genome mentions
@@ -340,33 +571,27 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     # Detect mode from keywords
     if "rna" in all_user_text and "cdna" not in all_user_text:
         params["mode"] = "RNA"
+        params["mode_explicit"] = True
     elif "cdna" in all_user_text:
         params["mode"] = "CDNA"
+        params["mode_explicit"] = True
     elif "dna" in all_user_text or "genomic" in all_user_text or "fiber" in all_user_text:
         params["mode"] = "DNA"
+        params["mode_explicit"] = True
     else:
         params["mode"] = "DNA"  # Default to DNA
 
-    # Look for paths in user messages (use ORIGINAL case to preserve path)
-    # First try: relative paths with known sequencing extensions (data/ENCFF921XAH.bam)
-    _rel_path_pattern = r'(?<!/)\b([\w.-]+/[\w./-]+\.(?:bam|pod5|fastq|fq|fast5))\b'
-    _rel_paths = re.findall(_rel_path_pattern, all_user_text_original)
-    # Second try: absolute paths
-    # Avoid false positives like "account/partition" by requiring a sensible prefix.
-    _abs_path_pattern = r'(?:(?<=^)|(?<=[\s"\'(]))(/[^\s,]+(?:/[^\s,]+)*)'
-    _abs_paths = re.findall(_abs_path_pattern, all_user_text_original)
+    explicit_input_candidate = _extract_explicit_input_candidate(
+        user_messages,
+        remote_input_path=remote_input_path,
+    )
 
-    filtered_abs_paths = [
-        candidate for candidate in _abs_paths
-        if not remote_input_path or candidate.rstrip('.,;:!?') != remote_input_path
-    ]
-
-    if filtered_abs_paths:
-        cleaned_path = filtered_abs_paths[0].rstrip('.,;:!?')
+    if explicit_input_candidate and not explicit_input_candidate[1]:
+        cleaned_path = explicit_input_candidate[0]
         params["input_directory"] = cleaned_path
         params["input_directory_explicit"] = True
-    elif _rel_paths:
-        cleaned_path = _rel_paths[0].rstrip('.,;:!?')
+    elif explicit_input_candidate and explicit_input_candidate[1]:
+        cleaned_path = explicit_input_candidate[0]
         params["input_directory_explicit"] = True
         # Resolve relative path against project directory
         _proj = session.execute(select(Project).where(Project.id == project_id)).scalar_one_or_none()
@@ -392,6 +617,20 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
     else:
         params["input_directory"] = "/data/samples/test"
 
+    if params["input_type"] == "fastq":
+        if params["mode"] == "CDNA":
+            params["entry_point"] = "fastqCDNA"
+            params["approval_prefill"] = _fastq_prefill_params()
+        elif params["mode_explicit"] and params["mode"] in {"RNA", "DNA"}:
+            params["approval_clarification"] = _fastq_approval_clarification(
+                kind="blocking_mode_conflict",
+                requested_mode=params["mode"],
+            )
+        else:
+            params["mode"] = "CDNA"
+            params["approval_prefill"] = _fastq_prefill_params()
+            params["approval_clarification"] = _fastq_approval_clarification(kind="prefill_cdna")
+
     # Extract sample name from context
     # Search user messages in REVERSE order (most recent first) so a new
     # submission request wins over older ones in the same cycle.
@@ -404,9 +643,12 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+using',  # "analyze c2c12r1 using"
         r'analyze\s+(?:the\s+)?(?:sample\s+)?([a-zA-Z0-9_-]+)\s+on',  # "analyze Jamshid on hpc3"
     ]
-    _skip_words = {"is", "the", "a", "an", "this", "that", "it", "at", "in", "on",
-                   "mm39", "grch38", "hg38", "mm10", "name", "type", "data", "file",
-                   "using", "with", "from", "for", "my", "new", "rna", "dna", "cdna"}
+    _skip_words = {
+        "is", "the", "a", "an", "this", "that", "it", "at", "in", "on",
+        "name", "type", "data", "file", "using", "with", "from", "for",
+        "my", "new", "rna", "dna", "cdna",
+        *_GENOME_STOP_WORDS,
+    }
     for msg in reversed(user_messages):
         for pattern in explicit_patterns:
             match = re.search(pattern, msg, re.IGNORECASE)
@@ -429,14 +671,26 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
                 if name_match:
                     potential_name = name_match.group(1)
                     # Not a path, not a common word, not a genome name
-                    if (potential_name.lower() not in ["dna", "rna", "cdna", "mm39", "grch38", "hg38", "mm10", "human", "mouse", "yes", "no", "sup", "hac", "fast"]
+                    if (potential_name.lower() not in {"dna", "rna", "cdna", "human", "mouse", "yes", "no", "sup", "hac", "fast", *_GENOME_STOP_WORDS}
                         and "/" not in potential_name):
                         params["sample_name"] = potential_name
                         break
 
     if not params["sample_name"]:
+        inferred_fastq_sample_name = _sample_name_from_input_path(params.get("input_directory"))
+        if params["input_type"] == "fastq" and inferred_fastq_sample_name:
+            params["sample_name"] = inferred_fastq_sample_name
+
+    if not params["sample_name"]:
         # Use genome type + project timestamp as default
-        genome_type = "mouse" if "mm39" in params["reference_genome"] else "human"
+        if "mm39" in params["reference_genome"]:
+            genome_type = "mouse"
+        elif "GRCh38" in params["reference_genome"]:
+            genome_type = "human"
+        elif params["reference_genome"]:
+            genome_type = str(params["reference_genome"][0]).lower()
+        else:
+            genome_type = "sample"
         params["sample_name"] = f"{genome_type}_sample_{project_id.split('_')[-1]}"
 
     # Extract advanced parameters if mentioned

@@ -36,7 +36,7 @@ class StagingTaskState:
     """Mutable in-memory state for a single background staging task."""
 
     task_id: str
-    status: str = "queued"  # queued | running | completed | failed | cancelled
+    status: str = "queued"  # queued | running | completed | failed | cancelled | stale
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     error: str | None = None
@@ -117,7 +117,7 @@ def staging_task_state_from_record(record: Any) -> StagingTaskState:
 
 
 def _is_terminal_status(status: str) -> bool:
-    return status in {"completed", "failed", "cancelled"}
+    return status in {"completed", "failed", "cancelled", "stale"}
 
 
 def running_task_count() -> int:
@@ -366,7 +366,7 @@ async def requeue_staging_task(
 async def resume_staging_task(task_id: str) -> StagingTaskState:
     return await requeue_staging_task(
         task_id,
-        allowed_statuses={"failed", "cancelled"},
+        allowed_statuses={"failed", "cancelled", "stale"},
         action_name="resumed",
         cancel_active=True,
     )
@@ -524,6 +524,20 @@ async def run_staging(task: StagingTaskState) -> None:
                 on_progress=_on_progress,
                 transfer_id=task.task_id,
             )
+        params.reference_cache_path = stage_result.get("reference_cache_path")
+        params.data_cache_path = stage_result.get("data_cache_path") or stage_result.get("remote_input")
+        workflow_executor = backend._resolve_workflow_executor(params)
+        workflow_stage_result = await workflow_executor.remote_stage_inputs(
+            request=params,
+            params=params,
+            profile=profile,
+            conn=conn,
+            run_uuid=None,
+            on_progress=_on_progress,
+            transfer_id=task.task_id,
+        )
+        if workflow_stage_result:
+            stage_result.update(workflow_stage_result)
         reference_statuses = dict(stage_result.get("reference_cache_statuses") or {})
         reference_asset_evidence, reference_statuses = await backend._ensure_reference_assets_present(
             params=params,
@@ -532,9 +546,22 @@ async def run_staging(task: StagingTaskState) -> None:
             remote_reference_paths=stage_result["remote_reference_paths"],
             reference_statuses=reference_statuses,
         )
+        workflow_reference_assets = await workflow_executor.remote_reference_assets(
+            request=params,
+            params=params,
+            profile=profile,
+            conn=conn,
+            staged_inputs=stage_result,
+            run_uuid=None,
+        )
+        combined_reference_evidence = {
+            **reference_asset_evidence,
+            **workflow_reference_assets,
+        }
 
         task.result = {
             "sample_name": params.sample_name,
+            "workflow_key": params.workflow_key,
             "ssh_profile_id": profile.id,
             "ssh_profile_nickname": profile.nickname,
             "remote_base_path": remote_roots["remote_base_path"],
@@ -542,9 +569,21 @@ async def run_staging(task: StagingTaskState) -> None:
             "remote_reference_paths": stage_result["remote_reference_paths"],
             "data_cache_status": stage_result["data_cache_status"],
             "reference_cache_statuses": reference_statuses,
-            "reference_asset_evidence": reference_asset_evidence,
+            "reference_asset_evidence": combined_reference_evidence,
             "detected_input_type": stage_result.get("detected_input_type") or params.input_type,
         }
+        for key in (
+            "workflow_remote_input",
+            "reference_fasta_remote_path",
+            "reference_fasta_cache_status",
+            "vcf_remote_path",
+            "vcf_cache_status",
+            "sample_sheet_remote_path",
+            "sample_sheet_cache_status",
+            "remote_nextflow_work_dir",
+        ):
+            if stage_result.get(key) is not None:
+                task.result[key] = stage_result[key]
         task.status = "completed"
         task.touch()
         await persist_staging_task(task, force=True)

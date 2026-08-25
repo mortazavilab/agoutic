@@ -15,6 +15,8 @@ Covers:
 import asyncio
 import datetime
 import json
+import sys
+import types
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,17 +28,38 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+
+class _FakeEncoding:
+    def encode(self, text: str):
+        return list(text or "")
+
+
+if "tiktoken" not in sys.modules:
+    sys.modules["tiktoken"] = types.SimpleNamespace(
+        get_encoding=lambda _name: _FakeEncoding(),
+        Encoding=_FakeEncoding,
+    )
+
+
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = types.SimpleNamespace(
+        DataFrame=object,
+        Series=object,
+        read_csv=lambda *_args, **_kwargs: None,
+    )
+
 from common.database import Base
 import cortex.job_polling as job_polling_module
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
-    ProjectBlock,
+    ProjectBlock, SystemSetting,
 )
 from cortex.app import (
     handle_rejection,
     download_after_approval,
     _auto_execute_plan_steps,
     _ensure_workflow_plan_approval_gate,
+    _apply_shared_reconcile_approval,
     _recover_orphaned_background_tasks,
     _initial_stage_parts,
     _build_auto_analysis_context,
@@ -48,13 +71,22 @@ from cortex.app import (
 )
 from cortex.job_parameters import extract_job_parameters_from_conversation
 from cortex.job_polling import (
+    _update_parent_batch_status,
     poll_staging_status,
     poll_job_status,
     _auto_trigger_analysis,
     _completed_job_results_ready,
+    _prefer_richer_job_status,
     _resolved_job_work_directory,
 )
-from cortex.workflow_submission import submit_job_after_approval
+from cortex.workflow_submission import (
+    _build_haplotype_script_args,
+    _build_script_submission_payload,
+    cancel_dogme_batch,
+    retry_dogme_batch,
+    submit_dogme_batch_after_approval,
+    submit_job_after_approval,
+)
 from cortex.planner import _template_remote_stage_workflow
 from cortex.remote_orchestration import (
     _find_remote_staged_sample,
@@ -697,6 +729,118 @@ class TestSubmitJobAfterApproval:
         sess.close()
 
     @pytest.mark.asyncio
+    async def test_batch_submission_creates_one_internal_submission_per_sample(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "batch_id": "batch-1",
+                "batch_samples": [
+                    {"sample_name": "sample-a", "input_directory": "/data/a"},
+                    {"sample_name": "sample-b", "input_directory": "/data/b"},
+                ],
+                "shared_params": {"mode": "DNA", "reference_genome": ["mm39"]},
+                "requested_max_parallel": 2,
+            },
+        }, status="APPROVED")
+
+        with _patch_session(session_factory), patch(
+            "cortex.workflow_submission.submit_job_after_approval",
+            new=AsyncMock(),
+        ) as submit_mock:
+            await submit_dogme_batch_after_approval("proj-bg", gate.id)
+
+        assert submit_mock.await_count == 2
+        sess = session_factory()
+        child_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "BATCH_JOB_SUBMISSION").all()
+        assert len(child_blocks) == 2
+        assert {get_block_payload(block)["extracted_params"]["sample_name"] for block in child_blocks} == {
+            "sample-a", "sample-b",
+        }
+        parent_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert parent_payload["batch_status"] == "RUNNING"
+        assert [sample["status"] for sample in parent_payload["batch_samples"]] == ["SUBMITTING", "SUBMITTING"]
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_cancellation_marks_unsubmitted_samples_cancelled(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_id": "batch-cancel",
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "status": "PENDING"},
+                {"sample_id": "2", "sample_name": "sample-b", "status": "COMPLETED"},
+            ],
+        }, status="APPROVED")
+
+        with _patch_session(session_factory):
+            result = await cancel_dogme_batch("proj-bg", gate.id)
+
+        assert result == {
+            "batch_id": "batch-cancel",
+            "batch_status": "COMPLETED_WITH_FAILURES",
+            "cancelled_samples": 1,
+        }
+        sess = session_factory()
+        payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert [sample["status"] for sample in payload["batch_samples"]] == ["CANCELLED", "COMPLETED"]
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_batch_retry_creates_review_gate_for_failed_subset(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_id": "batch-original",
+            "batch_status": "COMPLETED_WITH_FAILURES",
+            "shared_params": {"mode": "CDNA", "reference_genome": ["GRCh38"]},
+            "requested_max_parallel": 2,
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "input_directory": "/data/a", "status": "COMPLETED", "run_uuid": "run-a"},
+                {"sample_id": "2", "sample_name": "sample-b", "input_directory": "/data/b", "status": "FAILED", "run_uuid": "run-b"},
+                {"sample_id": "3", "sample_name": "sample-c", "input_directory": "/data/c", "status": "CANCELLED", "run_uuid": "run-c"},
+            ],
+        }, status="APPROVED")
+
+        with _patch_session(session_factory):
+            result = await retry_dogme_batch("proj-bg", gate.id)
+
+        assert result["status"] == "approval_required"
+        assert result["retry_count"] == 2
+        sess = session_factory()
+        retry_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == result["block_id"]).one()
+        retry_payload = get_block_payload(retry_gate)
+        assert retry_gate.status == "PENDING"
+        assert retry_payload["retry_of_batch_id"] == "batch-original"
+        assert retry_payload["shared_params"] == {"mode": "CDNA", "reference_genome": ["GRCh38"]}
+        assert retry_payload["batch_samples"] == [
+            {"sample_id": "2-retry-1", "sample_name": "sample-b", "input_directory": "/data/b", "status": "PENDING", "retry_of_sample_id": "2"},
+            {"sample_id": "3-retry-1", "sample_name": "sample-c", "input_directory": "/data/c", "status": "PENDING", "retry_of_sample_id": "3"},
+        ]
+        original_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert original_payload["batch_samples"][1]["run_uuid"] == "run-b"
+        assert original_payload["retry_batch_gate_ids"] == [result["block_id"]]
+        sess.close()
+
+    def test_terminal_sample_status_aggregates_partial_batch_completion(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "sample-a", "status": "RUNNING"},
+                {"sample_id": "2", "sample_name": "sample-b", "status": "RUNNING"},
+            ],
+        }, status="APPROVED")
+        sess = session_factory()
+        execution_payload = {"batch_parent_gate_id": gate.id, "batch_sample_id": "1"}
+        _update_parent_batch_status(sess, execution_payload, {"status": "COMPLETED"})
+        _update_parent_batch_status(
+            sess,
+            {"batch_parent_gate_id": gate.id, "batch_sample_id": "2"},
+            {"status": "FAILED", "message": "Launchpad failed"},
+        )
+
+        parent_payload = get_block_payload(sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one())
+        assert parent_payload["batch_status"] == "COMPLETED_WITH_FAILURES"
+        assert parent_payload["batch_samples"][0]["status"] == "COMPLETED"
+        assert parent_payload["batch_samples"][1]["status"] == "FAILED"
+        assert parent_payload["batch_samples"][1]["error"] == "Launchpad failed"
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_edited_params_preferred(self, session_factory, seed_data):
         """edited_params are used over extracted_params when available."""
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
@@ -741,6 +885,60 @@ class TestSubmitJobAfterApproval:
         ).all()
         assert len(job_blocks) == 1
         assert get_block_payload(job_blocks[0])["sample_name"] == "edited_sample"
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_wf_pore_c_preview_gate_creates_preview_block_without_submission(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "gate_action": "workflow_dry_run_preview",
+            "skill": "run_wf_pore_c",
+            "model": "default",
+            "extracted_params": {
+                "workflow_key": "wf_pore_c",
+                "workflow_repo": "epi2me-labs/wf-pore-c",
+                "workflow_version": "v1.3.1",
+                "sample_name": "POREC_A",
+                "input_type": "bam",
+                "file_path": "/data/porec/sample.concatemers.bam",
+                "reference_fasta": "/refs/reference.fa",
+                "output_directory": "/projects/demo/workflow4",
+                "report_filename": "wf-pore-c-report.html",
+                "output_flags": {
+                    "pairs": True,
+                    "mcool": True,
+                    "hi_c": False,
+                    "bed": False,
+                    "chromunity": False,
+                    "coverage": False,
+                    "paired_end": False,
+                },
+            },
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.MCPHttpClient") as mock_client_cls:
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        mock_client_cls.assert_not_called()
+
+        sess = session_factory()
+        preview_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "AGENT_PLAN").all()
+        assert preview_blocks
+        preview_payload = get_block_payload(preview_blocks[-1])
+        assert preview_payload["skill"] == "run_wf_pore_c"
+        assert "wf-pore-c Dry-Run Preview" in preview_payload["markdown"]
+        assert preview_payload["workflow_preview"]["workflow_key"] == "wf_pore_c"
+        command_text = preview_payload["workflow_preview"]["command"].replace("\\\n", " ")
+        assert "nextflow" in command_text
+        assert "epi2me-labs/wf-pore-c" in command_text
+        assert "--bam" in command_text
+
+        refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
+        refreshed_payload = get_block_payload(refreshed_gate)
+        assert refreshed_payload["preview_block_id"] == preview_blocks[-1].id
+
+        job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
+        assert job_blocks == []
         sess.close()
 
     @pytest.mark.asyncio
@@ -859,6 +1057,18 @@ class TestSubmitJobAfterApproval:
                 "current_step_id": "run_reconcile",
                 "steps": [
                     {
+                        "id": "locate_reconcile_inputs",
+                        "kind": "LOCATE_DATA",
+                        "status": "COMPLETED",
+                        "title": "Locate annotated BAM candidates across workflow annot directories",
+                    },
+                    {
+                        "id": "locate_reconcile_outputs",
+                        "kind": "LOCATE_DATA",
+                        "status": "PENDING",
+                        "title": "List reconcile output files for parsing",
+                    },
+                    {
                         "id": "approve_reconcile",
                         "kind": "REQUEST_APPROVAL",
                         "status": "COMPLETED",
@@ -915,12 +1125,12 @@ class TestSubmitJobAfterApproval:
         mock_client = AsyncMock()
         mock_client.call_tool = AsyncMock(return_value={
             "run_uuid": "script-run-1",
-            "work_directory": "/work/script-run-1",
+            "work_directory": "/Users/alim/vscode/agoutic/skills/reconcile_bams/scripts",
         })
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client) as mock_client_cls, \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
@@ -929,10 +1139,18 @@ class TestSubmitJobAfterApproval:
         workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
         workflow_payload = get_block_payload(workflow)
         run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_reconcile")
+        locate_steps = [step for step in workflow_payload["steps"] if step["kind"] == "LOCATE_DATA"]
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-1"
-        assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
+        assert run_step["work_directory"] == "/proj/reconcile"
+        assert run_step["output_directory"] == "/proj/reconcile"
+        assert [step["title"] for step in locate_steps] == [
+            "Locate annotated BAM candidates across workflow annot directories",
+            "List reconcile output files for parsing",
+        ]
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
         submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["run_type"] == "script"
         assert submitted["script_id"] == "reconcile_bams/reconcile_bams"
         assert submitted["script_args"][:7] == [
             "--json",
@@ -945,6 +1163,8 @@ class TestSubmitJobAfterApproval:
         ]
         assert submitted["script_args"].count("--input-bam") == 2
         assert "--filter_known" in submitted["script_args"]
+        assert submitted["input_directory"] == "/proj/reconcile"
+        assert mock_client_cls.call_args.kwargs["timeout"] == 900.0
         job_blocks = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").all()
         assert any(get_block_payload(block).get("run_type") == "script" for block in job_blocks)
         sess.close()
@@ -1014,7 +1234,7 @@ class TestSubmitJobAfterApproval:
 
         with _patch_session(session_factory), \
              patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
-             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client) as mock_client_cls, \
              patch("cortex.workflow_submission.asyncio") as mock_aio:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
@@ -1026,7 +1246,9 @@ class TestSubmitJobAfterApproval:
         assert run_step["status"] == "RUNNING"
         assert run_step["run_uuid"] == "script-run-overlap-1"
         assert mock_client.call_tool.call_args.args[0] == "run_allowlisted_script"
+        assert "timeout_seconds" not in mock_client.call_tool.call_args.kwargs
         assert "script_working_directory" not in mock_client.call_tool.call_args.kwargs
+        assert mock_client_cls.call_args.kwargs["timeout"] == 900.0
         job_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").order_by(ProjectBlock.seq.desc()).first()
         job_payload = get_block_payload(job_block)
         assert job_payload["work_directory"] == "/proj/current/workflow7"
@@ -1253,6 +1475,41 @@ class TestSubmitJobAfterApproval:
         call_args = mock_client.call_tool.call_args
         submitted_dir = call_args.kwargs.get("input_directory", "")
         assert "bguser" in submitted_dir or "bg-proj" in submitted_dir
+
+    @pytest.mark.asyncio
+    async def test_fastq_cdna_resolves_single_project_fastq_file(self, session_factory, seed_data, tmp_path):
+        """fastqCDNA input_directory resolves to the single FASTQ in project data/ when the placeholder is used."""
+        data_dir = tmp_path / "users" / "bguser" / "bg-proj" / "data"
+        data_dir.mkdir(parents=True)
+        fastq_file = data_dir / "jamshid.fastq.gz"
+        fastq_file.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "extracted_params": {
+                "sample_name": "jamshid",
+                "mode": "CDNA",
+                "input_type": "fastq",
+                "entry_point": "fastqCDNA",
+                "input_directory": "/data/samples/test",
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "fastq-uuid", "work_directory": "/work/fastq",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.remote_orchestration.AGOUTIC_DATA", str(tmp_path)), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock()
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        call_args = mock_client.call_tool.call_args
+        assert call_args.kwargs.get("input_directory") == str(fastq_file)
 
     @pytest.mark.asyncio
     async def test_local_sample_is_staged_before_submission(self, session_factory, seed_data, tmp_path):
@@ -1521,6 +1778,40 @@ class TestSubmitJobAfterApproval:
         assert submitted["max_gpu_tasks"] is None
 
     @pytest.mark.asyncio
+    async def test_local_submission_forwards_local_max_task_cpus(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "local-test",
+                "mode": "DNA",
+                "input_type": "pod5",
+                "input_directory": "/data/local-sample",
+                "reference_genome": ["mm39"],
+                "execution_mode": "local",
+                "local_max_task_cpus": 8,
+                "local_max_task_memory_gb": 48,
+            },
+        })
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "local-uuid", "work_directory": "/work/local",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["execution_mode"] == "local"
+        assert submitted["local_max_task_cpus"] == 8
+        assert submitted["local_max_task_memory_gb"] == 48
+        assert submitted["slurm_cpus"] is None
+
+    @pytest.mark.asyncio
     async def test_remote_submission_keeps_cpu_and_gpu_accounts_separate(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "edited_params": {
@@ -1582,6 +1873,98 @@ class TestSubmitJobAfterApproval:
         assert submitted["slurm_memory_gb"] == 16
         assert submitted["slurm_walltime"] == "48:00:00"
         assert submitted["staged_remote_input_path"] == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/778fbb3a707d09a5"
+        assert submitted["parent_block_id"]
+
+    @pytest.mark.asyncio
+    async def test_remote_submit_timeout_recovers_accepted_job(self, session_factory, seed_data):
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "remote-timeout",
+                "mode": "CDNA",
+                "input_type": "fastq",
+                "entry_point": "fastqCDNA",
+                "input_directory": "/data/remote-timeout.fastq.gz",
+                "reference_genome": ["GRCh38"],
+                "execution_mode": "slurm",
+                "ssh_profile_id": "profile-123",
+                "staged_remote_input_path": "/remote/data/timeout",
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            RuntimeError("Failed to submit job: request timed out while waiting for Launchpad /jobs/submit"),
+            {"run_uuid": "recovered-uuid", "work_directory": "/work/recovered"},
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        sess = session_factory()
+        job_block = sess.query(ProjectBlock).filter(ProjectBlock.type == "EXECUTION_JOB").one()
+        assert job_block.status == "RUNNING"
+        assert get_block_payload(job_block)["run_uuid"] == "recovered-uuid"
+        assert [call.args[0] for call in mock_client.call_tool.call_args_list] == [
+            "submit_dogme_job", "find_job_by_parent_block",
+        ]
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_remote_unmapped_bam_remap_skips_staging(self, session_factory, seed_data):
+        remote_bam = "/share/crsp/lab/seyedam/share/agoutic/elnaz/fshd15/workflow7/bams/fshd15.unmapped.bam"
+        gate = _create_gate(session_factory, "proj-bg", "u-bg", {
+            "edited_params": {
+                "sample_name": "fshd15_chm13_remap",
+                "mode": "DNA",
+                "input_type": "bam",
+                "entry_point": "remap",
+                "input_directory": f"remote:{remote_bam}",
+                "remote_input_path": remote_bam,
+                "staged_remote_input_path": remote_bam,
+                "reference_genome": ["chm13"],
+                "execution_mode": "slurm",
+                "ssh_profile_nickname": "hpc3",
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/elnaz",
+                "cache_preflight": {
+                    "status": "ready",
+                    "data_action": {"action": "use_remote_path", "cache_path": remote_bam},
+                },
+            },
+        })
+
+        async def _passthrough_prepare(session, project_id, owner_id, params):
+            return dict(params)
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(return_value={
+            "run_uuid": "remote-remap-uuid", "work_directory": "/work/remote-remap",
+        })
+
+        with _patch_session(session_factory), \
+             patch("cortex.workflow_submission._prepare_remote_execution_params", new=_passthrough_prepare), \
+             patch("cortex.workflow_submission.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.workflow_submission.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.workflow_submission._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))), \
+             patch("cortex.workflow_submission.asyncio") as mock_aio:
+            mock_aio.create_task = MagicMock(side_effect=_close_scheduled_coroutine)
+            await submit_job_after_approval("proj-bg", gate.id)
+
+        assert mock_client.call_tool.call_args.args[0] == "submit_dogme_job"
+        submitted = mock_client.call_tool.call_args.kwargs
+        assert submitted["remote_input_path"] == remote_bam
+        assert submitted["staged_remote_input_path"] == remote_bam
+        assert submitted["input_directory"] == f"remote:{remote_bam}"
+        assert submitted["entry_point"] == "remap"
+        assert submitted["reference_genome"] == ["chm13"]
 
     @pytest.mark.asyncio
     async def test_stage_only_remote_request_calls_stage_remote_sample(self, session_factory, seed_data):
@@ -1770,10 +2153,7 @@ class TestSubmitJobAfterApproval:
             mock_aio.create_task = MagicMock()
             await submit_job_after_approval("proj-bg", gate.id)
 
-        assert mock_client.call_tool.await_count == 1
-        assert mock_client.call_tool.call_args.args[0] == "stage_remote_sample"
-        submitted = mock_client.call_tool.call_args.kwargs
-        assert submitted["remote_input_path"] == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_086-04_dRNA_p2_1/pod5"
+        assert mock_client.call_tool.await_count == 0
 
         sess = session_factory()
         refreshed_gate = sess.query(ProjectBlock).filter(ProjectBlock.id == gate.id).one()
@@ -1877,6 +2257,119 @@ class TestSubmitJobAfterApproval:
 
 
 class TestStartupRecovery:
+    @pytest.mark.asyncio
+    async def test_recovery_still_resumes_orphaned_jobs_when_maintenance_mode_is_on(self, session_factory, seed_data):
+        sess = session_factory()
+        sess.add_all(
+            [
+                SystemSetting(key="maintenance_mode", value="true"),
+                SystemSetting(key="maintenance_message", value="Drain mode"),
+                SystemSetting(key="maintenance_starts_at", value=""),
+            ]
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-maint",
+                "job_status": {"status": "RUNNING", "progress_percent": 50},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        captured_args = None
+        captured_kwargs = None
+
+        async def _noop_poll():
+            return None
+
+        def _fake_poll(*args, **kwargs):
+            nonlocal captured_args, captured_kwargs
+            captured_args = args
+            captured_kwargs = kwargs
+            return _noop_poll()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status", new=_fake_poll), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await _recover_orphaned_background_tasks()
+
+        assert captured_args == ("proj-bg", job_block.id, "restart-run-maint")
+        assert captured_kwargs == {"initial_delay_seconds": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_resumes_orphaned_execution_job_poll_immediately_after_restart(self, session_factory, seed_data):
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-1",
+                "job_status": {"status": "RUNNING", "progress_percent": 44},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        captured_args = None
+        captured_kwargs = None
+
+        async def _noop_poll():
+            return None
+
+        def _fake_poll(*args, **kwargs):
+            nonlocal captured_args, captured_kwargs
+            captured_args = args
+            captured_kwargs = kwargs
+            return _noop_poll()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status", new=_fake_poll), \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            await _recover_orphaned_background_tasks()
+
+        assert captured_args == ("proj-bg", job_block.id, "restart-run-1")
+        assert captured_kwargs == {"initial_delay_seconds": 0.0}
+
+    @pytest.mark.asyncio
+    async def test_recovery_treats_stale_inner_job_status_as_terminal(self, session_factory, seed_data):
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "restart-run-stale",
+                "job_status": {"status": "STALE", "progress_percent": 0},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling.poll_job_status") as mock_poll, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            await _recover_orphaned_background_tasks()
+
+        assert mock_poll.call_count == 0
+        assert mock_create_task.call_count == 0
+
+        sess = session_factory()
+        refreshed = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        assert refreshed.status == "FAILED"
+        sess.close()
+
     @pytest.mark.asyncio
     async def test_resumes_orphaned_staging_poll_when_task_id_is_persisted(self, session_factory, seed_data):
         sess = session_factory()
@@ -2508,10 +3001,1009 @@ async def test_ensure_workflow_plan_approval_gate_builds_reconcile_specific_payl
     assert gate_payload["gate_action"] == "reconcile_bams"
     assert gate_payload["skill"] == "reconcile_bams"
     assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["workflow_key"] == "reconcile_bams"
     assert gate_payload["extracted_params"]["script_id"] == "reconcile_bams/reconcile_bams"
     assert gate_payload["extracted_params"]["reference"] == "mm39"
     assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
     assert gate_payload["extracted_params"]["bam_count"] == 2
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/reconcile"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_preserves_dogme_batch_payload(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "run_dogme_batch",
+            "batch_id": "batch-approval",
+            "batch_samples": [
+                {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor"},
+                {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal"},
+            ],
+            "shared_params": {"mode": "DNA", "reference_genome": ["GRCh38"]},
+            "requested_max_parallel": 2,
+            "current_step_id": "approve_dogme_batch",
+            "steps": [{
+                "id": "approve_dogme_batch",
+                "kind": "REQUEST_APPROVAL",
+                "status": "WAITING_APPROVAL",
+            }],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["label"] == "Do you authorize DOGME for 2 samples?"
+    assert gate_payload["extracted_params"] == {
+        "batch_id": "batch-approval",
+        "batch_samples": [
+            {"sample_id": "1", "sample_name": "tumor", "input_directory": "/data/tumor"},
+            {"sample_id": "2", "sample_name": "normal", "input_directory": "/data/normal"},
+        ],
+        "shared_params": {"mode": "DNA", "reference_genome": ["GRCh38"]},
+        "requested_max_parallel": 2,
+        "retry_of_batch_id": None,
+    }
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_haplotype_specific_payload(session_factory, seed_data):
+    preflight_payload = {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Haplotype preflight validation passed. Ready for approval.",
+        "mode": "RNA",
+        "assignment_mode": "two_sample",
+        "vcf": {
+            "path": "/proj/refs/parents.vcf.gz",
+            "available_samples": ["parentA", "parentB"],
+            "selected_samples": ["parentA", "parentB"],
+            "selected_sample_sources": {"parentA": "parentA", "parentB": "parentB"},
+        },
+        "labels": {
+            "assignment_labels": ["parentA", "parentB"],
+            "label_a": "parentA",
+            "label_b": "parentB",
+            "ambiguous": "ambiguous",
+        },
+        "inputs": {
+            "count": 2,
+            "bams": [
+                {
+                    "name": "sample1.mm39.annotated.bam",
+                    "path": "/proj/workflow7/annot/sample1.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow7",
+                    "workflow_type": "dogme_rna",
+                },
+                {
+                    "name": "sample2.mm39.annotated.bam",
+                    "path": "/proj/workflow8/annot/sample2.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow8",
+                    "workflow_type": "dogme_rna",
+                },
+            ],
+        },
+        "thresholds": {
+            "min_informative_sites": 2,
+            "min_mapq": 0,
+        },
+        "execution_defaults": {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "underlying_script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "progress_read_interval": 100000,
+        },
+        "outputs": {
+            "output_root": "/proj/workflow9",
+            "artifacts": [],
+        },
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "haplotype_with_vcf",
+            "skill": "haplotype_with_vcf",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_haplotype",
+            "output_directory": "/proj/workflow9",
+            "steps": [
+                {
+                    "id": "preflight_haplotype",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate haplotype inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "stdout": json.dumps(preflight_payload),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_haplotype",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve haplotype execution",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_haplotype"],
+                },
+                {
+                    "id": "run_haplotype",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run haplotype script",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_haplotype"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "timeout_seconds": 43200.0,
+                                "script_args": [
+                                    "--workflow-dir", "/proj/workflow7",
+                                    "--workflow-dir", "/proj/workflow8",
+                                    "--output-dir", "/proj/workflow9",
+                                    "--vcf", "/proj/refs/parents.vcf.gz",
+                                    "--mode", "RNA",
+                                    "--json",
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "haplotype_with_vcf"
+    assert gate_payload["skill"] == "haplotype_with_vcf"
+    assert gate_payload["extracted_params"]["run_type"] == "script"
+    assert gate_payload["extracted_params"]["workflow_key"] == "haplotype_with_vcf"
+    assert gate_payload["extracted_params"]["script_id"] == "haplotype_with_vcf/haplotype_with_vcf"
+    assert gate_payload["extracted_params"]["mode"] == "RNA"
+    assert gate_payload["extracted_params"]["assignment_mode"] == "two_sample"
+    assert gate_payload["extracted_params"]["vcf_selected_samples"] == ["parentA", "parentB"]
+    assert gate_payload["extracted_params"]["assignment_labels"] == ["parentA", "parentB"]
+    assert gate_payload["extracted_params"]["vcf_selected_sample_sources"] == {
+        "parentA": "parentA",
+        "parentB": "parentB",
+    }
+    assert gate_payload["extracted_params"]["label_a"] == "parentA"
+    assert gate_payload["extracted_params"]["bam_count"] == 2
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow9"
+    assert gate_payload["extracted_params"]["timeout_seconds"] == 43200.0
+    assert [item["name"] for item in gate_payload["extracted_params"]["bam_inputs"]] == [
+        "sample1.mm39.annotated.bam",
+        "sample2.mm39.annotated.bam",
+    ]
+    assert "sample1.mm39.annotated.bam" in gate_payload["label"]
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_marks_defaulted_haplotype_founder_vcf(session_factory, seed_data):
+    preflight_payload = {
+        "success": True,
+        "status": "preflight_ready",
+        "message": "Haplotype preflight validation passed. Ready for approval.",
+        "mode": "RNA",
+        "assignment_mode": "founder_panel",
+        "vcf": {
+            "path": "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+            "available_samples": ["C57BL_6J", "A_J", "CAST_EiJ", "PWK_PhJ"],
+            "selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "selected_sample_sources": {"C57BL_6J": None, "CAST_EiJ": "CAST_EiJ"},
+        },
+        "labels": {
+            "assignment_labels": ["C57BL_6J", "CAST_EiJ"],
+            "label_a": "C57BL_6J",
+            "label_b": "CAST_EiJ",
+            "ambiguous": "ambiguous",
+        },
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {
+                    "name": "sample1.mm39.annotated.bam",
+                    "path": "/proj/workflow7/annot/sample1.mm39.annotated.bam",
+                    "workflow_dir": "/proj/workflow7",
+                    "workflow_type": "dogme_rna",
+                }
+            ],
+        },
+        "thresholds": {
+            "min_informative_sites": 2,
+            "min_mapq": 0,
+        },
+        "execution_defaults": {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "underlying_script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "progress_read_interval": 100000,
+        },
+        "outputs": {
+            "output_root": "/proj/workflow9",
+            "artifacts": [],
+        },
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "haplotype_with_vcf",
+            "skill": "haplotype_with_vcf",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_haplotype",
+            "reference_genome": "mm39",
+            "vcf_defaulted": True,
+            "output_directory": "/proj/workflow9",
+            "steps": [
+                {
+                    "id": "preflight_haplotype",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate haplotype inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "stdout": json.dumps(preflight_payload),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_haplotype",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve haplotype execution",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_haplotype"],
+                },
+                {
+                    "id": "run_haplotype",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run haplotype script",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_haplotype"],
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                                "script_args": [
+                                    "--workflow-dir", "/proj/workflow7",
+                                    "--output-dir", "/proj/workflow9",
+                                    "--vcf", "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+                                    "--vcf-sample", "C57BL_6J",
+                                    "--vcf-sample", "CAST_EiJ",
+                                    "--mode", "RNA",
+                                    "--json",
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["reference_genome"] == "mm39"
+    assert gate_payload["extracted_params"]["vcf_defaulted"] is True
+    assert gate_payload["extracted_params"]["vcf_path"] == "/proj/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+    assert gate_payload["extracted_params"]["assignment_mode"] == "founder_panel"
+    assert gate_payload["extracted_params"]["assignment_labels"] == ["C57BL_6J", "CAST_EiJ"]
+    assert gate_payload["extracted_params"]["vcf_selected_sample_sources"] == {
+        "C57BL_6J": None,
+        "CAST_EiJ": "CAST_EiJ",
+    }
+    assert "default mm39 founder VCF" in gate_payload["label"]
+    sess.close()
+
+
+def test_build_haplotype_script_args_defaults_founder_vcf_and_skips_label_flags(monkeypatch):
+    monkeypatch.setattr(
+        "cortex.workflow_submission.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    script_args = _build_haplotype_script_args(
+        {
+            "bam_inputs": [{"path": "/proj/workflow7/annot/sample1.mm39.annotated.bam"}],
+            "mode": "RNA",
+            "assignment_mode": "founder_panel",
+            "reference_genome": "mm39",
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "label_a": "C57BL_6J",
+            "label_b": "CAST_EiJ",
+            "output_directory": "/proj/workflow9",
+        }
+    )
+
+    assert script_args[:6] == [
+        "--json",
+        "--output-dir",
+        "/proj/workflow9",
+        "--vcf",
+        "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+        "--mode",
+    ]
+    assert script_args.count("--vcf-sample") == 2
+    assert "--label-a" not in script_args
+    assert "--label-b" not in script_args
+
+
+def test_build_script_submission_payload_forwards_timeout_seconds():
+    payload = _build_script_submission_payload(
+        {
+            "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+            "script_args": ["--json", "--mode", "RNA"],
+            "output_directory": "/proj/workflow9",
+            "timeout_seconds": 43200.0,
+        }
+    )
+
+    assert payload["timeout_seconds"] == 43200.0
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_wf_pore_c_preview_payload(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "run_wf_pore_c",
+            "skill": "run_wf_pore_c",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_wf_pore_c_preview",
+            "workflow_key": "wf_pore_c",
+            "workflow_repo": "epi2me-labs/wf-pore-c",
+            "workflow_version": "v1.3.1",
+            "sample_name": "POREC_A",
+            "sample": "POREC_A",
+            "file_path": "/data/porec/sample.concatemers.bam",
+            "source_path": "/data/porec/sample.concatemers.bam",
+            "input_directory": "/data/porec/sample.concatemers.bam",
+            "input_type": "bam",
+            "reference_fasta": "/refs/reference.fa",
+            "vcf": "/refs/sample.vcf.gz",
+            "sample_sheet": "",
+            "cutter": "NlaIII",
+            "output_directory": "/projects/demo/workflow4",
+            "report_filename": "wf-pore-c-report.html",
+            "output_flags": {
+                "pairs": True,
+                "mcool": True,
+                "hi_c": False,
+                "bed": False,
+                "chromunity": False,
+                "coverage": False,
+                "paired_end": False,
+            },
+            "steps": [
+                {
+                    "id": "validate_wf_pore_c_inputs",
+                    "kind": "VALIDATE_INPUTS",
+                    "title": "Validate wf-pore-c inputs for POREC_A",
+                    "status": "COMPLETED",
+                },
+                {
+                    "id": "approve_wf_pore_c_preview",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve wf-pore-c dry-run preview for POREC_A",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["validate_wf_pore_c_inputs"],
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["gate_action"] == "workflow_dry_run_preview"
+    assert gate_payload["skill"] == "run_wf_pore_c"
+    assert gate_payload["extracted_params"]["workflow_key"] == "wf_pore_c"
+    assert gate_payload["extracted_params"]["reference_fasta"] == "/refs/reference.fa"
+    assert gate_payload["extracted_params"]["output_flags"]["pairs"] is True
+    assert gate_payload["extracted_params"]["report_filename"] == "wf-pore-c-report.html"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_uses_current_split_reconcile_group(session_factory, seed_data):
+    human_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "GRCh38",
+        "gtf": {"path": "/refs/GRCh38.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "A", "reference": "GRCh38", "path": "/proj/workflow2/annot/A.GRCh38.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mm39",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "reference_groups": ["GRCh38", "mm39"],
+            "steps": [
+                {
+                    "id": "preflight_reconcile",
+                    "kind": "CHECK_EXISTING",
+                    "title": "Validate reconcile inputs",
+                    "status": "COMPLETED",
+                    "result": [
+                        {
+                            "tool": "run_allowlisted_script",
+                            "result": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "stdout": json.dumps({
+                                    "success": True,
+                                    "status": "split_by_reference",
+                                    "reference_groups": [human_preflight, mouse_preflight],
+                                }),
+                            },
+                        }
+                    ],
+                },
+                {
+                    "id": "approve_grch38",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for all detected references (GRCh38, mm39)",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "depends_on": ["preflight_reconcile"],
+                    "preflight_summary": human_preflight,
+                    "shared_reconcile_authorization": True,
+                    "approved_references": ["GRCh38", "mm39"],
+                },
+                {
+                    "id": "run_grch38",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for GRCh38 using symlinked workflow inputs",
+                    "status": "COMPLETED",
+                    "depends_on": ["approve_grch38"],
+                    "output_directory": "/proj/workflow4",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "GRCh38", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": human_preflight,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "depends_on": ["run_grch38"],
+                    "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow5",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow5",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["reference"] == "mm39"
+    assert gate_payload["extracted_params"]["annotation_gtf"] == "/refs/mm39.gtf"
+    assert gate_payload["extracted_params"]["bam_count"] == 1
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow5"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_builds_shared_reconcile_payload_for_all_references(session_factory, seed_data):
+    mad1_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mad1",
+        "gtf": {"path": "/refs/mad1.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "A", "reference": "mad1", "path": "/proj/workflow2/annot/A.mad1.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mad1", "output_root": "/proj", "artifacts": []},
+    }
+    mm39_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mm39", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mad1",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "reference_groups": ["mad1", "mm39"],
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for all detected references (mad1, mm39)",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "shared_reconcile_authorization": True,
+                    "approved_references": ["mad1", "mm39"],
+                    "preflight_summary": mad1_preflight,
+                    "output_directory": "/proj/workflow13",
+                },
+                {
+                    "id": "run_mad1",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mad1 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mad1"],
+                    "output_directory": "/proj/workflow13",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mad1", "--output-prefix", "reconciled_mad1"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mad1_preflight,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mm39_preflight,
+                    "output_directory": "/proj/workflow14",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow14",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled_mm39"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mm39_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    gate = await _ensure_workflow_plan_approval_gate(
+        sess,
+        workflow_block,
+        owner_id="u-bg",
+        model_name="test-model",
+    )
+
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["extracted_params"]["approve_all_references"] is True
+    assert gate_payload["extracted_params"]["approved_references"] == ["mad1", "mm39"]
+    reconcile_runs = gate_payload["extracted_params"]["reconcile_runs"]
+    assert [run["reference"] for run in reconcile_runs] == ["mad1", "mm39"]
+    assert reconcile_runs[0]["output_directory"] == "/proj/workflow13"
+    assert reconcile_runs[1]["output_directory"] == "/proj/workflow14"
+    assert reconcile_runs[1]["annotation_gtf"] == "/refs/mm39.gtf"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_shared_reconcile_approval_records_later_steps_as_covered(session_factory, seed_data):
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mad1",
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "status": "WAITING_APPROVAL",
+                    "shared_reconcile_authorization": True,
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    _apply_shared_reconcile_approval(sess, workflow_block, "gate-shared")
+
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    later_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    assert refreshed_payload["shared_reconcile_approval_granted"] is True
+    assert refreshed_payload["shared_reconcile_approval_gate_id"] == "gate-shared"
+    assert later_step["status"] == "PENDING"
+    assert later_step["shared_reconcile_approval_gate_id"] == "gate-shared"
+    assert later_step["shared_reconcile_approval_granted"] is True
+    assert "approval_gate_id" not in later_step
+    assert later_step["requires_approval"] is True
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_execute_plan_steps_auto_approves_follow_on_reconcile_after_prior_reference(session_factory, seed_data):
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled_mm39", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "RUNNING",
+            "current_step_id": "write_mad1",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "shared_reconcile_approval_granted": True,
+            "shared_reconcile_approval_gate_id": "gate-shared",
+            "steps": [
+                {
+                    "id": "approve_mad1",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for all detected references (mad1, mm39)",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "shared_reconcile_authorization": True,
+                    "approval_gate_id": "gate-shared",
+                },
+                {
+                    "id": "run_mad1",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mad1 using symlinked workflow inputs",
+                    "status": "COMPLETED",
+                    "requires_approval": True,
+                    "depends_on": ["approve_mad1"],
+                    "output_directory": "/proj/workflow15",
+                },
+                {
+                    "id": "write_mad1",
+                    "kind": "WRITE_SUMMARY",
+                    "title": "Summarize reconcile outputs and generated files for mad1",
+                    "status": "COMPLETED",
+                    "depends_on": ["run_mad1"],
+                },
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["write_mad1"],
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow16",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "requires_approval": True,
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow16",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled_mm39"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="RUNNING",
+        owner_id="u-bg",
+    )
+    sess.close()
+
+    user = type("UserStub", (), {"id": "u-bg"})()
+
+    with _patch_session(session_factory), \
+         patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
+         patch("cortex.chat_approval.asyncio.create_task") as mock_create_task:
+        mock_engine = MagicMock()
+        mock_engine.model_name = "default"
+        mock_engine_cls.return_value = mock_engine
+        mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+
+        await _auto_execute_plan_steps("proj-bg", workflow_block.id, user, "test-model")
+
+    assert mock_create_task.call_count == 1
+
+    sess = session_factory()
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    approve_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    run_step = next(step for step in refreshed_payload["steps"] if step["id"] == "run_mm39")
+    assert refreshed_payload["current_step_id"] == "run_mm39"
+    assert approve_step["status"] == "COMPLETED"
+    assert run_step["approval_gate_id"] == approve_step["approval_gate_id"]
+
+    gate = sess.execute(
+        select(ProjectBlock)
+        .where(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "APPROVAL_GATE",
+            ProjectBlock.parent_id == workflow_block.id,
+            ProjectBlock.status == "APPROVED",
+        )
+        .order_by(ProjectBlock.seq.desc())
+    ).scalar_one()
+    gate_payload = get_block_payload(gate)
+    assert gate_payload["auto_approved"] is True
+    assert gate_payload["extracted_params"]["reference"] == "mm39"
+    assert gate_payload["extracted_params"]["output_directory"] == "/proj/workflow16"
+    sess.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_workflow_plan_approval_gate_auto_approves_follow_on_split_reconcile_steps(session_factory, seed_data):
+    mouse_preflight = {
+        "success": True,
+        "status": "preflight_ready",
+        "reference": "mm39",
+        "gtf": {"path": "/refs/mm39.gtf", "source": "default"},
+        "inputs": {
+            "count": 1,
+            "bams": [
+                {"sample": "B", "reference": "mm39", "path": "/proj/workflow3/annot/B.mm39.annotated.bam"},
+            ],
+        },
+        "outputs": {"output_prefix": "reconciled", "output_root": "/proj", "artifacts": []},
+    }
+
+    sess = session_factory()
+    workflow_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "WORKFLOW_PLAN",
+        {
+            "plan_type": "reconcile_bams",
+            "skill": "reconcile_bams",
+            "status": "WAITING_APPROVAL",
+            "current_step_id": "approve_mm39",
+            "output_prefix": "reconciled",
+            "output_directory": "/proj",
+            "shared_reconcile_approval_granted": True,
+            "shared_reconcile_approval_gate_id": "gate-shared",
+            "steps": [
+                {
+                    "id": "approve_mm39",
+                    "kind": "REQUEST_APPROVAL",
+                    "title": "Approve reconcile BAM execution for mm39",
+                    "status": "WAITING_APPROVAL",
+                    "requires_approval": True,
+                    "auto_approve_from_shared_reconcile_authorization": True,
+                    "preflight_summary": mouse_preflight,
+                    "output_directory": "/proj/workflow5",
+                },
+                {
+                    "id": "run_mm39",
+                    "kind": "RUN_SCRIPT",
+                    "title": "Run reconcile BAM script for mm39 using symlinked workflow inputs",
+                    "status": "PENDING",
+                    "depends_on": ["approve_mm39"],
+                    "output_directory": "/proj/workflow5",
+                    "tool_calls": [
+                        {
+                            "source_key": "launchpad",
+                            "tool": "run_allowlisted_script",
+                            "params": {
+                                "script_id": "reconcile_bams/reconcile_bams",
+                                "script_args": ["--json", "--reference", "mm39", "--output-prefix", "reconciled"],
+                            },
+                        }
+                    ],
+                    "preflight_summary": mouse_preflight,
+                },
+            ],
+        },
+        status="PENDING",
+        owner_id="u-bg",
+    )
+
+    with patch("cortex.chat_approval.asyncio") as mock_asyncio:
+        mock_asyncio.create_task = MagicMock()
+        gate = await _ensure_workflow_plan_approval_gate(
+            sess,
+            workflow_block,
+            owner_id="u-bg",
+            model_name="test-model",
+        )
+
+    gate_payload = get_block_payload(gate)
+    assert gate.status == "APPROVED"
+    assert gate_payload["auto_approved"] is True
+    assert gate_payload["shared_reconcile_approval_gate_id"] == "gate-shared"
+    refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+    refreshed_payload = get_block_payload(refreshed_workflow)
+    current_step = next(step for step in refreshed_payload["steps"] if step["id"] == "approve_mm39")
+    run_step = next(step for step in refreshed_payload["steps"] if step["id"] == "run_mm39")
+    assert current_step["status"] == "COMPLETED"
+    assert current_step["approval_gate_id"] == gate.id
+    assert refreshed_payload["current_step_id"] == "run_mm39"
+    assert run_step["approval_gate_id"] == gate.id
+    assert mock_asyncio.create_task.call_count == 1
+    scheduled_coro = mock_asyncio.create_task.call_args.args[0]
+    scheduled_coro.close()
     sess.close()
 
 
@@ -2597,6 +4089,46 @@ class TestPollJobStatus:
         sess = session_factory()
         updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
         assert updated.status == "FAILED"
+        sess.close()
+
+    @pytest.mark.anyio
+    async def test_updates_block_on_stale_status(self, session_factory, seed_data):
+        """Polling treats STALE as terminal and stops without auto-analysis."""
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess, "proj-bg", "EXECUTION_JOB",
+            {
+                "run_uuid": "stale-test",
+                "job_status": {"status": "RUNNING", "progress_percent": 50},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "STALE", "progress_percent": 0, "message": "Marked stale by maintenance cleanup."},
+            {"logs": [{"message": "Marked stale"}]},
+        ])
+        mock_auto = AsyncMock()
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+            mock_sleep.return_value = None
+            await poll_job_status("proj-bg", job_block.id, "stale-test")
+
+        assert mock_auto.await_count == 0
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "FAILED"
+        assert payload["job_status"]["status"] == "STALE"
         sess.close()
 
     @pytest.mark.anyio
@@ -2695,6 +4227,88 @@ class TestJobStatusProxyCache:
 
         assert result == cached
         async_client.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_cached_terminal_status_repairs_workflow_plan_and_reserves_analysis(self, session_factory, seed_data, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample ad015_23778",
+                "sample_name": "ad015_23778",
+                "run_uuid": "proxy-copyback-cached",
+                "status": "RUNNING",
+                "next_step": "run_dogme",
+                "steps": [
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "RUNNING", "order_index": 0},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 1},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "proxy-copyback-cached",
+                "workflow_plan_block_id": workflow_block.id,
+                "work_directory": "/local/workflow7",
+                "sample_name": "ad015_23778",
+                "mode": "RNA",
+                "model": "default",
+                "run_type": "dogme",
+                "job_status": {"status": "RUNNING", "progress_percent": 99},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        cached = {
+            "run_uuid": "proxy-copyback-cached",
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Results synchronized to the local workflow directory.",
+            "result_destination": "local",
+            "transfer_state": "outputs_downloaded",
+            "work_directory": "/local/workflow7",
+        }
+        job_polling_module.cache_job_status("proxy-copyback-cached", cached)
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+        async_client = MagicMock()
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (_close_scheduled_coroutine(coro), MagicMock())[1]
+            result = await get_job_status_proxy("proxy-copyback-cached", request)
+
+        assert result == cached
+        async_client.assert_not_called()
+        assert mock_auto.call_count == 1
+        assert mock_create_task.call_count == 1
+
+        sess = session_factory()
+        refreshed_job = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        job_payload = get_block_payload(refreshed_job)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        assert refreshed_job.status == "DONE"
+        assert job_payload["job_status"]["transfer_state"] == "outputs_downloaded"
+        assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        sess.close()
 
     @pytest.mark.anyio
     async def test_returns_cached_status_when_live_proxy_times_out(self, monkeypatch):
@@ -2797,6 +4411,101 @@ class TestJobStatusProxyCache:
         assert refreshed["tasks"]["completed_count"] == 61
         assert "last_poll_error" not in refreshed
         async_client.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_live_terminal_status_repairs_workflow_plan_and_reserves_analysis(self, session_factory, seed_data, monkeypatch):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "workflow_type": "local_sample_intake",
+                "title": "Process local sample ad015_23778",
+                "sample_name": "ad015_23778",
+                "run_uuid": "proxy-copyback-live",
+                "status": "RUNNING",
+                "next_step": "run_dogme",
+                "steps": [
+                    {"id": "run_dogme", "kind": "run", "title": "Run Dogme", "status": "RUNNING", "order_index": 0},
+                    {"id": "analyze_results", "kind": "analysis", "title": "Analyze results", "status": "PENDING", "order_index": 1},
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "proxy-copyback-live",
+                "workflow_plan_block_id": workflow_block.id,
+                "work_directory": "/local/workflow8",
+                "sample_name": "ad015_23778",
+                "mode": "RNA",
+                "model": "default",
+                "run_type": "dogme",
+                "job_status": {"status": "RUNNING", "progress_percent": 99},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="u-bg")))
+        monkeypatch.setattr("cortex.app.require_run_uuid_access", lambda run_uuid, user: None)
+
+        live_payload = {
+            "run_uuid": "proxy-copyback-live",
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Results synchronized to the local workflow directory.",
+            "result_destination": "local",
+            "transfer_state": "outputs_downloaded",
+            "work_directory": "/local/workflow8",
+        }
+
+        class _LiveAsyncClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, *args, **kwargs):
+                response = MagicMock()
+                response.raise_for_status.return_value = None
+                response.json.return_value = live_payload
+                return response
+
+        async_client = MagicMock(return_value=_LiveAsyncClient())
+        monkeypatch.setattr("cortex.app.httpx.AsyncClient", async_client)
+
+        with _patch_session(session_factory), \
+             patch("cortex.app.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.app.asyncio.create_task") as mock_create_task:
+            mock_create_task.side_effect = lambda coro: (_close_scheduled_coroutine(coro), MagicMock())[1]
+            result = await get_job_status_proxy("proxy-copyback-live", request)
+
+        assert result == live_payload
+        assert mock_auto.call_count == 1
+        assert mock_create_task.call_count == 1
+        async_client.assert_called_once()
+
+        sess = session_factory()
+        refreshed_job = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).one()
+        refreshed_workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        job_payload = get_block_payload(refreshed_job)
+        workflow_payload = get_block_payload(refreshed_workflow)
+        assert refreshed_job.status == "DONE"
+        assert job_payload["job_status"]["transfer_state"] == "outputs_downloaded"
+        assert workflow_payload["steps"][0]["status"] == "COMPLETED"
+        assert workflow_payload["steps"][1]["status"] == "RUNNING"
+        sess.close()
 
     @pytest.mark.anyio
     async def test_live_transient_failure_still_returns_preserved_cached_status(self, monkeypatch):
@@ -2914,6 +4623,118 @@ class TestJobStatusProxyCache:
         assert payload["job_status"]["progress_percent"] == 17
         assert payload["job_status"]["tasks"]["completed_count"] == 32
         assert payload["job_status"]["last_poll_error"] == "Failed to poll scheduler: [Errno 111] Connection refused"
+        sess.close()
+
+    def test_prefer_richer_job_status_preserves_active_import_sync_on_incomplete_completed_snapshot(self):
+        previous_status = {
+            "status": "RUNNING",
+            "progress_percent": 99,
+            "message": "Copying results back to the local workflow...",
+            "result_destination": "local",
+            "transfer_state": "pending_import",
+            "imported_source_kind": "slurm",
+            "work_directory": "/local/workflow6",
+        }
+        incoming_status = {
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Job completed.",
+        }
+
+        merged = _prefer_richer_job_status(previous_status, incoming_status)
+
+        assert merged is not None
+        assert merged["status"] == "RUNNING"
+        assert merged["result_destination"] == "local"
+        assert merged["transfer_state"] == "pending_import"
+        assert merged["progress_percent"] >= 99
+
+    def test_prefer_richer_job_status_does_not_preserve_when_transfer_marked_stale(self):
+        previous_status = {
+            "status": "RUNNING",
+            "progress_percent": 99,
+            "message": "Copying results back to the local workflow...",
+            "result_destination": "local",
+            "transfer_state": "pending_import",
+        }
+        incoming_status = {
+            "status": "COMPLETED",
+            "progress_percent": 100,
+            "message": "Result transfer marked stale by maintenance cleanup.",
+            "result_destination": "local",
+            "transfer_state": "stale",
+        }
+
+        merged = _prefer_richer_job_status(previous_status, incoming_status)
+
+        assert merged == incoming_status
+
+    @pytest.mark.anyio
+    async def test_poll_job_status_keeps_import_sync_running_when_completed_snapshot_omits_transfer_fields(self, session_factory, seed_data):
+        job_polling_module._latest_job_status_by_run_uuid.clear()
+
+        sess = session_factory()
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "import-sync-gap-test",
+                "work_directory": "/local/workflow6",
+                "sample_name": "sample-import-gap",
+                "mode": "RNA",
+                "model": "default",
+                "job_status": {
+                    "status": "RUNNING",
+                    "progress_percent": 99,
+                    "message": "Copying results back to the local workflow...",
+                    "result_destination": "local",
+                    "transfer_state": "pending_import",
+                    "imported_source_kind": "slurm",
+                    "work_directory": "/local/workflow6",
+                },
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {
+                "status": "COMPLETED",
+                "progress_percent": 100,
+                "message": "Job completed.",
+                "work_directory": "/local/workflow6",
+            },
+            {"logs": []},
+        ])
+        mock_auto = AsyncMock()
+
+        sleep_calls = {"count": 0}
+
+        async def _sleep_once_then_stop(_seconds):
+            sleep_calls["count"] += 1
+            if sleep_calls["count"] > 1:
+                raise RuntimeError("stop test loop")
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new=_sleep_once_then_stop), \
+             patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+            with pytest.raises(RuntimeError, match="stop test loop"):
+                await poll_job_status("proj-bg", job_block.id, "import-sync-gap-test")
+
+        sess = session_factory()
+        updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+        payload = get_block_payload(updated)
+        assert updated.status == "RUNNING"
+        assert payload["job_status"]["status"] == "RUNNING"
+        assert payload["job_status"]["transfer_state"] == "pending_import"
+        assert payload["job_status"]["result_destination"] == "local"
+        assert mock_auto.await_count == 0
         sess.close()
 
     @pytest.mark.anyio
@@ -3229,6 +5050,117 @@ class TestJobStatusProxyCache:
         sess.close()
 
     @pytest.mark.anyio
+    async def test_completes_second_reconcile_run_script_and_keeps_first_run_intact(self, session_factory, seed_data):
+        sess = session_factory()
+        workflow_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "WORKFLOW_PLAN",
+            {
+                "plan_type": "reconcile_bams",
+                "status": "RUNNING",
+                "run_uuid": "script-mm39",
+                "current_step_id": "run_mm39",
+                "steps": [
+                    {
+                        "id": "approve_mad1",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                    },
+                    {
+                        "id": "run_mad1",
+                        "kind": "RUN_SCRIPT",
+                        "status": "COMPLETED",
+                        "run_uuid": "script-mad1",
+                        "work_directory": "/work/workflow15",
+                    },
+                    {
+                        "id": "write_mad1",
+                        "kind": "WRITE_SUMMARY",
+                        "status": "COMPLETED",
+                        "depends_on": ["run_mad1"],
+                    },
+                    {
+                        "id": "approve_mm39",
+                        "kind": "REQUEST_APPROVAL",
+                        "status": "COMPLETED",
+                        "depends_on": ["write_mad1"],
+                    },
+                    {
+                        "id": "run_mm39",
+                        "kind": "RUN_SCRIPT",
+                        "status": "RUNNING",
+                        "depends_on": ["approve_mm39"],
+                    },
+                    {
+                        "id": "locate_mm39",
+                        "kind": "LOCATE_DATA",
+                        "status": "PENDING",
+                        "depends_on": ["run_mm39"],
+                    },
+                ],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        job_block = _create_block_internal(
+            sess,
+            "proj-bg",
+            "EXECUTION_JOB",
+            {
+                "run_uuid": "script-mm39",
+                "work_directory": "/work/script-mm39",
+                "sample_name": "reconciled",
+                "mode": "RNA",
+                "run_type": "script",
+                "model": "default",
+                "workflow_plan_block_id": workflow_block.id,
+                "job_status": {"status": "PENDING"},
+                "logs": [],
+            },
+            status="RUNNING",
+            owner_id="u-bg",
+        )
+        sess.close()
+
+        mock_client = AsyncMock()
+        mock_client.call_tool = AsyncMock(side_effect=[
+            {"status": "COMPLETED", "progress_percent": 100, "message": "Done", "work_directory": "/work/workflow16\n,"},
+            {"logs": []},
+        ])
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+             patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+             patch("cortex.job_polling._auto_trigger_analysis", new_callable=AsyncMock) as mock_auto, \
+             patch("cortex.job_polling.asyncio.create_task") as mock_create_task, \
+             patch("cortex.chat_downloads.AgentEngine") as mock_engine_cls, \
+             patch("cortex.plan_executor.execute_plan", new=AsyncMock(return_value=None)):
+            mock_sleep.return_value = None
+            mock_create_task.side_effect = lambda coro: (coro.close(), MagicMock())[1]
+            mock_engine = MagicMock()
+            mock_engine.model_name = "default"
+            mock_engine_cls.return_value = mock_engine
+            await poll_job_status("proj-bg", job_block.id, "script-mm39")
+
+        assert mock_auto.await_count == 0
+        assert mock_create_task.called
+
+        sess = session_factory()
+        workflow = sess.query(ProjectBlock).filter(ProjectBlock.id == workflow_block.id).one()
+        workflow_payload = get_block_payload(workflow)
+        mad1_run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_mad1")
+        mm39_run_step = next(step for step in workflow_payload["steps"] if step["id"] == "run_mm39")
+        assert mad1_run_step["status"] == "COMPLETED"
+        assert mad1_run_step["run_uuid"] == "script-mad1"
+        assert mad1_run_step["work_directory"] == "/work/workflow15"
+        assert mm39_run_step["status"] == "COMPLETED"
+        assert mm39_run_step["run_uuid"] == "script-mm39"
+        assert mm39_run_step["work_directory"] == "/work/workflow16"
+        sess.close()
+
+    @pytest.mark.anyio
     async def test_waits_for_local_result_copy_before_auto_analysis(self, session_factory, seed_data):
         sess = session_factory()
         job_block = _create_block_internal(
@@ -3279,7 +5211,62 @@ class TestJobStatusProxyCache:
 def test_completed_job_results_ready_requires_outputs_downloaded_for_local_destinations():
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "local", "transfer_state": "outputs_downloaded"}) is True
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "both", "transfer_state": "downloading_outputs"}) is False
+    assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "local", "transfer_state": "stale"}) is False
     assert _completed_job_results_ready({"status": "COMPLETED", "result_destination": "remote", "transfer_state": "none"}) is True
+
+
+@pytest.mark.asyncio
+async def test_poll_job_status_stops_when_result_sync_is_cancelled(session_factory, seed_data):
+    sess = session_factory()
+    job_block = _create_block_internal(
+        sess,
+        "proj-bg",
+        "EXECUTION_JOB",
+        {
+            "run_uuid": "copyback-cancel-test",
+            "work_directory": "/work/copyback-cancel",
+            "sample_name": "sample-copy-cancel",
+            "mode": "DNA",
+            "model": "default",
+            "job_status": {"status": "PENDING"},
+            "logs": [],
+        },
+        status="RUNNING",
+        owner_id="u-bg",
+    )
+    sess.close()
+
+    mock_client = AsyncMock()
+    mock_client.call_tool = AsyncMock(side_effect=[
+        {
+            "status": "CANCELLED",
+            "progress_percent": 0,
+            "result_destination": "local",
+            "transfer_state": "sync_cancelled",
+            "message": "Result synchronization cancelled. Run sync again to resume copying outputs.",
+            "work_directory": "/local/work/copyback-cancel",
+        },
+        {"logs": []},
+    ])
+    mock_auto = AsyncMock()
+
+    with _patch_session(session_factory), \
+         patch("cortex.job_polling.get_service_url", return_value="http://launchpad:8003"), \
+         patch("cortex.job_polling.MCPHttpClient", return_value=mock_client), \
+         patch("cortex.job_polling.asyncio.sleep", new_callable=AsyncMock) as mock_sleep, \
+         patch("cortex.job_polling._auto_trigger_analysis", mock_auto):
+        mock_sleep.return_value = None
+        await poll_job_status("proj-bg", job_block.id, "copyback-cancel-test")
+
+    assert mock_auto.await_count == 0
+
+    sess = session_factory()
+    updated = sess.query(ProjectBlock).filter(ProjectBlock.id == job_block.id).first()
+    payload = get_block_payload(updated)
+    assert updated.status == "CANCELLED"
+    assert payload["job_status"]["status"] == "CANCELLED"
+    assert payload["job_status"]["transfer_state"] == "sync_cancelled"
+    sess.close()
 
 
 def test_resolved_job_work_directory_prefers_status_data_over_existing_payload():
@@ -3422,6 +5409,10 @@ class TestAutoTriggerAnalysis:
         assert "1000 reads" in payload.get("markdown", "")
         assert payload.get("skill") == "run_dogme_dna"
         assert payload.get("tokens", {}).get("total_tokens") == 150
+        prompt = mock_engine.think.call_args.args[0]
+        assert "substantive first-pass interpretation" in prompt
+        assert "Reference-Specific Findings" in prompt
+        assert "Notable Output Files" in prompt
         sess.close()
 
     @pytest.mark.asyncio
@@ -3589,6 +5580,262 @@ class TestAutoTriggerAnalysis:
             sess.close()
 
     @pytest.mark.asyncio
+    async def test_wf_pore_c_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data, monkeypatch):
+        monkeypatch.setattr("cortex.job_polling.WF_PORE_C_ENABLED", True)
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "wf_pore_c",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"workflow_version": "v1.3.1"},
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True, "matches": ["wf-pore-c-report.html"]},
+                    "pairs": {"requested": True, "present": True, "matches": ["pairs/sample.pairs.gz"]},
+                    "mcool": {"requested": True, "present": False, "matches": []},
+                    "hic": {"requested": False, "present": False, "matches": []},
+                },
+                "pairs_stats": {"total_pairs": 100, "cis_trans_ratio": 4.0, "duplicate_rate": 0.1},
+                "sample_alias": "POREC_A",
+                "requested_outputs": [{"expected": "pairs/{alias}.pairs.gz", "present": True}],
+            },
+            "warnings": ["Missing requested output: cooler/{alias}.mcool"],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The contact map outputs look usable.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-pore-c",
+                {"sample_name": "POREC_A", "mode": None, "workflow_key": "wf_pore_c", "model": "default", "work_directory": "/work/workflow8"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        blocks = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()
+        latest = blocks[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Contact Map Analysis: POREC_A" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "wf-pore-c job" in prompt
+        assert "pairs.stats.txt Metrics" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "reconcile_bams",
+            "status": "COMPLETED",
+            "parsed_reports": {
+                "reconciled_summary": "reconcileBams.py version test\n=== Summary of Findings ===\n  - Known transcripts: 36181\n  - Nic transcripts: 13609\n  - Nnc transcripts: 19267"
+            },
+            "workflow_summary": {
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "samples": ["S1", "S2"],
+                    "gene_count": 12034,
+                    "isoform_count": 67166,
+                    "transcript_category_counts": {"KNOWN": 36181, "NIC": 13609, "NNC": 19267},
+                    "novel_gene_count": 145,
+                    "novel_transcript_count": 33021,
+                    "total_novel_after_filtering": 4108,
+                    "novel_model_counts_after_filtering": {"NIC": 1559, "NNC": 2425, "ANTISENSE": 94, "INTERGENIC": 30},
+                },
+                "artifacts": {
+                    "inputs_manifest": {"present": True, "matches": ["output/reconciled.inputs.tsv"]},
+                    "reconciled_bam": {"present": True, "matches": ["reconciled.bam"]},
+                    "annotation_gtf": {"present": True, "matches": ["annotation.gtf"]},
+                    "summary_report": {"present": True, "matches": ["reconciled_summary.txt"]},
+                },
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The reconcile outputs look complete.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-reconcile",
+                {"sample_name": "reconciled", "mode": None, "workflow_key": "reconcile_bams", "model": "default", "work_directory": "/work/workflow11"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Reconcile Analysis: reconciled" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "reconcile_bams workflow" in prompt
+        assert "Transcript and Gene Summary" in prompt
+        assert "you must explicitly summarize them with numbers" in prompt
+        assert "Do not invent standard Dogme RNA outputs or mention bedMethyl" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_unknown_workflow_key_does_not_force_dogme_rna_skill(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {},
+                "artifacts": {},
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The workflow completed.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-unknown",
+                {"sample_name": "reconciled", "mode": "RNA", "workflow_key": "", "model": "default", "work_directory": "/work/workflow11"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        prompt = mock_engine.think.call_args.args[0]
+        assert "A Dogme RNA job" not in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_haplotype_routes_auto_analysis_by_workflow_key(self, session_factory, seed_data):
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "haplotype_with_vcf",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {
+                    "haplotyped_bam": {"present": True, "matches": ["sample.haplotyped.bam"]},
+                    "ambiguous_bam": {"present": True, "matches": ["sample.ambiguous.haplotyped.bam"]},
+                    "genome_summary": {"present": True, "matches": ["sample.summary.tsv"]},
+                },
+            },
+            "warnings": [],
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(return_value=(
+            "The haplotype outputs look usable.",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        ))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-haplotype",
+                {"sample_name": "sample", "mode": None, "workflow_key": "haplotype_with_vcf", "model": "default", "work_directory": "/work/workflow12"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        latest = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Haplotype Analysis: sample" in payload.get("markdown", "")
+        prompt = mock_engine.think.call_args.args[0]
+        assert "haplotype_with_vcf workflow" in prompt
+        assert "Haplotype Assignment Summaries" in prompt
+        sess.close()
+
+    @pytest.mark.asyncio
+    async def test_wf_pore_c_static_summary_respects_feature_flag(self, session_factory, seed_data, monkeypatch):
+        monkeypatch.setattr("cortex.job_polling.WF_PORE_C_ENABLED", False)
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(return_value={
+            "workflow_key": "wf_pore_c",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"workflow_version": "v1.3.1"},
+                "artifacts": {
+                    "report_html": {"requested": True, "present": True, "matches": ["wf-pore-c-report.html"]},
+                },
+            },
+        })
+
+        mock_engine = MagicMock()
+        mock_engine.model_name = "test-model"
+        mock_engine.think = MagicMock(side_effect=RuntimeError("skip"))
+
+        with _patch_session(session_factory), \
+             patch("cortex.job_polling.get_service_url", return_value="http://analyzer:8002"), \
+             patch("cortex.job_polling.MCPHttpClient", return_value=mock_mcp), \
+             patch("cortex.job_polling.AgentEngine", return_value=mock_engine), \
+             patch("cortex.job_polling.run_in_threadpool", _mock_run_in_threadpool), \
+             patch("cortex.job_polling.save_conversation_message", new_callable=AsyncMock):
+            await _auto_trigger_analysis(
+                "proj-bg", "uuid-pore-c-gated",
+                {"sample_name": "POREC_A", "mode": None, "workflow_key": "wf_pore_c", "model": "default", "work_directory": "/work/workflow8"},
+                "u-bg",
+            )
+
+        sess = session_factory()
+        blocks = sess.query(ProjectBlock).filter(
+            ProjectBlock.project_id == "proj-bg",
+            ProjectBlock.type == "AGENT_PLAN",
+        ).all()
+        latest = blocks[-1]
+        payload = get_block_payload(latest)
+        assert payload.get("skill") == "analyze_job_results"
+        assert "Contact Map Summary" not in payload.get("markdown", "")
+        sess.close()
+
+    @pytest.mark.asyncio
     async def test_skips_when_analysis_is_not_next_todo(self, session_factory, seed_data):
         """Workflow-managed auto-analysis only runs when analysis is the next ready todo step."""
         sess = session_factory()
@@ -3680,6 +5927,49 @@ class TestBuildAutoAnalysisContext:
         result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
         assert "more" in result  # "…and X more"
 
+    def test_reconcile_context_uses_workflow_summary(self):
+        summary = {
+            "workflow_key": "reconcile_bams",
+            "parsed_reports": {
+                "reconciled_summary": "reconcileBams.py version test\n=== Summary of Findings ===\n  - Known transcripts: 120"
+            },
+            "workflow_summary": {
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "samples": ["S1", "S2"],
+                    "transcript_category_counts": {"KNOWN": 120, "NIC": 18},
+                    "novel_gene_count": 14,
+                    "novel_transcript_count": 25,
+                    "novelty_category_totals": {"KNOWN": 1900, "NIC": 230},
+                },
+                "artifacts": {
+                    "reconciled_bam": {"present": True, "matches": ["reconciled.bam"]},
+                    "summary_report": {"present": True, "matches": ["reconciled_summary.txt"]},
+                },
+            },
+        }
+        result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
+        assert "reconcile_bams" in result
+        assert "Input BAM count: 2" in result
+        assert "reconciled.bam" in result
+        assert "KNOWN: 120" in result
+        assert "Novel genes: 14" in result
+        assert "reconciled_summary.txt" in result
+
+    def test_haplotype_context_uses_workflow_summary(self):
+        summary = {
+            "workflow_key": "haplotype_with_vcf",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {"genome_summary": {"present": True, "matches": ["sample.summary.tsv"]}},
+            },
+        }
+        result = _build_auto_analysis_context("s1", "DNA", "uuid", summary, {})
+        assert "haplotype_with_vcf" in result
+        assert "Assignment labels: h1, h2" in result
+        assert "sample.summary.tsv" in result
+
 
 # ---------------------------------------------------------------------------
 # _build_static_analysis_summary
@@ -3717,6 +6007,41 @@ class TestBuildStaticAnalysisSummary:
         }
         result = _build_static_analysis_summary("s", "DNA", "uuid", summary)
         assert "more" in result
+
+    def test_reconcile_static_summary(self):
+        summary = {
+            "workflow_key": "reconcile_bams",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {
+                    "input_bam_count": 2,
+                    "reference": "GRCh38",
+                    "transcript_category_counts": {"KNOWN": 120, "NIC": 18},
+                    "novel_gene_count": 14,
+                    "novel_transcript_count": 25,
+                    "novelty_category_totals": {"KNOWN": 1900, "NIC": 230},
+                },
+                "artifacts": {"inputs_manifest": {"present": True}, "summary_report": {"present": True}},
+            },
+        }
+        result = _build_static_analysis_summary("sample1", "DNA", "uuid", summary, work_directory="/work/workflow11")
+        assert "Reconcile Summary: sample1" in result
+        assert "GRCh38" in result
+        assert "KNOWN=120" in result
+        assert "Novel genes" in result
+
+    def test_haplotype_static_summary(self):
+        summary = {
+            "workflow_key": "haplotype_with_vcf",
+            "status": "COMPLETED",
+            "workflow_summary": {
+                "metadata": {"haplotyped_bam_count": 4, "assignment_labels": ["h1", "h2"]},
+                "artifacts": {"genome_summary": {"present": True}},
+            },
+        }
+        result = _build_static_analysis_summary("sample2", "RNA", "uuid", summary, work_directory="/work/workflow12")
+        assert "Haplotype Summary: sample2" in result
+        assert "h1, h2" in result
 
 
 # ---------------------------------------------------------------------------

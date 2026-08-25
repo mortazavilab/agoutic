@@ -67,11 +67,27 @@ class TestCreateJob:
         )
 
         assert job.run_uuid == "run-1"
+        assert job.workflow_key == "dogme"
         assert job.reference_genome == json.dumps(["GRCh38", "mm39"])
         loaded = await get_job(async_session, "run-1")
         assert loaded is not None
         assert loaded.parent_block_id == "block-1"
         assert loaded.user_id == "user-1"
+
+    @pytest.mark.asyncio
+    async def test_allows_nullable_mode_for_non_dogme_workflow(self, async_session):
+        job = await create_job(
+            session=async_session,
+            run_uuid="run-pore-c",
+            project_id="proj-1",
+            sample_name="sample-a",
+            workflow_key="wf_pore_c",
+            mode=None,
+            input_directory="/data/input.fastq.gz",
+        )
+
+        assert job.workflow_key == "wf_pore_c"
+        assert job.mode is None
 
     @pytest.mark.asyncio
     async def test_persists_workflow_identity_fields(self, async_session):
@@ -132,6 +148,7 @@ class TestUpdateJobStatus:
         assert updated.status == "FAILED"
         assert updated.progress_percent == 87
         assert updated.error_message == "pipeline crashed"
+        assert updated.completed_at is not None
 
     @pytest.mark.asyncio
     async def test_returns_none_for_unknown_job(self, async_session):
@@ -149,6 +166,7 @@ class TestJobToDict:
         submitted = datetime(2026, 3, 7, 12, 0, 0)
         started = submitted + timedelta(minutes=5)
         completed = started + timedelta(hours=1)
+        synced_at = completed + timedelta(minutes=2)
 
         job = DogmeJob(
             run_uuid="run-4",
@@ -166,16 +184,21 @@ class TestJobToDict:
             output_directory="/data/output",
             report_json=json.dumps({"files": 3, "status": "ok"}),
             error_message=None,
+            workflow_usage_json={"cpu_seconds": 123.4, "estimated_gpu_task_seconds": 45.0},
+            workflow_usage_synced_at=synced_at,
         )
 
         result = job_to_dict(job)
 
         assert result["run_uuid"] == "run-4"
+        assert result["workflow_key"] == "dogme"
         assert result["submitted_at"] == submitted.isoformat()
         assert result["started_at"] == started.isoformat()
         assert result["completed_at"] == completed.isoformat()
         assert result["report"] == {"files": 3, "status": "ok"}
         assert result["reference_genome"] == '["GRCh38", "mm39"]'
+        assert result["workflow_usage"] == {"cpu_seconds": 123.4, "estimated_gpu_task_seconds": 45.0}
+        assert result["workflow_usage_synced_at"] == synced_at.isoformat()
 
 
 class TestWorkflowIdentityHelpers:

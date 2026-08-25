@@ -55,6 +55,15 @@ class TestAgentEngineInit:
         assert engine.model_name is not None
         assert "default" in engine.display_name
 
+    def test_fast_smart_and_heavy_model_keys(self):
+        fast_engine = AgentEngine("fast")
+        smart_engine = AgentEngine("smart")
+        heavy_engine = AgentEngine("heavy")
+
+        assert fast_engine.model_name == "devstral-small-2:latest"
+        assert smart_engine.model_name == "devstral-2:latest"
+        assert heavy_engine.model_name == "gpt-oss:120b"
+
     def test_raw_model_name(self):
         engine = AgentEngine("my-custom-model")
         # Not in LLM_MODELS — used directly

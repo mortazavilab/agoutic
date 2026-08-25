@@ -44,9 +44,21 @@ async def find_file(file_name: str, work_dir: str | None = None, run_uuid: str |
     return await TOOL_REGISTRY["find_file"](file_name=file_name, work_dir=work_dir, run_uuid=run_uuid)
 
 @mcp.tool()
-async def read_file_content(file_path: str, work_dir: str | None = None, run_uuid: str | None = None, preview_lines: int | None = None) -> Dict[str, Any]:
+async def read_file_content(
+    file_path: str,
+    work_dir: str | None = None,
+    run_uuid: str | None = None,
+    preview_lines: int | None = None,
+    render_mode: str | None = None,
+) -> Dict[str, Any]:
     """Read content from a specific file in a workflow directory."""
-    return await TOOL_REGISTRY["read_file_content"](file_path=file_path, work_dir=work_dir, run_uuid=run_uuid, preview_lines=preview_lines)
+    return await TOOL_REGISTRY["read_file_content"](
+        file_path=file_path,
+        work_dir=work_dir,
+        run_uuid=run_uuid,
+        preview_lines=preview_lines,
+        render_mode=render_mode,
+    )
 
 @mcp.tool()
 async def parse_csv_file(file_path: str, work_dir: str | None = None, run_uuid: str | None = None, max_rows: int | None = 100) -> Dict[str, Any]:

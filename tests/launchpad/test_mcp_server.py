@@ -87,6 +87,7 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         user_id="user-1",
         username=None,
         project_slug=None,
+        parent_block_id=None,
         sample_name="Jamshid",
         mode="CDNA",
         reference_genome=["mm39"],
@@ -94,6 +95,7 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         modifications=None,
         input_type=None,
         entry_point=None,
+        dogme_revision=None,
         modkit_filter_threshold=None,
         min_cov=None,
         per_mod=None,
@@ -103,6 +105,8 @@ async def test_submit_dogme_job_forwards_cache_fields(monkeypatch):
         custom_dogme_bind_paths=None,
         resume_from_dir=None,
         execution_mode="slurm",
+        local_max_task_cpus=None,
+        local_max_task_memory_gb=None,
         ssh_profile_id="profile-1",
         slurm_account=None,
         slurm_partition=None,
@@ -199,6 +203,43 @@ async def test_submit_dogme_job_forwards_custom_profile_fields(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_preview_workflow_forwards_arguments(monkeypatch):
+    preview_mock = AsyncMock(return_value={"workflow_key": "wf_pore_c", "command": "nextflow run epi2me-labs/wf-pore-c"})
+    monkeypatch.setattr(mcp_server.tools, "preview_workflow", preview_mock)
+
+    result = await mcp_server.preview_workflow(
+        workflow_key="wf_pore_c",
+        sample_name="POREC_A",
+        input_type="bam",
+        input_path="/data/pore-c.bam",
+        reference_fasta="/refs/reference.fa",
+        output_directory="/projects/demo/workflow4",
+    )
+
+    parsed = json.loads(result)
+    assert parsed["workflow_key"] == "wf_pore_c"
+    assert "epi2me-labs/wf-pore-c" in parsed["command"]
+    preview_mock.assert_awaited_once_with(
+        workflow_key="wf_pore_c",
+        sample_name="POREC_A",
+        mode=None,
+        input_type="bam",
+        input_path="/data/pore-c.bam",
+        input_directory=None,
+        reference_genome=None,
+        reference_fasta="/refs/reference.fa",
+        vcf=None,
+        sample_sheet=None,
+        cutter=None,
+        output_directory="/projects/demo/workflow4",
+        workflow_repo=None,
+        workflow_version=None,
+        report_filename=None,
+        output_flags=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sync_job_results_forwards_arguments(monkeypatch):
     sync_mock = AsyncMock(return_value={"success": True, "status": "outputs_downloaded"})
     monkeypatch.setattr(mcp_server.tools, "sync_job_results", sync_mock)
@@ -211,4 +252,9 @@ async def test_sync_job_results_forwards_arguments(monkeypatch):
     parsed = json.loads(result)
     assert parsed["success"] is True
     assert parsed["status"] == "outputs_downloaded"
-    sync_mock.assert_awaited_once_with(run_uuid="run-123", force=True)
+    sync_mock.assert_awaited_once_with(
+        run_uuid="run-123",
+        force=True,
+        project_id="",
+        workflow_label="",
+    )

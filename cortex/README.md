@@ -1,6 +1,6 @@
 # AGOUTIC Cortex: Agent Engine
 
-**Docs Current For:** AGOUTIC 3.6.6  
+**Docs Current For:** AGOUTIC 3.7.6
 **Service Version:** 1.0  
 **Status:** Active Development 
 
@@ -18,6 +18,7 @@ Cortex is the **orchestration and reasoning engine** for AGOUTIC. It provides an
 - 🤝 **Integration**: Both REST and MCP interfaces for flexible access
 - 📜 **Tool Schema Contracts**: Fetches machine-readable tool schemas from all MCP servers and injects them into the LLM prompt; validates parameters pre-call
 - 🗂️ **Structured Conversation State**: Builds a typed `ConversationState` JSON each turn (skill, project, sample, experiment, dataframes, workflows) and injects it into the user message
+- 📄 **Direct File Reading**: Natural-language file inspection and `/read-file` route txt/markdown/HTML workflow reports through Analyzer render modes
 - 🛡️ **Error-Handling Playbook**: Deterministic failure rules in system prompt + structured `[TOOL_ERROR]` blocks + retry logic for transient failures
 - ✅ **Output Contract Validator**: Post-LLM validation catches malformed tags, unknown tools, duplicate approvals, and mixed sources
 - 🔍 **Provenance Tags**: Every tool result carries `[TOOL_RESULT: source, tool, params, rows, timestamp]` headers for auditability
@@ -132,9 +133,11 @@ Edit `cortex/config.py` to customize:
 LLM_URL = os.getenv("LLM_URL", "http://localhost:11434/v1")
 
 LLM_MODELS = {
-    "default": "mistral",      # Default model
-    "fast": "neural-chat",     # Fast inference
-    "smart": "neural-chat",    # Smart reasoning
+  "default": "gemma4:31b",              # Default model
+  "fast": "devstral-small-2:latest",    # Fast inference
+  "smart": "devstral-2:latest",         # Smart reasoning
+  "coder": "qwen3-coder:latest",        # Code-focused model
+  "heavy": "gpt-oss:120b",              # Heaviest alternative model
 }
 
 # Skills Directory
@@ -178,7 +181,7 @@ Request Body:
   "project_id": "proj_001",
   "message": "Analyze this liver DNA sample with 5mC modifications",
   "skill": "Dogme_DNA",          # Optional: Dogme_DNA, Dogme_RNA, Dogme_cDNA
-  "model": "default"              # Optional: default, fast, smart
+  "model": "default"             # Optional: default, fast, smart, coder, heavy
 }
 
 Response:
@@ -361,6 +364,8 @@ Skills are Markdown files in `skills/<skill_key>/SKILL.md` that define workflows
 - **skills/run_dogme_cdna/SKILL.md** - cDNA isoform workflow
 - **skills/ENCODE_LongRead/SKILL.md** - ENCODE consortium workflow
 - **skills/analyze_local_sample/SKILL.md** - Sample intake workflow
+- **skills/reconcile_bams/SKILL.md** - Cross-workflow annotated BAM reconciliation
+- **skills/haplotype_with_vcf/SKILL.md** - Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF
 
 ### Loading Skills
 
@@ -619,12 +624,13 @@ MAX_CONCURRENT_REQUESTS = 10  # Limit concurrent LLM calls
 
 ### LLM Model Selection
 
-```bash
-# Use faster model for quick responses
-export LLM_MODEL="neural-chat"  # Fast
-
-# Use smarter model for complex reasoning
-export LLM_MODEL="mistral"      # Smart
+```text
+Available request aliases:
+- default -> gemma4:31b
+- fast -> devstral-small-2:latest
+- smart -> devstral-2:latest
+- coder -> qwen3-coder:latest
+- heavy -> gpt-oss:120b
 ```
 
 ### Database Optimization

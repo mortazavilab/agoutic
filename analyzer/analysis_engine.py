@@ -5,12 +5,15 @@ Handles file discovery, parsing, and analysis of Dogme job results.
 
 import csv
 import fnmatch
+import html
 import json
 import re
 from collections import OrderedDict
+from types import SimpleNamespace
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -34,8 +37,1092 @@ from analyzer.schemas import (
     AnalysisSummary
 )
 from sqlalchemy.orm import load_only
+from sqlalchemy import or_
 from analyzer.models import DogmeJob
 from analyzer.db import get_db
+
+
+def _normalize_render_mode(file_path: Path, render_mode: Optional[str]) -> str:
+    extension = file_path.suffix.lower()
+    normalized = (render_mode or "auto").strip().lower()
+
+    if normalized not in {"auto", "plain", "markdown", "html_text", "html_raw"}:
+        raise ValueError(
+            f"Unsupported render_mode '{render_mode}'. "
+            "Use auto, plain, markdown, html_text, or html_raw."
+        )
+
+    if normalized == "auto":
+        if extension in {".html", ".htm"}:
+            return "html_text"
+        if extension in {".md", ".markdown"}:
+            return "markdown"
+        return "plain"
+
+    return normalized
+
+
+def _normalize_workflow_key(value: Any) -> str:
+    if not isinstance(value, str):
+        return "dogme"
+    normalized = value.strip().lower()
+    return normalized or "dogme"
+
+
+def _normalize_job_mode(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    return normalized or None
+
+
+def _load_workflow_metadata(work_dir: Optional[Path]) -> Dict[str, Any]:
+    if work_dir is None:
+        return {}
+
+    metadata_path = work_dir / ".agoutic.workflow.json"
+    if not metadata_path.is_file():
+        return {}
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return payload if isinstance(payload, dict) else {}
+
+
+def _workflow_key_file_patterns(
+    workflow_key: str,
+    mode: Optional[str],
+    workflow_metadata: Dict[str, Any],
+) -> List[str]:
+    if workflow_key == "wf_pore_c":
+        patterns: List[str] = []
+        summary_contract = workflow_metadata.get("summary_contract")
+        result_sync_spec = workflow_metadata.get("result_sync_spec")
+        if not isinstance(summary_contract, dict):
+            summary_contract = {}
+        if not isinstance(result_sync_spec, dict):
+            result_sync_spec = {}
+
+        report_filename = str(
+            result_sync_spec.get("report_filename")
+            or summary_contract.get("report_filename")
+            or "wf-pore-c-report.html"
+        ).strip().lower()
+        if report_filename:
+            patterns.append(report_filename)
+
+        expected_outputs = result_sync_spec.get("expected_outputs")
+        if isinstance(expected_outputs, list):
+            for output_name in expected_outputs:
+                normalized_output = str(output_name or "").strip().lower()
+                for suffix in (".pairs.gz", ".mcool", ".hic"):
+                    if suffix in normalized_output and suffix not in patterns:
+                        patterns.append(suffix)
+
+        return patterns
+
+    if workflow_key == "reconcile_bams":
+        return [".inputs.tsv", ".bam", ".bai", ".gtf", ".tsv", ".txt", "reconciled_summary.txt", "reconciled_novelty_by_sample.csv"]
+
+    if workflow_key == "haplotype_with_vcf":
+        return [".haplotyped.bam", ".bai", ".summary.tsv", ".chromosomes.tsv", ".genes.tsv", ".transcripts.tsv"]
+
+    if workflow_key == "differential_expression":
+        return ["de_inputs/", "de_results/", "de_results.tsv", "de_results.csv", "volcano_", "_sample_info", "_counts"]
+
+    if mode == "CDNA":
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts',
+            'isoform', 'junctions', 'counts'
+        ]
+    if mode == 'DNA':
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'modkit', 'methylation', 'mod_freq'
+        ]
+    if mode == 'RNA':
+        return [
+            'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 'isoform'
+        ]
+    return []
+
+
+def _summary_files(file_summary: JobFileSummary) -> List[FileInfo]:
+    return file_summary.txt_files + file_summary.csv_files + file_summary.bed_files + file_summary.other_files
+
+
+def _normalize_output_flag(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _find_matching_files(files: List[FileInfo], *, exact_name: str | None = None, suffix: str | None = None) -> List[FileInfo]:
+    matches: List[FileInfo] = []
+    normalized_name = exact_name.lower() if exact_name else None
+    normalized_suffix = suffix.lower() if suffix else None
+    for file_info in files:
+        name_lower = file_info.name.lower()
+        if normalized_name and name_lower == normalized_name:
+            matches.append(file_info)
+            continue
+        if normalized_suffix and name_lower.endswith(normalized_suffix):
+            matches.append(file_info)
+    return matches
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    numeric = _safe_float(value)
+    if numeric is None:
+        return None
+    return int(numeric)
+
+
+def _pairs_stats_value(raw_stats: Dict[str, float], *keys: str) -> Optional[float]:
+    for key in keys:
+        if key in raw_stats:
+            return raw_stats[key]
+    return None
+
+
+def _parse_pairs_stats_file(stats_path: Path) -> Dict[str, Any]:
+    raw_stats: Dict[str, float] = {}
+    for raw_line in stats_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+        elif ":" in line:
+            key, value = line.split(":", 1)
+        else:
+            continue
+
+        normalized_key = re.sub(r"[^a-z0-9]+", "_", key.strip().lower()).strip("_")
+        normalized_value = value.strip().replace(",", "")
+        numeric_value = _safe_float(normalized_value)
+        if numeric_value is None:
+            continue
+        raw_stats[normalized_key] = numeric_value
+
+    total_pairs = _pairs_stats_value(raw_stats, "total_pairs", "total", "total_mapped", "total_nodups")
+    cis_pairs = _pairs_stats_value(raw_stats, "cis_pairs", "cis")
+    trans_pairs = _pairs_stats_value(raw_stats, "trans_pairs", "trans")
+    duplicate_rate = _pairs_stats_value(raw_stats, "duplicate_rate", "dup_rate", "duplicates_rate")
+    if duplicate_rate is None:
+        duplicate_pairs = _pairs_stats_value(raw_stats, "duplicate_pairs", "duplicates", "total_dups")
+        if duplicate_pairs is not None and total_pairs not in (None, 0):
+            duplicate_rate = duplicate_pairs / float(total_pairs)
+
+    cis_trans_ratio = _pairs_stats_value(raw_stats, "cis_trans_ratio", "cis_to_trans_ratio")
+    if cis_trans_ratio is None and cis_pairs is not None and trans_pairs not in (None, 0):
+        cis_trans_ratio = cis_pairs / float(trans_pairs)
+
+    return {
+        "source_file": stats_path.name,
+        "total_pairs": _safe_int(total_pairs),
+        "cis_pairs": _safe_int(cis_pairs),
+        "trans_pairs": _safe_int(trans_pairs),
+        "cis_trans_ratio": cis_trans_ratio,
+        "duplicate_rate": duplicate_rate,
+        "raw_stats": raw_stats,
+    }
+
+
+def _infer_sample_alias_from_sample_sheet(sample_sheet_path: str | None) -> Optional[str]:
+    if not sample_sheet_path:
+        return None
+    sheet_path = Path(sample_sheet_path).expanduser()
+    if not sheet_path.is_file():
+        return None
+
+    sample_columns = ("sample", "sample_name", "alias", "sample_alias")
+    try:
+        with sheet_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            for row in reader:
+                for column in sample_columns:
+                    value = str(row.get(column) or "").strip()
+                    if value:
+                        return value
+    except Exception:
+        return None
+
+    return None
+
+
+def _infer_wf_pore_c_sample_alias(summary_contract: Dict[str, Any], validated_inputs: Dict[str, Any]) -> Optional[str]:
+    for value in (
+        validated_inputs.get("sample_name"),
+        summary_contract.get("sample_name"),
+    ):
+        cleaned = str(value or "").strip()
+        if cleaned:
+            return cleaned
+    return _infer_sample_alias_from_sample_sheet(validated_inputs.get("sample_sheet"))
+
+
+def _resolve_expected_output_match(expected_output: str, files: List[FileInfo], report_filename: str) -> List[FileInfo]:
+    normalized_output = str(expected_output or "").strip().lower()
+    basename = PurePosixPath(normalized_output).name
+    if basename == report_filename.lower():
+        return _find_matching_files(files, exact_name=report_filename)
+    for suffix in (".pairs.gz", ".mcool", ".hic"):
+        if basename.endswith(suffix):
+            return _find_matching_files(files, suffix=suffix)
+    if basename:
+        return _find_matching_files(files, exact_name=basename)
+    return []
+
+
+def _build_wf_pore_c_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+    workflow_metadata: Dict[str, Any],
+    summary_contract: Dict[str, Any],
+    result_sync_spec: Dict[str, Any],
+) -> tuple[Dict[str, Any], List[str]]:
+    validated_inputs = workflow_metadata.get("validated_inputs") if isinstance(workflow_metadata.get("validated_inputs"), dict) else {}
+    output_flags = summary_contract.get("output_flags") if isinstance(summary_contract.get("output_flags"), dict) else {}
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    report_filename = str(
+        result_sync_spec.get("report_filename")
+        or summary_contract.get("report_filename")
+        or "wf-pore-c-report.html"
+    ).strip() or "wf-pore-c-report.html"
+    artifact_specs = {
+        "report_html": {
+            "requested": True,
+            "matches": _find_matching_files(all_files, exact_name=report_filename),
+            "expected": report_filename,
+        },
+        "pairs": {
+            "requested": _normalize_output_flag(output_flags.get("pairs"), default=True),
+            "matches": _find_matching_files(all_files, suffix=".pairs.gz"),
+            "expected": ".pairs.gz",
+        },
+        "mcool": {
+            "requested": _normalize_output_flag(output_flags.get("mcool"), default=True),
+            "matches": _find_matching_files(all_files, suffix=".mcool"),
+            "expected": ".mcool",
+        },
+        "hic": {
+            "requested": _normalize_output_flag(output_flags.get("hi_c"), default=False),
+            "matches": _find_matching_files(all_files, suffix=".hic"),
+            "expected": ".hic",
+        },
+    }
+
+    expected_outputs = result_sync_spec.get("expected_outputs") if isinstance(result_sync_spec.get("expected_outputs"), list) else []
+    requested_outputs: List[Dict[str, Any]] = []
+    for expected_output in expected_outputs:
+        matches = _resolve_expected_output_match(str(expected_output), all_files, report_filename)
+        requested_outputs.append(
+            {
+                "expected": str(expected_output),
+                "present": bool(matches),
+                "matches": [file_info.path for file_info in matches],
+            }
+        )
+        if not matches:
+            warnings.append(f"Missing requested output: {expected_output}")
+
+    artifacts: Dict[str, Any] = {}
+    for label, spec in artifact_specs.items():
+        matches = spec["matches"]
+        present = bool(matches)
+        artifacts[label] = {
+            "requested": bool(spec["requested"]),
+            "present": present,
+            "matches": [file_info.path for file_info in matches],
+        }
+        if spec["requested"] and not present:
+            warnings.append(f"Missing requested output: {spec['expected']}")
+
+    pairs_stats_files = _find_matching_files(all_files, exact_name="pairs.stats.txt")
+    pairs_stats: Dict[str, Any] = {}
+    if pairs_stats_files and work_dir is not None:
+        stats_path = work_dir / pairs_stats_files[0].path
+        if stats_path.is_file():
+            pairs_stats = _parse_pairs_stats_file(stats_path)
+            sparse_metrics = [
+                metric_name
+                for metric_name in ("total_pairs", "cis_trans_ratio", "duplicate_rate")
+                if pairs_stats.get(metric_name) is None
+            ]
+            if sparse_metrics:
+                warnings.append(
+                    "pairs.stats.txt missing summary metrics: " + ", ".join(sparse_metrics)
+                )
+
+    sample_alias = _infer_wf_pore_c_sample_alias(summary_contract, validated_inputs)
+    metadata = {
+        "sample_alias": sample_alias,
+        "reference_fasta": validated_inputs.get("reference_fasta"),
+        "cutter": validated_inputs.get("cutter"),
+        "workflow_repo": validated_inputs.get("workflow_repo"),
+        "workflow_version": validated_inputs.get("workflow_version") or summary_contract.get("workflow_version"),
+    }
+
+    return {
+        "artifacts": artifacts,
+        "requested_outputs": requested_outputs,
+        "pairs_stats": pairs_stats,
+        "sample_alias": sample_alias,
+        "metadata": metadata,
+    }, warnings
+
+
+def _file_info_matches_suffix(file_info: FileInfo, *suffixes: str) -> bool:
+    name_lower = file_info.name.lower()
+    return any(name_lower.endswith(suffix.lower()) for suffix in suffixes)
+
+
+def _artifact_summary(files: List[FileInfo]) -> Dict[str, Any]:
+    return {
+        "present": bool(files),
+        "count": len(files),
+        "matches": [file_info.path for file_info in files],
+    }
+
+
+def _infer_workflow_key_from_layout(
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+    current_workflow_key: str,
+    workflow_metadata: Dict[str, Any],
+) -> str:
+    metadata_key = _normalize_workflow_key(workflow_metadata.get("workflow_key"))
+    if metadata_key != "dogme":
+        return metadata_key
+    if current_workflow_key != "dogme":
+        return current_workflow_key
+
+    all_files = _summary_files(all_file_summary)
+    if any(_file_info_matches_suffix(file_info, ".haplotyped.bam") for file_info in all_files):
+        if any(
+            _file_info_matches_suffix(
+                file_info,
+                ".summary.tsv",
+                ".chromosomes.tsv",
+                ".genes.tsv",
+                ".transcripts.tsv",
+            )
+            for file_info in all_files
+        ):
+            return "haplotype_with_vcf"
+
+    if work_dir is not None and (work_dir / "input").is_dir() and (work_dir / "output").is_dir():
+        if any(_file_info_matches_suffix(file_info, ".inputs.tsv") for file_info in all_files):
+            return "reconcile_bams"
+
+    reconcile_summary_present = any(file_info.name == "reconciled_summary.txt" for file_info in all_files)
+    reconcile_novelty_present = any(file_info.name == "reconciled_novelty_by_sample.csv" for file_info in all_files)
+    reconcile_abundance_present = any(file_info.name == "reconciled_abundance.tsv" for file_info in all_files)
+    reconciled_bam_present = any(
+        file_info.name.lower().endswith(".reconciled.bam") or file_info.name.lower() == "reconciled.bam"
+        for file_info in all_files
+    )
+    reconcile_mapping_present = any(file_info.name.lower().endswith(".mapping.tsv") for file_info in all_files)
+    if (
+        (reconcile_summary_present and reconcile_novelty_present)
+        or (reconciled_bam_present and reconcile_abundance_present)
+        or (reconciled_bam_present and reconcile_mapping_present and reconcile_summary_present)
+    ):
+        return "reconcile_bams"
+
+    if work_dir is not None and (work_dir / "de_inputs").is_dir() and (work_dir / "de_results").is_dir():
+        has_de_results = any(
+            file_info.path.startswith("de_results/") and (
+                _file_info_matches_suffix(file_info, ".tsv", ".csv", ".png", ".svg")
+                or "volcano_" in file_info.name.lower()
+            )
+            for file_info in all_files
+        )
+        has_de_inputs = any(file_info.path.startswith("de_inputs/") for file_info in all_files)
+        if has_de_results and has_de_inputs:
+            return "differential_expression"
+
+    return current_workflow_key
+
+
+def _summarize_de_result_table(work_dir: Optional[Path], result_file: FileInfo) -> Dict[str, Any]:
+    if work_dir is None:
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    result_path = work_dir / result_file.path
+    if not result_path.is_file():
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    row_count = 0
+    significant_count = 0
+    up_count = 0
+    down_count = 0
+    fdr_column = None
+    logfc_column = None
+    feature_column = None
+    top_features: List[str] = []
+
+    try:
+        with result_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            fieldnames = [str(name) for name in (reader.fieldnames or [])]
+            for candidate in ("FDR", "adj.P.Val", "padj", "qvalue"):
+                if candidate in fieldnames:
+                    fdr_column = candidate
+                    break
+            for candidate in ("logFC", "log2FoldChange", "log2fc"):
+                if candidate in fieldnames:
+                    logfc_column = candidate
+                    break
+            for candidate in ("gene", "gene_id", "symbol", "feature", "transcript_id"):
+                if candidate in fieldnames:
+                    feature_column = candidate
+                    break
+
+            for row in reader:
+                row_count += 1
+                if feature_column:
+                    feature_value = str(row.get(feature_column) or "").strip()
+                    if feature_value and len(top_features) < 5:
+                        top_features.append(feature_value)
+                try:
+                    sig_value = float(row.get(fdr_column)) if fdr_column and row.get(fdr_column) not in (None, "") else None
+                except (TypeError, ValueError):
+                    sig_value = None
+                try:
+                    logfc_value = float(row.get(logfc_column)) if logfc_column and row.get(logfc_column) not in (None, "") else None
+                except (TypeError, ValueError):
+                    logfc_value = None
+
+                if sig_value is not None and sig_value < 0.05:
+                    significant_count += 1
+                    if logfc_value is not None:
+                        if logfc_value > 0:
+                            up_count += 1
+                        elif logfc_value < 0:
+                            down_count += 1
+    except Exception:
+        return {
+            "row_count": 0,
+            "significant_count": None,
+            "up_count": None,
+            "down_count": None,
+            "fdr_column": None,
+            "logfc_column": None,
+            "top_features": [],
+        }
+
+    return {
+        "row_count": row_count,
+        "significant_count": significant_count if fdr_column else None,
+        "up_count": up_count if fdr_column and logfc_column else None,
+        "down_count": down_count if fdr_column and logfc_column else None,
+        "fdr_column": fdr_column,
+        "logfc_column": logfc_column,
+        "top_features": top_features,
+    }
+
+
+def _build_differential_expression_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    input_count_files = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_inputs/") and _file_info_matches_suffix(file_info, ".tsv") and "count" in file_info.name.lower()
+    ]
+    sample_info_files = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_inputs/") and _file_info_matches_suffix(file_info, ".csv", ".tsv") and "sample_info" in file_info.name.lower()
+    ]
+    result_tables = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, "de_results.tsv", "de_results.csv")
+    ]
+    volcano_pngs = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, ".png") and "volcano" in file_info.name.lower()
+    ]
+    volcano_svgs = [
+        file_info for file_info in all_files
+        if file_info.path.startswith("de_results/") and _file_info_matches_suffix(file_info, ".svg") and "volcano" in file_info.name.lower()
+    ]
+
+    results_preview = _parse_delimited_preview(work_dir, result_tables[0], max_rows=50) if result_tables else {"columns": [], "data": [], "total_rows": 0}
+    sample_info_preview = _parse_delimited_preview(work_dir, sample_info_files[0], max_rows=50) if sample_info_files else {"columns": [], "data": [], "total_rows": 0}
+    results_metrics = _summarize_de_result_table(work_dir, result_tables[0]) if result_tables else {
+        "row_count": 0,
+        "significant_count": None,
+        "up_count": None,
+        "down_count": None,
+        "fdr_column": None,
+        "logfc_column": None,
+        "top_features": [],
+    }
+
+    parsed_reports: Dict[str, Any] = {}
+    if results_preview["data"]:
+        parsed_reports["de_results"] = results_preview
+    if sample_info_preview["data"]:
+        parsed_reports["de_sample_info"] = sample_info_preview
+
+    if not result_tables:
+        warnings.append("No differential expression results table found")
+    if not sample_info_files:
+        warnings.append("No differential expression sample-info file found")
+    if not volcano_pngs and not volcano_svgs:
+        warnings.append("No volcano plot outputs found")
+
+    comparison_name = None
+    if input_count_files:
+        comparison_name = input_count_files[0].name.rsplit("_counts", 1)[0]
+    elif sample_info_files:
+        comparison_name = sample_info_files[0].name.rsplit("_sample_info", 1)[0]
+
+    group_columns = [
+        column for column in sample_info_preview.get("columns", [])
+        if column.lower() in {"group", "condition", "cohort", "label", "sample", "sample_name"}
+    ]
+
+    return {
+        "artifacts": {
+            "input_counts": _artifact_summary(input_count_files),
+            "sample_info": _artifact_summary(sample_info_files),
+            "results_table": _artifact_summary(result_tables),
+            "volcano_png": _artifact_summary(volcano_pngs),
+            "volcano_svg": _artifact_summary(volcano_svgs),
+        },
+        "metadata": {
+            "comparison_name": comparison_name,
+            "sample_count": sample_info_preview.get("total_rows", 0),
+            "sample_info_columns": sample_info_preview.get("columns", []),
+            "group_columns": group_columns,
+            "result_row_count": results_metrics["row_count"],
+            "significant_count": results_metrics["significant_count"],
+            "up_count": results_metrics["up_count"],
+            "down_count": results_metrics["down_count"],
+            "top_features": results_metrics["top_features"],
+        },
+    }, parsed_reports, warnings
+
+
+def _parse_reconcile_manifest(work_dir: Optional[Path], manifest_file: FileInfo) -> Dict[str, Any]:
+    if work_dir is None:
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    manifest_path = work_dir / manifest_file.path
+    if not manifest_path.is_file():
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    rows: List[Dict[str, str]] = []
+    try:
+        with manifest_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            for row in reader:
+                if isinstance(row, dict):
+                    rows.append({str(key): str(value or "") for key, value in row.items()})
+    except Exception:
+        return {"input_bam_count": 0, "reference": None, "references": [], "samples": []}
+
+    references = sorted({row.get("reference", "").strip() for row in rows if row.get("reference", "").strip()})
+    samples = sorted({row.get("sample", "").strip() for row in rows if row.get("sample", "").strip()})
+    return {
+        "input_bam_count": len(rows),
+        "reference": references[0] if len(references) == 1 else None,
+        "references": references,
+        "samples": samples,
+    }
+
+
+def _parse_reconcile_summary_report(report_path: Path) -> Dict[str, Any]:
+    summary = {
+        "report_text": "",
+        "transcript_category_counts": {},
+        "novel_gene_count": None,
+        "novel_transcript_count": None,
+        "solo_transcript_count": None,
+        "strand_consolidated_count": None,
+        "filter_scope": None,
+        "filter_min_tpm": None,
+        "filter_min_samples": None,
+        "filtered_novel_removed": None,
+        "filtered_remaining_total": None,
+        "novel_model_counts_after_filtering": {},
+        "total_novel_after_filtering": None,
+    }
+
+    try:
+        raw_text = report_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return summary
+
+    summary["report_text"] = raw_text
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        category_match = re.match(r"^-\s+(.+?)\s+transcripts:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if category_match:
+            category_name = category_match.group(1).strip().upper().replace(" ", "_")
+            summary["transcript_category_counts"][category_name] = int(category_match.group(2))
+            continue
+
+        solo_match = re.match(r"^-\s+Single-read solo transcripts \(will be filtered\):\s+(\d+)$", line, flags=re.IGNORECASE)
+        if solo_match:
+            summary["solo_transcript_count"] = int(solo_match.group(1))
+            continue
+
+        novel_gene_match = re.match(r"^-\s+Number of novel genes .*?:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if novel_gene_match:
+            summary["novel_gene_count"] = int(novel_gene_match.group(1))
+            continue
+
+        novel_tx_match = re.match(r"^-\s+Number of novel transcripts .*?:\s+(\d+)$", line, flags=re.IGNORECASE)
+        if novel_tx_match:
+            summary["novel_transcript_count"] = int(novel_tx_match.group(1))
+            continue
+
+        strand_match = re.match(r"^Consolidated\s+(\d+)\s+novel models by strand correction", line, flags=re.IGNORECASE)
+        if strand_match:
+            summary["strand_consolidated_count"] = int(strand_match.group(1))
+            continue
+
+        filter_match = re.match(
+            r"^Filtered\s+(all|novel)\s+transcripts\s+by\s+min_TPM\s+([0-9.]+)\s+in\s+>=\s+(\d+)\s+samples:\s+removed\s+(\d+)\s+novel transcripts,\s+remaining total\s+(\d+)$",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if filter_match:
+            summary["filter_scope"] = filter_match.group(1).lower()
+            summary["filter_min_tpm"] = _safe_float(filter_match.group(2))
+            summary["filter_min_samples"] = int(filter_match.group(3))
+            summary["filtered_novel_removed"] = int(filter_match.group(4))
+            summary["filtered_remaining_total"] = int(filter_match.group(5))
+            continue
+
+        total_novel_match = re.match(r"^Total novel transcripts \(after filtering\):\s+(\d+)$", line, flags=re.IGNORECASE)
+        if total_novel_match:
+            summary["total_novel_after_filtering"] = int(total_novel_match.group(1))
+            continue
+
+        novel_model_match = re.match(r"^-\s+([A-Za-z0-9_+-]+):\s+(\d+)$", line)
+        if novel_model_match:
+            category_name = novel_model_match.group(1).strip().upper()
+            summary["novel_model_counts_after_filtering"][category_name] = int(novel_model_match.group(2))
+
+    return summary
+
+
+def _summarize_reconcile_novelty_by_sample(novelty_preview: Dict[str, Any]) -> Dict[str, Any]:
+    columns = [str(column) for column in novelty_preview.get("columns", [])]
+    rows = novelty_preview.get("data", []) or []
+    category_columns = [column for column in columns if column.lower() != "sample"]
+    category_totals: Dict[str, int] = {column: 0 for column in category_columns}
+    top_samples: List[Dict[str, Any]] = []
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        total_reads = 0
+        dominant_category = None
+        dominant_count = -1
+        for category in category_columns:
+            count = _safe_int(row.get(category)) or 0
+            category_totals[category] += count
+            total_reads += count
+            if count > dominant_count:
+                dominant_category = category
+                dominant_count = count
+        sample_name = str(row.get("sample") or row.get("Sample") or "").strip()
+        if sample_name:
+            top_samples.append(
+                {
+                    "sample": sample_name,
+                    "total_reads": total_reads,
+                    "dominant_category": dominant_category,
+                    "dominant_count": max(dominant_count, 0),
+                }
+            )
+
+    top_samples.sort(key=lambda item: (-int(item.get("total_reads") or 0), str(item.get("sample") or "")))
+    return {
+        "sample_count": len(rows),
+        "categories": category_columns,
+        "category_totals": category_totals,
+        "top_samples": top_samples[:5],
+    }
+
+
+def _summarize_reconcile_abundance_table(work_dir: Optional[Path], abundance_file: FileInfo) -> Dict[str, Any]:
+    preview = _parse_delimited_preview(work_dir, abundance_file, max_rows=200)
+    full_path = (work_dir / abundance_file.path) if work_dir is not None else None
+    if work_dir is None or full_path is None or not full_path.is_file():
+        return {
+            "gene_count": None,
+            "isoform_count": None,
+            "gene_novelty_counts": {},
+            "transcript_novelty_counts": {},
+            "preview": preview,
+        }
+
+    gene_ids = set()
+    transcript_ids = set()
+    gene_novelty_counts: Dict[str, int] = {}
+    transcript_novelty_counts: Dict[str, int] = {}
+
+    try:
+        with full_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            for row in reader:
+                if not isinstance(row, dict):
+                    continue
+                gene_id = str(row.get("gene_ID") or row.get("gene_id") or "").strip()
+                transcript_id = str(row.get("transcript_ID") or row.get("transcript_id") or "").strip()
+                if gene_id:
+                    gene_ids.add(gene_id)
+                if transcript_id:
+                    transcript_ids.add(transcript_id)
+                gene_novelty = str(row.get("gene_novelty") or "").strip().upper()
+                transcript_novelty = str(row.get("transcript_novelty") or "").strip().upper()
+                if gene_novelty:
+                    gene_novelty_counts[gene_novelty] = gene_novelty_counts.get(gene_novelty, 0) + 1
+                if transcript_novelty:
+                    transcript_novelty_counts[transcript_novelty] = transcript_novelty_counts.get(transcript_novelty, 0) + 1
+    except Exception:
+        return {
+            "gene_count": None,
+            "isoform_count": None,
+            "gene_novelty_counts": {},
+            "transcript_novelty_counts": {},
+            "preview": preview,
+        }
+
+    return {
+        "gene_count": len(gene_ids),
+        "isoform_count": len(transcript_ids),
+        "gene_novelty_counts": gene_novelty_counts,
+        "transcript_novelty_counts": transcript_novelty_counts,
+        "preview": preview,
+    }
+
+
+def _parse_delimited_preview(work_dir: Optional[Path], file_info: FileInfo, max_rows: int = 50) -> Dict[str, Any]:
+    if work_dir is None:
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    full_path = work_dir / file_info.path
+    if not full_path.is_file():
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    rows: List[Dict[str, Any]] = []
+    columns: List[str] = []
+    total_rows = 0
+    try:
+        with full_path.open("r", encoding="utf-8", errors="ignore", newline="") as handle:
+            preview = handle.read(4096)
+            handle.seek(0)
+            delimiter = "\t" if "\t" in preview and preview.count("\t") >= preview.count(",") else ","
+            reader = csv.DictReader(handle, delimiter=delimiter)
+            columns = [str(name) for name in (reader.fieldnames or [])]
+            for index, row in enumerate(reader, start=1):
+                total_rows = index
+                if len(rows) < max_rows:
+                    rows.append({str(key): value for key, value in dict(row).items()})
+    except Exception:
+        return {"columns": [], "data": [], "total_rows": 0}
+
+    return {"columns": columns, "data": rows, "total_rows": total_rows}
+
+
+def _build_reconcile_bams_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    manifest_files = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".inputs.tsv")]
+    reconcile_bams = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bam")]
+    bam_indexes = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bai")]
+    annotation_gtfs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".gtf", ".gtf.gz")]
+    summary_report = [file_info for file_info in all_files if file_info.name == "reconciled_summary.txt"]
+    novelty_csv = [file_info for file_info in all_files if file_info.name == "reconciled_novelty_by_sample.csv"]
+    abundance_tsv = [
+        file_info for file_info in all_files
+        if _file_info_matches_suffix(file_info, ".tsv") and "abundance" in file_info.name.lower()
+    ]
+    tsv_outputs = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".tsv") and file_info not in manifest_files]
+    txt_reports = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".txt")]
+
+    parsed_reports: Dict[str, Any] = {}
+    report_metrics = {
+        "report_text": "",
+        "transcript_category_counts": {},
+        "novel_gene_count": None,
+        "novel_transcript_count": None,
+        "solo_transcript_count": None,
+        "strand_consolidated_count": None,
+        "filter_scope": None,
+        "filter_min_tpm": None,
+        "filter_min_samples": None,
+        "filtered_novel_removed": None,
+        "filtered_remaining_total": None,
+        "novel_model_counts_after_filtering": {},
+        "total_novel_after_filtering": None,
+    }
+    if summary_report and work_dir:
+        report_path = work_dir / summary_report[0].path
+        if report_path.is_file():
+            try:
+                report_metrics = _parse_reconcile_summary_report(report_path)
+                parsed_reports["reconciled_summary"] = report_metrics.get("report_text") or ""
+            except Exception:
+                pass
+
+    novelty_metrics = {
+        "sample_count": 0,
+        "categories": [],
+        "category_totals": {},
+        "top_samples": [],
+    }
+    if novelty_csv and work_dir:
+        novelty_preview = _parse_delimited_preview(work_dir, novelty_csv[0])
+        if novelty_preview["data"]:
+            parsed_reports["reconciled_novelty"] = novelty_preview
+            novelty_metrics = _summarize_reconcile_novelty_by_sample(novelty_preview)
+
+    abundance_metrics = {
+        "gene_count": None,
+        "isoform_count": None,
+        "gene_novelty_counts": {},
+        "transcript_novelty_counts": {},
+    }
+    if abundance_tsv:
+        abundance_metrics = _summarize_reconcile_abundance_table(work_dir, abundance_tsv[0])
+        abundance_preview = abundance_metrics.get("preview") or {"data": []}
+        if abundance_preview.get("data"):
+            parsed_reports["reconcile_abundance"] = abundance_preview
+
+    manifest_summary = _parse_reconcile_manifest(work_dir, manifest_files[0]) if manifest_files else {
+        "input_bam_count": 0,
+        "reference": None,
+        "references": [],
+        "samples": [],
+    }
+
+    if not manifest_files:
+        warnings.append("Reconcile inputs manifest missing")
+    if not reconcile_bams:
+        warnings.append("No reconciled BAM outputs found")
+
+    return {
+        "artifacts": {
+            "inputs_manifest": _artifact_summary(manifest_files),
+            "reconciled_bam": _artifact_summary(reconcile_bams),
+            "summary_report": _artifact_summary(summary_report),
+            "novelty_csv": _artifact_summary(novelty_csv),
+            "bam_index": _artifact_summary(bam_indexes),
+            "annotation_gtf": _artifact_summary(annotation_gtfs),
+            "tsv_outputs": _artifact_summary(tsv_outputs),
+            "txt_reports": _artifact_summary(txt_reports),
+        },
+        "metadata": {
+            "input_bam_count": manifest_summary["input_bam_count"],
+            "reference": manifest_summary["reference"],
+            "references": manifest_summary["references"],
+            "samples": manifest_summary["samples"],
+            "annotation_gtf": annotation_gtfs[0].path if annotation_gtfs else None,
+            "gene_count": abundance_metrics["gene_count"],
+            "isoform_count": abundance_metrics["isoform_count"],
+            "gene_novelty_counts": abundance_metrics["gene_novelty_counts"],
+            "abundance_transcript_novelty_counts": abundance_metrics["transcript_novelty_counts"],
+            "transcript_category_counts": report_metrics["transcript_category_counts"],
+            "novel_gene_count": report_metrics["novel_gene_count"],
+            "novel_transcript_count": report_metrics["novel_transcript_count"],
+            "solo_transcript_count": report_metrics["solo_transcript_count"],
+            "strand_consolidated_count": report_metrics["strand_consolidated_count"],
+            "filter_scope": report_metrics["filter_scope"],
+            "filter_min_tpm": report_metrics["filter_min_tpm"],
+            "filter_min_samples": report_metrics["filter_min_samples"],
+            "filtered_novel_removed": report_metrics["filtered_novel_removed"],
+            "filtered_remaining_total": report_metrics["filtered_remaining_total"],
+            "novel_model_counts_after_filtering": report_metrics["novel_model_counts_after_filtering"],
+            "total_novel_after_filtering": report_metrics["total_novel_after_filtering"],
+            "novelty_categories": novelty_metrics["categories"],
+            "novelty_category_totals": novelty_metrics["category_totals"],
+            "novelty_sample_count": novelty_metrics["sample_count"],
+            "top_novelty_samples": novelty_metrics["top_samples"],
+        },
+    }, parsed_reports, warnings
+
+
+def _build_haplotype_with_vcf_summary(
+    *,
+    work_dir: Optional[Path],
+    all_file_summary: JobFileSummary,
+) -> tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    all_files = _summary_files(all_file_summary)
+    warnings: List[str] = []
+
+    haplotyped_bams = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".haplotyped.bam")]
+    bam_indexes = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".bam.bai", ".bai")]
+    chromosome_summaries = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".chromosomes.tsv")]
+    genome_summaries = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".summary.tsv")]
+    gene_counts = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".genes.tsv")]
+    transcript_counts = [file_info for file_info in all_files if _file_info_matches_suffix(file_info, ".transcripts.tsv")]
+    ambiguous_bams = [file_info for file_info in haplotyped_bams if ".ambiguous.haplotyped.bam" in file_info.name.lower()]
+
+    parsed_reports: Dict[str, Any] = {}
+    summary_preview = _parse_delimited_preview(work_dir, genome_summaries[0]) if genome_summaries else {"columns": [], "data": [], "total_rows": 0}
+    chromosome_preview = _parse_delimited_preview(work_dir, chromosome_summaries[0]) if chromosome_summaries else {"columns": [], "data": [], "total_rows": 0}
+    gene_preview = _parse_delimited_preview(work_dir, gene_counts[0]) if gene_counts else {"columns": [], "data": [], "total_rows": 0}
+    transcript_preview = _parse_delimited_preview(work_dir, transcript_counts[0]) if transcript_counts else {"columns": [], "data": [], "total_rows": 0}
+
+    if summary_preview["data"]:
+        parsed_reports["haplotype_summary"] = summary_preview
+    if chromosome_preview["data"]:
+        parsed_reports["chromosome_summary"] = chromosome_preview
+    if gene_preview["data"]:
+        parsed_reports["gene_counts"] = gene_preview
+    if transcript_preview["data"]:
+        parsed_reports["transcript_counts"] = transcript_preview
+
+    assignment_labels = [
+        column for column in summary_preview.get("columns", [])
+        if column not in {"bam_name", "total_reads", "ambiguous"}
+    ]
+
+    if not haplotyped_bams:
+        warnings.append("No haplotyped BAM outputs found")
+    if not genome_summaries:
+        warnings.append("No haplotype genome summary TSV found")
+
+    return {
+        "artifacts": {
+            "haplotyped_bam": _artifact_summary(haplotyped_bams),
+            "bam_index": _artifact_summary(bam_indexes),
+            "chromosome_summary": _artifact_summary(chromosome_summaries),
+            "genome_summary": _artifact_summary(genome_summaries),
+            "gene_counts": _artifact_summary(gene_counts),
+            "transcript_counts": _artifact_summary(transcript_counts),
+            "ambiguous_bam": _artifact_summary(ambiguous_bams),
+        },
+        "metadata": {
+            "assignment_labels": assignment_labels,
+            "haplotyped_bam_count": len(haplotyped_bams),
+        },
+    }, parsed_reports, warnings
+
+
+def _render_html_text(raw_content: str) -> str:
+    without_comments = re.sub(r"<!--.*?-->", "", raw_content, flags=re.DOTALL)
+    without_scripts = re.sub(
+        r"<script\b[^>]*>.*?</script>",
+        " ",
+        without_comments,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    without_styles = re.sub(
+        r"<style\b[^>]*>.*?</style>",
+        " ",
+        without_scripts,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    with_breaks = re.sub(
+        r"</?(?:br|p|div|li|tr|h[1-6])\b[^>]*>",
+        "\n",
+        without_styles,
+        flags=re.IGNORECASE,
+    )
+    without_tags = re.sub(r"<[^>]+>", " ", with_breaks)
+    unescaped = html.unescape(without_tags)
+    normalized_lines = [re.sub(r"\s+", " ", line).strip() for line in unescaped.splitlines()]
+    return "\n".join(line for line in normalized_lines if line)
+
+
+def _render_file_content(raw_content: str, render_mode: str) -> str:
+    if render_mode == "html_text":
+        return _render_html_text(raw_content)
+    return raw_content
+
+
+def _build_file_content_response(
+    *,
+    run_uuid: str,
+    file_path: str,
+    content: str,
+    preview_lines: Optional[int],
+    file_size: int,
+    render_mode: str,
+    source_extension: str,
+) -> FileContentResponse:
+    if preview_lines is not None:
+        all_lines = content.splitlines(keepends=True)
+        return FileContentResponse(
+            run_uuid=run_uuid,
+            file_path=file_path,
+            content="".join(all_lines[:preview_lines]),
+            line_count=len(all_lines),
+            is_truncated=len(all_lines) > preview_lines,
+            file_size=file_size,
+            render_mode=render_mode,
+            source_extension=source_extension,
+        )
+
+    return FileContentResponse(
+        run_uuid=run_uuid,
+        file_path=file_path,
+        content=content,
+        line_count=content.count('\n') + 1,
+        is_truncated=False,
+        file_size=file_size,
+        render_mode=render_mode,
+        source_extension=source_extension,
+    )
 
 
 # ==================== File Discovery ====================
@@ -102,6 +1189,42 @@ def get_job_work_dir(run_uuid: str) -> Optional[Path]:
                 return jailed
         # Fallback: construct from config (legacy flat layout)
         return AGOUTIC_WORK_DIR / run_uuid
+
+
+def _get_job_by_run_uuid_or_work_dir(
+    *,
+    run_uuid: Optional[str] = None,
+    work_dir_path: Optional[str] = None,
+) -> Optional[DogmeJob]:
+    """Resolve a DogmeJob by UUID first, then by persisted workflow path."""
+    with get_db() as db:
+        query = db.query(DogmeJob).options(
+            load_only(
+                DogmeJob.run_uuid,
+                DogmeJob.sample_name,
+                DogmeJob.workflow_key,
+                DogmeJob.mode,
+                DogmeJob.status,
+                DogmeJob.nextflow_work_dir,
+                DogmeJob.output_directory,
+            )
+        )
+
+        if run_uuid:
+            job = query.filter(DogmeJob.run_uuid == run_uuid).first()
+            if job:
+                return job
+
+        normalized_work_dir = str(work_dir_path or "").strip()
+        if normalized_work_dir:
+            return query.filter(
+                or_(
+                    DogmeJob.nextflow_work_dir == normalized_work_dir,
+                    DogmeJob.output_directory == normalized_work_dir,
+                )
+            ).first()
+
+        return None
 
 
 def discover_files(
@@ -254,6 +1377,7 @@ def read_file_content(
     preview_lines: Optional[int] = None,
     *,
     work_dir_path: Optional[str] = None,
+    render_mode: Optional[str] = None,
 ) -> FileContentResponse:
     """
     Read content from a file.
@@ -263,6 +1387,7 @@ def read_file_content(
         file_path: Relative path from work directory
         preview_lines: Optional line limit for preview
         work_dir_path: Absolute path to the workflow directory
+        render_mode: How to render content: auto, plain, markdown, html_text, or html_raw
 
     Returns:
         FileContentResponse with file content
@@ -291,48 +1416,24 @@ def read_file_content(
     file_size = full_path.stat().st_size
     if file_size > MAX_FILE_SIZE_BYTES:
         raise ValueError(f"File too large: {file_size} bytes (max: {MAX_FILE_SIZE_BYTES})")
+
+    effective_render_mode = _normalize_render_mode(full_path, render_mode)
     
     # Read content
     try:
         _uuid = run_uuid or ""
         with open(full_path, 'r', encoding='utf-8') as f:
-            if preview_lines:
-                lines = []
-                for i, line in enumerate(f):
-                    if i >= preview_lines:
-                        return FileContentResponse(
-                            run_uuid=_uuid,
-                            file_path=file_path,
-                            content=''.join(lines),
-                            line_count=preview_lines,
-                            is_truncated=True,
-                            file_size=file_size
-                        )
-                    lines.append(line)
-                
-                # Count remaining lines
-                remaining = sum(1 for _ in f)
-                total_lines = preview_lines + remaining
-                
-                return FileContentResponse(
-                    run_uuid=_uuid,
-                    file_path=file_path,
-                    content=''.join(lines),
-                    line_count=total_lines,
-                    is_truncated=remaining > 0,
-                    file_size=file_size
-                )
-            else:
-                content = f.read()
-                line_count = content.count('\n') + 1
-                return FileContentResponse(
-                    run_uuid=_uuid,
-                    file_path=file_path,
-                    content=content,
-                    line_count=line_count,
-                    is_truncated=False,
-                    file_size=file_size
-                )
+            raw_content = f.read()
+
+        return _build_file_content_response(
+            run_uuid=_uuid,
+            file_path=file_path,
+            content=_render_file_content(raw_content, effective_render_mode),
+            preview_lines=preview_lines,
+            file_size=file_size,
+            render_mode=effective_render_mode,
+            source_extension=full_path.suffix.lower(),
+        )
     except UnicodeDecodeError:
         raise ValueError(f"File is not a text file: {file_path}")
 
@@ -1050,128 +2151,203 @@ def generate_analysis_summary(
     Returns:
         AnalysisSummary with all available information
     """
-    # We need the DB record for sample_name/mode/status, so run_uuid is still required
-    # for generate_analysis_summary.  work_dir_path is passed through for file ops.
-    if not run_uuid:
-        raise ValueError("run_uuid is required for generate_analysis_summary")
-    with get_db() as db:
-        job = db.query(DogmeJob).options(
-            load_only(
-                DogmeJob.run_uuid, DogmeJob.sample_name, DogmeJob.mode,
-                DogmeJob.status, DogmeJob.nextflow_work_dir, DogmeJob.output_directory,
+    resolved_input_work_dir = resolve_work_dir(work_dir=work_dir_path, run_uuid=run_uuid)
+    job = _get_job_by_run_uuid_or_work_dir(run_uuid=run_uuid, work_dir_path=work_dir_path)
+    if not job:
+        if resolved_input_work_dir is not None:
+            job = SimpleNamespace(
+                run_uuid=str(run_uuid or ""),
+                sample_name=resolved_input_work_dir.name,
+                workflow_key="dogme",
+                mode=None,
+                status="COMPLETED",
+                nextflow_work_dir=str(resolved_input_work_dir),
+                output_directory=str(resolved_input_work_dir),
             )
-        ).filter(DogmeJob.run_uuid == run_uuid).first()
-        if not job:
+        elif run_uuid:
             raise ValueError(f"Job not found: {run_uuid}")
+        elif work_dir_path:
+            raise ValueError(f"Job not found for work_dir: {work_dir_path}")
+        else:
+            raise ValueError("Either run_uuid or work_dir_path is required for generate_analysis_summary")
 
-        _wdp = work_dir_path or (job.nextflow_work_dir or job.output_directory or None)
+    resolved_run_uuid = str(job.run_uuid or run_uuid or "")
+    _wdp = work_dir_path or (job.nextflow_work_dir or job.output_directory or None)
+    normalized_mode = _normalize_job_mode(getattr(job, "mode", None))
+    workflow_key = _normalize_workflow_key(getattr(job, "workflow_key", None))
 
-        # Categorize all files
-        all_file_summary = categorize_files(run_uuid, work_dir_path=_wdp)
+    # Categorize all files
+    all_file_summary = categorize_files(resolved_run_uuid or None, work_dir_path=_wdp)
+    work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=resolved_run_uuid or None)
+    workflow_metadata = _load_workflow_metadata(work_dir)
+    workflow_key = _infer_workflow_key_from_layout(work_dir, all_file_summary, workflow_key, workflow_metadata)
+    summary_contract = workflow_metadata.get("summary_contract") if isinstance(workflow_metadata.get("summary_contract"), dict) else {}
+    result_sync_spec = workflow_metadata.get("result_sync_spec") if isinstance(workflow_metadata.get("result_sync_spec"), dict) else {}
         
-        # Filter to key result files only for display
-        key_file_patterns = []
-        if job.mode.upper() == 'CDNA':
-            key_file_patterns = [
-                'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 
-                'isoform', 'junctions', 'counts'
-            ]
-        elif job.mode.upper() == 'DNA':
-            key_file_patterns = [
-                'qc_summary', 'qc', 'stats', 'flagstat', 'modkit', 'methylation', 'mod_freq'
-            ]
-        elif job.mode.upper() == 'RNA':
-            key_file_patterns = [
-                'qc_summary', 'qc', 'stats', 'flagstat', 'gene_counts', 'transcript_counts', 'isoform'
-            ]
+    # Filter to key result files only for display
+    key_file_patterns = _workflow_key_file_patterns(workflow_key, normalized_mode, workflow_metadata)
         
-        def is_key_file(file_info):
-            name_lower = file_info.name.lower()
-            return any(pattern in name_lower for pattern in key_file_patterns)
+    def is_key_file(file_info):
+        name_lower = file_info.name.lower()
+        return any(pattern in name_lower for pattern in key_file_patterns)
         
-        # Filter file lists to key files only for display
-        filtered_txt = [f for f in all_file_summary.txt_files if is_key_file(f)]
-        filtered_csv = [f for f in all_file_summary.csv_files if is_key_file(f)]
-        filtered_bed = [f for f in all_file_summary.bed_files if is_key_file(f)]
-        filtered_other = [f for f in all_file_summary.other_files if is_key_file(f)]
-        
-        file_summary = JobFileSummary(
-            txt_files=filtered_txt,
-            csv_files=filtered_csv,
-            bed_files=filtered_bed,
-            other_files=filtered_other
-        )
-        
-        # Parse key result files
-        key_results = {}
-        parsed_reports = {}
-        
-        # Look for common report files
-        work_dir = resolve_work_dir(work_dir=_wdp, run_uuid=run_uuid)
-        if work_dir:
-            # Parse QC summary if exists
+    # Filter file lists to key files only for display
+    filtered_txt = [f for f in all_file_summary.txt_files if is_key_file(f)]
+    filtered_csv = [f for f in all_file_summary.csv_files if is_key_file(f)]
+    filtered_bed = [f for f in all_file_summary.bed_files if is_key_file(f)]
+    filtered_other = [f for f in all_file_summary.other_files if is_key_file(f)]
+
+    file_summary = JobFileSummary(
+        txt_files=filtered_txt,
+        csv_files=filtered_csv,
+        bed_files=filtered_bed,
+        other_files=filtered_other
+    )
+
+    # Parse key result files
+    key_results = {}
+    parsed_reports = {}
+    workflow_summary: Dict[str, Any] = {}
+    summary_warnings: List[str] = []
+
+    # Look for common report files
+    if work_dir:
+        key_results = {
+            "total_files": all_file_summary.txt_files.__len__() +
+                          all_file_summary.csv_files.__len__() +
+                          all_file_summary.bed_files.__len__() +
+                          all_file_summary.other_files.__len__(),
+            "txt_count": len(all_file_summary.txt_files),
+            "csv_count": len(all_file_summary.csv_files),
+            "bed_count": len(all_file_summary.bed_files),
+            "other_count": len(all_file_summary.other_files)
+        }
+
+        if workflow_key == "reconcile_bams":
+            workflow_summary, family_reports, summary_warnings = _build_reconcile_bams_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+            )
+            parsed_reports.update(family_reports)
+            key_results["Inputs Manifest"] = "Available" if workflow_summary["artifacts"]["inputs_manifest"]["present"] else "Not found"
+            key_results["Reconciled BAM"] = "Available" if workflow_summary["artifacts"]["reconciled_bam"]["present"] else "Not found"
+            key_results["Annotation GTF"] = "Available" if workflow_summary["artifacts"]["annotation_gtf"]["present"] else "Not found"
+            key_results["Summary Report"] = "Available" if workflow_summary["artifacts"]["summary_report"]["present"] else "Not found"
+            key_results["Novelty by Sample"] = "Available" if workflow_summary["artifacts"]["novelty_csv"]["present"] else "Not found"
+            key_results["Input BAM Count"] = workflow_summary["metadata"]["input_bam_count"]
+            if workflow_summary["metadata"].get("reference"):
+                key_results["Reference"] = workflow_summary["metadata"]["reference"]
+            if workflow_summary["metadata"].get("gene_count") is not None:
+                key_results["Genes"] = workflow_summary["metadata"]["gene_count"]
+            if workflow_summary["metadata"].get("isoform_count") is not None:
+                key_results["Isoforms"] = workflow_summary["metadata"]["isoform_count"]
+            transcript_category_counts = workflow_summary["metadata"].get("transcript_category_counts") or {}
+            if transcript_category_counts:
+                key_results["Isoform Classes"] = ", ".join(
+                    f"{label}={count}" for label, count in sorted(transcript_category_counts.items())
+                )
+            if workflow_summary["metadata"].get("novel_gene_count") is not None:
+                key_results["Novel Genes"] = workflow_summary["metadata"]["novel_gene_count"]
+            if workflow_summary["metadata"].get("novel_transcript_count") is not None:
+                key_results["Novel Isoforms"] = workflow_summary["metadata"]["novel_transcript_count"]
+        elif workflow_key == "differential_expression":
+            workflow_summary, family_reports, summary_warnings = _build_differential_expression_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+            )
+            parsed_reports.update(family_reports)
+            key_results["DE Results"] = "Available" if workflow_summary["artifacts"]["results_table"]["present"] else "Not found"
+            key_results["Volcano Plot"] = "Available" if workflow_summary["artifacts"]["volcano_png"]["present"] or workflow_summary["artifacts"]["volcano_svg"]["present"] else "Not found"
+            key_results["Input Counts"] = "Available" if workflow_summary["artifacts"]["input_counts"]["present"] else "Not found"
+            key_results["Sample Info"] = "Available" if workflow_summary["artifacts"]["sample_info"]["present"] else "Not found"
+            if workflow_summary["metadata"].get("comparison_name"):
+                key_results["Comparison"] = workflow_summary["metadata"]["comparison_name"]
+            if workflow_summary["metadata"].get("sample_count"):
+                key_results["Sample Count"] = workflow_summary["metadata"]["sample_count"]
+            if workflow_summary["metadata"].get("result_row_count") is not None:
+                key_results["Result Rows"] = workflow_summary["metadata"]["result_row_count"]
+            if workflow_summary["metadata"].get("significant_count") is not None:
+                key_results["Significant Features"] = workflow_summary["metadata"]["significant_count"]
+        elif workflow_key == "haplotype_with_vcf":
+            workflow_summary, family_reports, summary_warnings = _build_haplotype_with_vcf_summary(
+                work_dir=work_dir,
+                all_file_summary=all_file_summary,
+            )
+            parsed_reports.update(family_reports)
+            key_results["Haplotyped BAMs"] = workflow_summary["metadata"]["haplotyped_bam_count"]
+            key_results["Genome Summary"] = "Available" if workflow_summary["artifacts"]["genome_summary"]["present"] else "Not found"
+            key_results["Chromosome Summary"] = "Available" if workflow_summary["artifacts"]["chromosome_summary"]["present"] else "Not found"
+            key_results["Gene Counts"] = "Available" if workflow_summary["artifacts"]["gene_counts"]["present"] else "Not found"
+            key_results["Transcript Counts"] = "Available" if workflow_summary["artifacts"]["transcript_counts"]["present"] else "Not found"
+            if workflow_summary["metadata"].get("assignment_labels"):
+                key_results["Assignment Labels"] = ", ".join(workflow_summary["metadata"]["assignment_labels"])
+        else:
             qc_files = [f for f in file_summary.csv_files if 'qc_summary' in f.name.lower() or 'qc' in f.name.lower()]
             if qc_files:
                 try:
-                    qc_data = parse_csv_file(run_uuid, qc_files[0].path, max_rows=100, work_dir_path=_wdp)
+                    qc_data = parse_csv_file(resolved_run_uuid or None, qc_files[0].path, max_rows=100, work_dir_path=_wdp)
                     parsed_reports['qc_summary'] = qc_data.dict()
                 except Exception:
                     pass
-            
-            # Parse stats files
+
             stats_files = [f for f in file_summary.csv_files if 'stats' in f.name.lower() or 'flagstat' in f.name.lower()]
             if stats_files:
                 try:
-                    stats_data = parse_csv_file(run_uuid, stats_files[0].path, max_rows=100, work_dir_path=_wdp)
+                    stats_data = parse_csv_file(resolved_run_uuid or None, stats_files[0].path, max_rows=100, work_dir_path=_wdp)
                     parsed_reports['stats'] = stats_data.dict()
                 except Exception:
                     pass
-            
-            # Mode-specific parsing
-            if job.mode.upper() == 'CDNA':
-                # Parse gene counts
+
+            if normalized_mode == 'CDNA':
                 gene_files = [f for f in file_summary.csv_files if 'gene_counts' in f.name.lower() or 'counts' in f.name.lower() and 'gene' in f.name.lower()]
                 if gene_files:
                     try:
-                        gene_data = parse_csv_file(run_uuid, gene_files[0].path, max_rows=50, work_dir_path=_wdp)
+                        gene_data = parse_csv_file(resolved_run_uuid or None, gene_files[0].path, max_rows=50, work_dir_path=_wdp)
                         parsed_reports['gene_counts'] = gene_data.dict()
                     except Exception:
                         pass
-                
-                # Parse transcript counts
+
                 transcript_files = [f for f in file_summary.csv_files if 'transcript_counts' in f.name.lower() or 'isoform' in f.name.lower()]
                 if transcript_files:
                     try:
-                        transcript_data = parse_csv_file(run_uuid, transcript_files[0].path, max_rows=50, work_dir_path=_wdp)
+                        transcript_data = parse_csv_file(resolved_run_uuid or None, transcript_files[0].path, max_rows=50, work_dir_path=_wdp)
                         parsed_reports['transcript_counts'] = transcript_data.dict()
                     except Exception:
                         pass
-            
-            # Count key file types from all files
-            key_results = {
-                "total_files": all_file_summary.txt_files.__len__() + 
-                              all_file_summary.csv_files.__len__() + 
-                              all_file_summary.bed_files.__len__() + 
-                              all_file_summary.other_files.__len__(),
-                "txt_count": len(all_file_summary.txt_files),
-                "csv_count": len(all_file_summary.csv_files),
-                "bed_count": len(all_file_summary.bed_files),
-                "other_count": len(all_file_summary.other_files)
-            }
-            
-            # Add availability of parsed reports
+
             key_results["QC Summary"] = "Available" if 'qc_summary' in parsed_reports else "Not found"
             key_results["Stats"] = "Available" if 'stats' in parsed_reports else "Not found"
-            
-            # Extract key metrics from parsed reports
+
+            if workflow_key == "wf_pore_c":
+                report_filename = str(
+                    result_sync_spec.get("report_filename")
+                    or summary_contract.get("report_filename")
+                    or "wf-pore-c-report.html"
+                ).strip()
+                visible_files = (
+                    file_summary.txt_files
+                    + file_summary.csv_files
+                    + file_summary.bed_files
+                    + file_summary.other_files
+                )
+                key_results["Workflow Report"] = "Available" if any(f.name == report_filename for f in visible_files) else "Not found"
+                workflow_summary, summary_warnings = _build_wf_pore_c_summary(
+                    work_dir=work_dir,
+                    all_file_summary=all_file_summary,
+                    workflow_metadata=workflow_metadata,
+                    summary_contract=summary_contract,
+                    result_sync_spec=result_sync_spec,
+                )
+                if workflow_summary.get("pairs_stats"):
+                    parsed_reports["pairs_stats"] = workflow_summary["pairs_stats"]
+
             if 'qc_summary' in parsed_reports and parsed_reports['qc_summary'].get('data'):
                 qc_data = parsed_reports['qc_summary']['data']
                 if qc_data:
-                    # Extract common QC metrics
                     for row in qc_data:
                         if 'metric' in row and 'value' in row:
                             key_results[row['metric']] = row['value']
-            
+
             if 'stats' in parsed_reports and parsed_reports['stats'].get('data'):
                 stats_data = parsed_reports['stats']['data']
                 if stats_data:
@@ -1179,34 +2355,38 @@ def generate_analysis_summary(
                         for key, value in row.items():
                             if key.lower() in ['mapped_reads', 'total_reads', 'mapping_rate', 'duplicates']:
                                 key_results[key] = value
-            
-            # Mode-specific key results
-            if job.mode.upper() == 'CDNA':
+
+            if normalized_mode == 'CDNA':
                 key_results["Gene Counts"] = "Available" if 'gene_counts' in parsed_reports else "Not found"
                 key_results["Transcript Counts"] = "Available" if 'transcript_counts' in parsed_reports else "Not found"
-                
+
                 if 'gene_counts' in parsed_reports and parsed_reports['gene_counts'].get('data'):
                     gene_data = parsed_reports['gene_counts']['data']
                     key_results['genes_detected'] = len(gene_data)
-                
+
                 if 'transcript_counts' in parsed_reports and parsed_reports['transcript_counts'].get('data'):
                     transcript_data = parsed_reports['transcript_counts']['data']
                     key_results['transcripts_detected'] = len(transcript_data)
-        
-        return AnalysisSummary(
-            run_uuid=run_uuid,
-            sample_name=job.sample_name,
-            mode=job.mode,
-            status=job.status,
-            work_dir=str(work_dir) if work_dir else "",
-            file_summary=file_summary,  # Filtered
-            all_file_counts={
-                "txt_count": len(all_file_summary.txt_files),
-                "csv_count": len(all_file_summary.csv_files),
-                "bed_count": len(all_file_summary.bed_files),
-                "other_count": len(all_file_summary.other_files),
-                "total_files": len(all_file_summary.txt_files) + len(all_file_summary.csv_files) + len(all_file_summary.bed_files) + len(all_file_summary.other_files)
-            },
-            key_results=key_results,
-            parsed_reports=parsed_reports
-        )
+
+    return AnalysisSummary(
+        run_uuid=resolved_run_uuid,
+        sample_name=job.sample_name,
+        workflow_key=workflow_key,
+        mode=normalized_mode,
+        status=job.status,
+        work_dir=str(work_dir) if work_dir else "",
+        file_summary=file_summary,  # Filtered
+        all_file_counts={
+            "txt_count": len(all_file_summary.txt_files),
+            "csv_count": len(all_file_summary.csv_files),
+            "bed_count": len(all_file_summary.bed_files),
+            "other_count": len(all_file_summary.other_files),
+            "total_files": len(all_file_summary.txt_files) + len(all_file_summary.csv_files) + len(all_file_summary.bed_files) + len(all_file_summary.other_files)
+        },
+        key_results=key_results,
+        parsed_reports=parsed_reports,
+        summary_contract=summary_contract,
+        result_sync_spec=result_sync_spec,
+        workflow_summary=workflow_summary,
+        warnings=summary_warnings,
+    )

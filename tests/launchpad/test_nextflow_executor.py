@@ -1,8 +1,13 @@
 """Tests for launchpad/nextflow_executor.py."""
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 import launchpad.nextflow_executor as nextflow_module
+from launchpad import config as launchpad_config
 from launchpad.config import (
     REFERENCE_GENOMES,
     DOGME_DNA_MODKITBASE,
@@ -11,17 +16,120 @@ from launchpad.config import (
     DOGME_DNA_OPENCHROM_LIBTORCH,
     DOGME_DNA_OPENCHROM_MODEL,
     DOGME_DNA_OPENCHROM_MODKITBASE,
-    DOGME_DNA_SLURM_CONTAINER,
+    LOCAL_DEFAULT_MAX_TASK_MEMORY_GB,
+    SLURM_DEFAULT_CPU_MEMORY_GB,
+)
+from launchpad.workflow_accounting import (
+    is_gpu_task_name,
+    summarize_slurm_workflow_usage,
+    summarize_nextflow_trace_text,
 )
 from launchpad.nextflow_executor import (
     NextflowConfig,
     NextflowExecutor,
     resolve_dogme_profile_content,
     resolve_dogme_profile_task_runtime_exports,
+    resolve_local_max_task_cpus,
+    resolve_local_max_task_memory_gb,
+    resolve_slurm_cpu_memory_gb,
 )
+from launchpad.workflow_executors import get_workflow_executor
+
+
+class TestWorkflowAccounting:
+    def test_summarize_nextflow_trace_text_tracks_cpu_memory_and_gpu_runtime(self):
+        summary = summarize_nextflow_trace_text(
+            "\n".join(
+                [
+                    "task_id\thash\tnative_id\tname\tstatus\texit\tsubmit\tduration\trealtime\t%cpu\tpeak_rss\tpeak_vmem\trchar\twchar",
+                    "1\tabc\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t0\t2026-05-24T10:00:00\t1m 30s\t60s\t320%\t1.5 GB\t2 GB\t0\t0",
+                    "2\tbcd\t1002\tmainWorkflow:minimapTask (1)\tCOMPLETED\t0\t2026-05-24T10:02:00\t2m\t120s\t180%\t768 MB\t1.25 GB\t0\t0",
+                    "3\tcde\t1003\tmainWorkflow:openChromatinTaskBg (1)\tFAILED\t1\t2026-05-24T10:05:00\t30s\t25s\t250%\t2 GiB\t3 GiB\t0\t0",
+                    "4\tdef\t1004\tlauncher\tCOMPLETED\t0\t2026-05-24T10:06:00\t1s\t1s\t100%\t4 MB\t8 MB\t0\t0",
+                    "5\tefg\t1005\tmainWorkflow:doradoTask (2)\tCACHED\t0\t2026-05-24T10:07:00\t0s\t0s\t0%\t0 MB\t0 MB\t0\t0",
+                ]
+            ),
+            accounting_mode="local",
+            trace_path="/tmp/workflow1/sample_trace.txt",
+        )
+
+        assert summary == {
+            "source": "nextflow_trace",
+            "accounting_mode": "local",
+            "accounted_task_count": 4,
+            "completed_task_count": 2,
+            "failed_task_count": 1,
+            "cached_task_count": 1,
+            "cpu_seconds": 470.5,
+            "task_realtime_seconds": 205.0,
+            "estimated_gpu_task_seconds": 85.0,
+            "max_rss_mb": 2048.0,
+            "max_vmem_mb": 3072.0,
+            "trace_path": "/tmp/workflow1/sample_trace.txt",
+        }
+
+    def test_is_gpu_task_name_matches_expected_process_suffixes(self):
+        assert is_gpu_task_name("mainWorkflow:doradoTask (1)") is True
+        assert is_gpu_task_name("reports:openChromatinTaskBed (7)") is True
+        assert is_gpu_task_name("mainWorkflow:minimapTask (2)") is False
+
+    def test_summarize_slurm_workflow_usage_tracks_billing_hours_by_account(self):
+        summary = summarize_slurm_workflow_usage(
+            "\n".join(
+                [
+                    "task_id\thash\tnative_id\tname\tstatus\texit\tsubmit\tduration\trealtime\t%cpu\tpeak_rss\tpeak_vmem\trchar\twchar",
+                    "1\tabc\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t0\t2026-05-24T10:00:00\t1m\t55s\t300%\t1.5 GB\t2 GB\t0\t0",
+                    "2\tbcd\t1002\tmainWorkflow:minimapTask (1)\tCOMPLETED\t0\t2026-05-24T10:02:00\t90s\t70s\t150%\t768 MB\t1.25 GB\t0\t0",
+                ]
+            ),
+            "\n".join(
+                [
+                    "1001|gpu-default|COMPLETED|55|00:01:10|2G|billing=2,cpu=4,gres/gpu=1",
+                    "1002|cpu-default|COMPLETED|70|00:01:30|1G|billing=1,cpu=2",
+                    "2000|cpu-default|RUNNING|30|00:00:10|512M|billing=1,cpu=1",
+                ]
+            ),
+            trace_path="/tmp/workflow1/trace.txt",
+            launcher_job_id="2000",
+        )
+
+        assert summary["source"] == "slurm_sacct+nextflow_trace"
+        assert summary["cpu_seconds"] == 170.0
+        assert summary["cpu_queue_seconds"] == 100.0
+        assert summary["gpu_queue_seconds"] == 55.0
+        assert summary["task_realtime_seconds"] == 155.0
+        assert summary["billing_units"] == 0.058
+        assert summary["billing_hours_by_account"] == {
+            "cpu-default": 0.028,
+            "gpu-default": 0.031,
+        }
+        assert summary["billing_entries"] == [
+            {
+                "resource_type": "CPU",
+                "account": "cpu-default",
+                "billing_hours": 0.028,
+            },
+            {
+                "resource_type": "GPU",
+                "account": "gpu-default",
+                "billing_hours": 0.031,
+            },
+        ]
+        assert summary["slurm_accounted_job_count"] == 3
+        assert summary["slurm_launcher_accounted"] is True
+        assert summary["gpu_seconds"] == 55.0
 
 
 class TestGenerateConfig:
+    def test_resolve_slurm_cpu_memory_gb_applies_default_only_when_missing(self):
+        assert resolve_slurm_cpu_memory_gb(None) == SLURM_DEFAULT_CPU_MEMORY_GB
+        assert resolve_slurm_cpu_memory_gb(16) == 16
+        assert resolve_slurm_cpu_memory_gb(192) == 192
+
+    def test_resolve_local_max_task_memory_gb_applies_default_only_when_missing(self):
+        assert resolve_local_max_task_memory_gb(None) == LOCAL_DEFAULT_MAX_TASK_MEMORY_GB
+        assert resolve_local_max_task_memory_gb(48) == 48
+
     def test_dna_mode_uses_defaults_for_string_reference(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-a",
@@ -35,6 +143,7 @@ class TestGenerateConfig:
         assert "modifications = '5mCG_5hmCG,6mA'" in config
         assert "minCov = 3" in config
         assert "perMod = 5" in config
+        assert 'accuracy = "hac"' in config
         assert "[name: 'GRCh38'" in config
         assert f"genome: '{REFERENCE_GENOMES['GRCh38']['fasta']}'" in config
         assert f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'" in config
@@ -49,10 +158,28 @@ class TestGenerateConfig:
 
         assert "[name: 'GRCh38'" in config
         assert "[name: 'mm39'" in config
+        assert (
+            f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'],\n"
+            f"        [name: 'mm39', genome: '{REFERENCE_GENOMES['mm39']['fasta']}'"
+        ) in config
         assert f"kallistoIndex = '{REFERENCE_GENOMES['GRCh38']['kallisto_index']}'" in config
         assert f"t2g = '{REFERENCE_GENOMES['GRCh38']['kallisto_t2g']}'" in config
         assert "modifications = 'inosine_m6A_2OmeA,pseU_2OmeU,m5C_2OmeC,2OmeG'" in config
         assert "minCov = 3" in config
+        assert 'accuracy = "sup"' in config
+
+    def test_multi_genome_config_includes_commas_between_reference_maps(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mm39-mad1",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39", "mad1"],
+        )
+
+        assert (
+            f"annot: '{REFERENCE_GENOMES['mm39']['gtf']}'],\n"
+            f"        [name: 'mad1', genome: '{REFERENCE_GENOMES['mad1']['fasta']}'"
+        ) in config
 
     def test_grch38_config_uses_human_kallisto_sidecars(self):
         config = NextflowConfig.generate_config(
@@ -75,6 +202,34 @@ class TestGenerateConfig:
 
         assert f"kallistoIndex = '{REFERENCE_GENOMES['mm39']['kallisto_index']}'" in config
         assert f"t2g = '{REFERENCE_GENOMES['mm39']['kallisto_t2g']}'" in config
+
+    def test_mad1_dna_config_omits_kallisto_when_sidecars_are_not_configured(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mad1",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mad1"],
+        )
+
+        assert "[name: 'mad1'" in config
+        assert f"genome: '{REFERENCE_GENOMES['mad1']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['mad1']['gtf']}'" in config
+        assert "kallistoIndex =" not in config
+        assert "t2g =" not in config
+
+    def test_mad1_rna_config_omits_kallisto_when_sidecars_are_not_configured(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-mad1-rna",
+            mode="RNA",
+            input_dir="/tmp/input",
+            reference_genome=["mad1"],
+        )
+
+        assert "[name: 'mad1'" in config
+        assert f"genome: '{REFERENCE_GENOMES['mad1']['fasta']}'" in config
+        assert f"annot: '{REFERENCE_GENOMES['mad1']['gtf']}'" in config
+        assert "kallistoIndex =" not in config
+        assert "t2g =" not in config
 
     def test_explicit_modifications_override_mode_defaults(self):
         config = NextflowConfig.generate_config(
@@ -115,6 +270,7 @@ class TestGenerateConfig:
         assert "// No modifications for CDNA mode" in config
         assert "modifications = ''" in config
         assert "minCov = 3" in config
+        assert 'accuracy = "hac"' in config
 
     def test_unknown_genome_falls_back_to_mm39_reference_paths(self):
         config = NextflowConfig.generate_config(
@@ -142,6 +298,56 @@ class TestGenerateConfig:
         assert "singularity {" not in config
         assert "apptainer {" not in config
         assert "clusterOptions = \"--account=${cpuAccount}\"" not in config
+
+    def test_generated_config_uses_explicit_params_namespace_for_derived_paths(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-derived-paths",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+        )
+
+        assert 'topDir = "${launchDir}"' in config
+        assert 'modDir = "${params.topDir}/dorModels"' in config
+        assert 'dorDir = "${params.topDir}/dor12-${params.sample}"' in config
+        assert 'podDir = "${params.topDir}/pod5"' in config
+        assert 'kallistoDir = "${params.topDir}/kallisto"' in config
+        assert '"${topDir}/' not in config
+        assert '${sample}' not in config
+
+    def test_local_execution_defaults_max_task_memory_to_64_gb(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local-default-memory",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+        )
+
+        expected_local_cpus = resolve_local_max_task_cpus(None)
+        assert f"withName: 'modkitTask' {{\n        memory = '64 GB'\n        cpus = {expected_local_cpus}" in config
+        assert f"withName: 'minimapTask' {{\n        cpus = {expected_local_cpus}\n        memory = '64 GB'" in config
+
+    def test_local_execution_caps_task_cpu_and_memory_requests(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-local-capped",
+            mode="DNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="local",
+            local_max_task_cpus=8,
+            local_max_task_memory_gb=48,
+        )
+
+        assert "withName: 'extractfastqTask' {\n        // Matches the script's thread count and gives safe memory buffer\n        cpus = 6" in config
+        assert "withName: 'modkitTask' {\n        memory = '48 GB'\n        cpus = 8" in config
+        assert "withName: 'minimapTask' {\n        cpus = 8\n        memory = '48 GB'" in config
+
+    def test_resolve_local_max_task_cpus_clamps_to_host_availability(self, monkeypatch):
+        monkeypatch.setattr(nextflow_module.os, "cpu_count", lambda: 12)
+        assert resolve_local_max_task_cpus(20) == 12
+        assert resolve_local_max_task_cpus(6) == 6
 
     def test_slurm_execution_uses_accounts_partitions_and_singularity(self):
         config = NextflowConfig.generate_config(
@@ -171,10 +377,10 @@ class TestGenerateConfig:
         assert "    cpus = 4" in config
         assert "    memory = '16 GB'" in config
         assert "    time = '48:00:00'" in config
-        assert "clusterOptions = \"--account=${cpuAccount}\"" in config
-        assert "queue = \"${cpuPartition}\"" in config
-        assert "clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"" in config
-        assert "queue = \"${gpuPartition}\"" in config
+        assert "clusterOptions = '--account=cpu-acct'" in config
+        assert "queue = 'cpu-part'" in config
+        assert "clusterOptions = '--account=gpu-acct --gres=gpu:1'" in config
+        assert "queue = 'gpu-part'" in config
         assert f"--bind {REFERENCE_GENOMES['mm39']['fasta']}" not in config
         assert "containerOptions = '--no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1'" in config
         assert "containerOptions = '--nv --no-mount hostfs --bind /share/crsp/lab/seyedam/share/agoutic/seyedam/testslurm1'" in config
@@ -205,9 +411,9 @@ class TestGenerateConfig:
         assert "    cpus = 4" in config
         assert "    memory = '16 GB'" in config
         assert "    time = '48:00:00'" in config
-        assert "    clusterOptions = \"--account=${cpuAccount}\"" in config
-        assert "    queue = \"${cpuPartition}\"" in config
-        assert "withName: 'doradoTask' {\n        clusterOptions = \"--account=${gpuAccount} --gres=gpu:1\"\n        queue = \"${gpuPartition}\"" in config
+        assert "    clusterOptions = '--account=SEYEDAM_LAB'" in config
+        assert "    queue = 'standard'" in config
+        assert "withName: 'doradoTask' {\n        clusterOptions = '--account=BIOD132_CLASS_GPU --gres=gpu:1'\n        queue = 'gpu'" in config
         assert 'cacheDir = "/share/crsp/lab/seyedam/share/agoutic/seyedam/.nxf-apptainer-cache"' in config
         assert "singularity {" not in config
         assert "docker {" not in config
@@ -257,12 +463,23 @@ class TestGenerateConfig:
             slurm_bind_paths=["/remote/workflow4", "/remote/ref/mm39"],
         )
 
-        assert f"container = '{DOGME_DNA_SLURM_CONTAINER}'" in config
+        assert "container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'" in config
         assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39'" in config
         assert config.count("containerOptions = '--nv --no-mount hostfs --bind /remote/workflow4,/remote/ref/mm39 --env \\\'MODKITBASE=") == 2
         assert f"LIBTORCH={DOGME_DNA_OPENCHROM_LIBTORCH}" in config
         assert f"LD_LIBRARY_PATH=/opt/conda/lib:{DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$LD_LIBRARY_PATH" in config
         assert f"DYLD_LIBRARY_PATH={DOGME_DNA_OPENCHROM_LIBTORCH}/lib:\\\\$DYLD_LIBRARY_PATH" in config
+
+    def test_slurm_cdna_uses_shared_dogme_container(self):
+        config = NextflowConfig.generate_config(
+            sample_name="sample-cdna-shared-container",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            execution_mode="slurm",
+        )
+
+        assert "container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'" in config
 
     def test_slurm_reference_overrides_replace_kallisto_sidecars(self):
         config = NextflowConfig.generate_config(
@@ -335,7 +552,7 @@ class TestGenerateConfig:
             ],
         )
 
-        assert f"process {{\n    // <-- Container Settings --->\n    container = '{DOGME_DNA_SLURM_CONTAINER}'\n    // Remote SLURM runs bind only workflow-specific remote paths.\n    containerOptions = '--no-mount hostfs'\n    beforeScript = 'export PATH=/opt/conda/bin:$PATH'" in config
+        assert "process {\n    // <-- Container Settings --->\n    container = 'ghcr.io/mortazavilab/dogme-pipeline:latest'\n    // Remote SLURM runs bind only workflow-specific remote paths.\n    containerOptions = '--no-mount hostfs'\n    beforeScript = 'export PATH=/opt/conda/bin:$PATH'" in config
         assert "withName: 'modkitTask' {\n        memory = '64 GB'\n        cpus = 12\n        containerOptions = '--no-mount hostfs'" in config
         assert "beforeScript = 'export PATH=/opt/conda/bin:$PATH; export LIBTORCH=/cluster/modkit/libtorch" not in config
         assert config.count("--bind /cluster/modkit,/lib64/libgomp.so.1,/lib64/libstdc++.so.6,/lib64/libgcc_s.so.1 --env \\\'MODKITBASE=/cluster/modkit,PREPEND_PATH=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch,MODKITMODEL=/cluster/modkit/dist_modkit_v0.5.0_5120ef7_tch/models/r1041_e82_400bps_hac_v5.2.0@v0.1.0,LIBTORCH=/cluster/modkit/libtorch,LD_LIBRARY_PATH=/lib64:/cluster/modkit/libtorch/lib:\\\\$LD_LIBRARY_PATH,DYLD_LIBRARY_PATH=/cluster/modkit/libtorch/lib:\\\\$DYLD_LIBRARY_PATH\\\'") == 2
@@ -477,3 +694,402 @@ class TestNextWorkflowNumber:
         (project_dir / "workflow3.txt").write_text("not a dir")
 
         assert NextflowExecutor._next_workflow_number(project_dir) == 10
+
+
+class TestGenericWorkflowSubmission:
+    @pytest.mark.asyncio
+    async def test_submit_job_uses_workflow_executor_contract_for_wf_pore_c(self, monkeypatch, tmp_path):
+        agoutic_data = tmp_path / "agoutic-data"
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        monkeypatch.delenv("NXF_SYNTAX_PARSER", raising=False)
+
+        input_path = tmp_path / "inputs" / "sample.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        reference_fasta = tmp_path / "refs" / "reference.fa"
+        reference_fasta.parent.mkdir(parents=True, exist_ok=True)
+        reference_fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        class _FakeProcess:
+            pid = 4321
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            captured["env"] = kwargs["env"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+        monkeypatch.setattr(nextflow_module, "AGOUTIC_DATA", agoutic_data)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="POREC_A",
+            mode=None,
+            input_directory=str(input_path),
+            input_type="fastq",
+            reference_fasta=str(reference_fasta),
+            vcf=None,
+            sample_sheet=None,
+            cutter="NlaIII",
+            workflow_repo=None,
+            workflow_version=None,
+            output_flags={"pairs": True, "mcool": True},
+            output_directory=None,
+        )
+
+        workflow_executor = get_workflow_executor("wf_pore_c")
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-pore-c",
+            workflow_key="wf_pore_c",
+            workflow_executor=workflow_executor,
+            request=request,
+            sample_name="POREC_A",
+            mode=None,
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["GRCh38"],
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        expected_work_dir = agoutic_data / "users" / "alice" / "proj-1" / "workflow1"
+        expected_work_path = agoutic_data / "users" / "alice" / "proj-1" / ".nextflow-work" / "wf-pore-c" / "workflow1"
+        staged_input = expected_work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "input" / input_path.name
+        staged_reference = expected_work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "reference" / reference_fasta.name
+
+        assert run_uuid == "run-pore-c"
+        assert work_dir == expected_work_dir
+        assert captured["cmd"][:5] == [
+            str(nextflow_bin),
+            "run",
+            "epi2me-labs/wf-pore-c",
+            "-r",
+            "v1.3.1",
+        ]
+        assert "--ref" in captured["cmd"]
+        assert str(staged_reference) in captured["cmd"]
+        assert "--sample" in captured["cmd"]
+        assert str(staged_input) in captured["cmd"]
+        assert "-work-dir" in captured["cmd"]
+        assert str(expected_work_path) in captured["cmd"]
+        assert captured["env"]["NXF_SYNTAX_PARSER"] == "v1"
+        assert expected_work_path.parent.exists()
+        assert not str(expected_work_path).startswith(str(expected_work_dir) + "/")
+        assert staged_input.is_symlink()
+        assert staged_reference.is_symlink()
+        assert not (work_dir / "dogme.profile").exists()
+        assert (work_dir / ".agoutic" / "wf-pore-c" / "submit-config.json").exists()
+        assert (work_dir / ".launch_command").exists()
+        assert (work_dir / ".nextflow_pid").read_text() == "4321"
+
+        metadata = json.loads((work_dir / ".agoutic.workflow.json").read_text())
+        assert metadata["workflow_key"] == "wf_pore_c"
+        assert metadata["summary_contract"]["workflow_key"] == "wf_pore_c"
+        assert metadata["result_sync_spec"]["report_filename"] == "wf-pore-c-report.html"
+
+    @pytest.mark.asyncio
+    async def test_check_status_failed_marker_keeps_task_summary_and_usage(self, tmp_path):
+        nextflow_module._workflow_usage_cache.clear()
+
+        work_dir = tmp_path / "workflow1"
+        work_dir.mkdir()
+        (work_dir / ".nextflow_failed").write_text("failed\n", encoding="utf-8")
+        (work_dir / ".nextflow_error").write_text("Process exited with code 1", encoding="utf-8")
+        (work_dir / "trace.txt").write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t200%\t4G\t6G\t0\n"
+            "2\tbb/cc\t1002\tmainWorkflow:minimapTask (1)\tFAILED\t30s\t100%\t2G\t3G\t1\n",
+            encoding="utf-8",
+        )
+
+        executor = NextflowExecutor()
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        status = await executor.check_status("run-failed-stats", work_dir)
+
+        assert status["status"] == nextflow_module.JobStatus.FAILED
+        assert status["progress_percent"] == 50
+        assert status["tasks"]["completed_count"] == 1
+        assert status["tasks"]["failed_count"] == 1
+        assert status["tasks"]["total"] == 2
+        assert "Pipeline: 1/2 completed, 1 failed" in status["message"]
+        assert status["workflow_usage"]["completed_task_count"] == 1
+        assert status["workflow_usage"]["failed_task_count"] == 1
+        assert status["workflow_usage_synced_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_check_status_reuses_cached_workflow_usage_until_terminal_refresh(self, monkeypatch, tmp_path):
+        nextflow_module._workflow_usage_cache.clear()
+
+        work_dir = tmp_path / "workflow-cache"
+        work_dir.mkdir()
+        trace_file = work_dir / "trace.txt"
+        trace_file.write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t200%\t4G\t6G\t0\n",
+            encoding="utf-8",
+        )
+
+        calls = {"count": 0}
+
+        def fake_summarize(_trace_file, accounting_mode="local"):
+            assert accounting_mode == "local"
+            calls["count"] += 1
+            return {
+                "source": "nextflow_trace",
+                "accounting_mode": "local",
+                "cpu_seconds": float(10 * calls["count"]),
+            }
+
+        monkeypatch.setattr(nextflow_module, "summarize_nextflow_trace_file", fake_summarize)
+
+        executor = NextflowExecutor()
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        first = await executor.check_status("run-cache-refresh", work_dir)
+
+        trace_file.write_text(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\taa/bb\t1001\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t200%\t4G\t6G\t0\n",
+            encoding="utf-8",
+        )
+        second = await executor.check_status("run-cache-refresh", work_dir)
+
+        (work_dir / ".nextflow_success").write_text("done\n", encoding="utf-8")
+        third = await executor.check_status("run-cache-refresh", work_dir)
+
+        assert calls["count"] == 2
+        assert first["workflow_usage"]["cpu_seconds"] == 10.0
+        assert second["workflow_usage"]["cpu_seconds"] == 10.0
+        assert third["workflow_usage"]["cpu_seconds"] == 20.0
+
+    @pytest.mark.asyncio
+    async def test_submit_job_copies_staged_input_when_symlink_rejected(self, monkeypatch, tmp_path):
+        agoutic_data = tmp_path / "agoutic-data"
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        input_path = tmp_path / "inputs" / "sample.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        reference_fasta = tmp_path / "refs" / "reference.fa"
+        reference_fasta.parent.mkdir(parents=True, exist_ok=True)
+        reference_fasta.write_text(">chr1\nACGT\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+        symlink_attempts: list[tuple[str, str]] = []
+
+        class _FakeProcess:
+            pid = 9876
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        def rejecting_symlink(src, dst, target_is_directory=False):
+            symlink_attempts.append((src, dst))
+            raise OSError("EPERM")
+
+        monkeypatch.setattr(launchpad_config, "WF_PORE_C_ENABLED", True)
+        monkeypatch.setattr(nextflow_module, "AGOUTIC_DATA", agoutic_data)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+        monkeypatch.setattr("launchpad.workflow_executors.wf_pore_c.os.symlink", rejecting_symlink)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="POREC_A",
+            mode=None,
+            input_directory=str(input_path),
+            input_type="fastq",
+            reference_fasta=str(reference_fasta),
+            vcf=None,
+            sample_sheet=None,
+            cutter="NlaIII",
+            workflow_repo=None,
+            workflow_version=None,
+            output_flags={"pairs": True, "mcool": True},
+            output_directory=None,
+        )
+
+        workflow_executor = get_workflow_executor("wf_pore_c")
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-pore-c-copy",
+            workflow_key="wf_pore_c",
+            workflow_executor=workflow_executor,
+            request=request,
+            sample_name="POREC_A",
+            mode=None,
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["GRCh38"],
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        staged_input = work_dir / ".agoutic" / "wf-pore-c" / "staged-inputs" / "input" / input_path.name
+
+        assert run_uuid == "run-pore-c-copy"
+        assert symlink_attempts
+        assert staged_input.exists()
+        assert not staged_input.is_symlink()
+        assert staged_input.read_text(encoding="utf-8") == input_path.read_text(encoding="utf-8")
+        assert str(staged_input) in captured["cmd"]
+
+
+class TestDogmeFastqCdnaSubmission:
+    @pytest.mark.asyncio
+    async def test_submit_job_stages_fastq_cdna_alias_using_approved_sample_name(self, monkeypatch, tmp_path):
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        dogme_repo = tmp_path / "dogme"
+        dogme_repo.mkdir(parents=True, exist_ok=True)
+        (dogme_repo / "dogme.nf").write_text("nextflow.enable.dsl=2\n", encoding="utf-8")
+
+        input_path = tmp_path / "inputs" / "reads.fastq.gz"
+        input_path.parent.mkdir(parents=True, exist_ok=True)
+        input_path.write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        class _FakeProcess:
+            pid = 2222
+
+            async def wait(self):
+                return 0
+
+        async def fake_subprocess_exec(*cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            captured["cwd"] = kwargs["cwd"]
+            return _FakeProcess()
+
+        def fake_create_task(coro):
+            captured.setdefault("tasks", []).append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(nextflow_module, "DOGME_REPO", dogme_repo)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_subprocess_exec", fake_subprocess_exec)
+        monkeypatch.setattr(nextflow_module.asyncio, "create_task", fake_create_task)
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        request = SimpleNamespace(
+            sample_name="JamshidApproved",
+            mode="CDNA",
+            input_directory=str(input_path),
+            input_type="fastq",
+        )
+
+        run_uuid, work_dir = await executor.submit_job(
+            run_uuid="run-fastq-cdna",
+            workflow_key="dogme",
+            workflow_executor=get_workflow_executor("dogme"),
+            request=request,
+            sample_name="JamshidApproved",
+            mode="CDNA",
+            input_type="fastq",
+            input_dir=str(input_path),
+            reference_genome=["mm39"],
+            entry_point="fastqCDNA",
+            workflow_index=1,
+            username="alice",
+            project_slug="proj-1",
+        )
+
+        staged_fastq = work_dir / "fastqs" / "JamshidApproved.fastq.gz"
+
+        assert run_uuid == "run-fastq-cdna"
+        assert staged_fastq.is_symlink()
+        assert staged_fastq.resolve() == input_path.resolve()
+        assert "-entry" in captured["cmd"]
+        assert "fastqCDNA" in captured["cmd"]
+        assert (work_dir / "dogme.profile").exists()
+        assert (work_dir / "nextflow.config").exists()
+        assert (work_dir / ".nextflow_pid").read_text() == "2222"
+
+    @pytest.mark.asyncio
+    async def test_submit_job_rejects_multiple_fastqs_for_fastq_cdna(self, tmp_path):
+        nextflow_bin = tmp_path / "bin" / "nextflow"
+        nextflow_bin.parent.mkdir(parents=True, exist_ok=True)
+        nextflow_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        input_dir = tmp_path / "inputs"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        (input_dir / "lane1.fastq.gz").write_text("@read\nACGT\n+\n!!!!\n", encoding="utf-8")
+        (input_dir / "lane2.fastq.gz").write_text("@read\nTGCA\n+\n!!!!\n", encoding="utf-8")
+
+        executor = NextflowExecutor()
+        executor.nextflow_bin = nextflow_bin
+        executor.work_dir = tmp_path / "launchpad-work"
+        executor.work_dir.mkdir(parents=True, exist_ok=True)
+        executor.logs_dir = tmp_path / "logs"
+        executor.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        with pytest.raises(RuntimeError, match="Dogme fastqCDNA currently supports one FASTQ file per sample"):
+            await executor.submit_job(
+                run_uuid="run-fastq-cdna-error",
+                workflow_key="dogme",
+                workflow_executor=get_workflow_executor("dogme"),
+                request=SimpleNamespace(sample_name="JamshidApproved", mode="CDNA", input_directory=str(input_dir), input_type="fastq"),
+                sample_name="JamshidApproved",
+                mode="CDNA",
+                input_type="fastq",
+                input_dir=str(input_dir),
+                reference_genome=["mm39"],
+                entry_point="fastqCDNA",
+                workflow_index=1,
+                username="alice",
+                project_slug="proj-1",
+            )

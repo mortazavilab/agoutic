@@ -25,6 +25,39 @@ FIRST_PASS_TEMPLATE = "first_pass_system_prompt.md"
 SECOND_PASS_TEMPLATE = "second_pass_system_prompt.md"
 PLANNING_TEMPLATE = "planning_system_prompt.md"
 
+# ---------------------------------------------------------------------------
+# Module-level caches — populated once at import time (templates) or lazily
+# on first use (skill text).  All cached values are immutable strings.
+# ---------------------------------------------------------------------------
+_TEMPLATE_CACHE: dict[str, str] = {}
+_SKILL_CACHE: dict[str, str] = {}
+
+
+def _init_template_cache() -> None:
+    """Load static prompt templates into the module-level cache."""
+    for name in (FIRST_PASS_TEMPLATE, SECOND_PASS_TEMPLATE, PLANNING_TEMPLATE):
+        template_path = PROMPT_TEMPLATES_DIR / name
+        if template_path.exists():
+            _TEMPLATE_CACHE[name] = template_path.read_text(encoding="utf-8")
+        else:
+            logger.warning("Template not found at import time", template=name)
+
+
+# Pre-populate the cache so every AgentEngine instance skips disk I/O.
+_init_template_cache()
+
+
+def invalidate_skill_cache(skill_key: str | None = None) -> None:
+    """Remove cached skill text(s).
+
+    When *skill_key* is given, only that skill is evicted.  Pass ``None`` to
+    clear the entire skill cache (useful after a skill file is updated on disk).
+    """
+    if skill_key is None:
+        _SKILL_CACHE.clear()
+    else:
+        _SKILL_CACHE.pop(skill_key, None)
+
 
 def _usage_to_dict(usage_obj) -> dict:
     """Convert an OpenAI UsageObject to a plain dict, handling None gracefully."""
@@ -55,13 +88,20 @@ class AgentEngine:
             self.display_name = model_key
 
     def _read_template(self, template_name: str) -> str:
-        template_path = PROMPT_TEMPLATES_DIR / template_name
-        if not template_path.exists():
-            raise FileNotFoundError(f"Prompt template missing: {template_path}")
-        return template_path.read_text(encoding="utf-8")
+        """Return a prompt template, reading from the module-level cache."""
+        if template_name not in _TEMPLATE_CACHE:
+            template_path = PROMPT_TEMPLATES_DIR / template_name
+            if not template_path.exists():
+                raise FileNotFoundError(f"Prompt template missing: {template_path}")
+            _TEMPLATE_CACHE[template_name] = template_path.read_text(encoding="utf-8")
+        return _TEMPLATE_CACHE[template_name]
 
     def _render_template(self, template_name: str, **context) -> str:
         return self._read_template(template_name).format(**context)
+
+    def read_prompt_template(self, template_name: str) -> str:
+        """Return a cached prompt template by relative path under prompt_templates/."""
+        return self._read_template(template_name)
 
     def _load_skill_text(self, skill_key: str) -> str:
         """
@@ -69,9 +109,14 @@ class AgentEngine:
         Also automatically includes any referenced .md files using markdown link patterns.
         
         Detects patterns like [filename.md](filename.md) and auto-loads those files.
+        Results are cached at module level to avoid repeated disk I/O.
         """
         if skill_key not in SKILLS_REGISTRY:
             raise ValueError(f"Skill '{skill_key}' not found in Registry.")
+
+        # Return from cache if already loaded
+        if skill_key in _SKILL_CACHE:
+            return _SKILL_CACHE[skill_key]
         
         filename = SKILLS_REGISTRY[skill_key]
         file_path = (SKILLS_DIR / filename).resolve()
@@ -137,6 +182,8 @@ class AgentEngine:
                     error=str(e),
                 )
         
+        # Store in cache for subsequent calls
+        _SKILL_CACHE[skill_key] = skill_content
         return skill_content
 
     def _build_available_skills_text(self) -> str:
@@ -352,6 +399,34 @@ EXAMPLES:
             return response.choices[0].message.content, _usage_to_dict(response.usage)
 
         except Exception as e:
+            return f"❌ Brain Freeze (Connection Error): {str(e)}", _usage_to_dict(None)
+
+    def run_custom_prompt(
+        self,
+        system_prompt: str,
+        user_message: str,
+        conversation_history: list = None,
+        *,
+        temperature: float = 0.1,
+    ):
+        """Run an ad hoc prompt without skill loading, using the standard budget manager."""
+        budget = ContextBudgetManager()
+        messages = budget.fit_messages(
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            user_message=user_message,
+        )
+
+        try:
+            response = client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature,
+                extra_body={"options": {"num_ctx": LLM_NUM_CTX}},
+            )
+            return response.choices[0].message.content, _usage_to_dict(response.usage)
+        except Exception as e:
+            logger.error("Custom prompt execution failed", error=str(e), model=self.display_name)
             return f"❌ Brain Freeze (Connection Error): {str(e)}", _usage_to_dict(None)
 
     def analyze_results(self, user_message: str, first_pass_text: str,

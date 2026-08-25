@@ -1,5 +1,5 @@
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy import String, Integer, Text, DateTime, Boolean, Float, func
+from sqlalchemy import String, Integer, Text, DateTime, Boolean, Float, UniqueConstraint, func, ForeignKey
 from common.database import Base
 
 class User(Base):
@@ -39,6 +39,21 @@ class Session(Base):
     expires_at: Mapped[str] = mapped_column(DateTime(timezone=True), nullable=False)
     is_valid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+
+class SystemSetting(Base):
+    """Key/value system settings shared across AGOUTIC services."""
+    __tablename__ = "system_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+    updated_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
 class Project(Base):
     """Project metadata with ownership"""
     __tablename__ = "projects"
@@ -65,12 +80,27 @@ class Project(Base):
 class ProjectAccess(Base):
     """Track user's project access and role (owner/editor/viewer)"""
     __tablename__ = "project_access"
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_access_project_user"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     project_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     project_name: Mapped[str] = mapped_column(String, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False, default="owner")  # 'owner', 'editor', 'viewer'
+    invited_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
     last_accessed: Mapped[str] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

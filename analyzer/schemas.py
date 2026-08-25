@@ -31,6 +31,10 @@ class FileContentRequest(BaseModel):
     work_dir: str = ""
     file_path: str
     preview_lines: Optional[int] = Field(None, description="Number of lines to preview")
+    render_mode: Optional[str] = Field(
+        None,
+        description="Render mode: auto, plain, markdown, html_text, or html_raw",
+    )
 
 
 class FileContentResponse(BaseModel):
@@ -41,6 +45,8 @@ class FileContentResponse(BaseModel):
     line_count: Optional[int] = None
     is_truncated: bool = False
     file_size: int
+    render_mode: str = "plain"
+    source_extension: str = ""
 
 
 # CSV/TSV parsing schemas
@@ -91,13 +97,18 @@ class AnalysisSummary(BaseModel):
     """Complete analysis summary for a job."""
     run_uuid: str = ""
     sample_name: str
-    mode: str  # DNA/RNA/CDNA
+    workflow_key: str = "dogme"
+    mode: Optional[str] = None
     status: str
     work_dir: str
     file_summary: JobFileSummary  # Filtered key files
     all_file_counts: Dict[str, int] = Field(default_factory=dict)  # Counts for all files
     key_results: Dict[str, Any] = Field(default_factory=dict)
     parsed_reports: Dict[str, Any] = Field(default_factory=dict)
+    summary_contract: Dict[str, Any] = Field(default_factory=dict)
+    result_sync_spec: Dict[str, Any] = Field(default_factory=dict)
+    workflow_summary: Dict[str, Any] = Field(default_factory=dict)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class ParsedXgenePyOutputs(BaseModel):

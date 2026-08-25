@@ -296,6 +296,16 @@ class TestEncodeAccessions:
         accessions = {c["params"]["accession"] for c in calls}
         assert accessions == {"ENCSR000AAA", "ENCSR000BBB"}
 
+    def test_multiple_fastq_accessions_generate_file_calls_in_download_skill(self):
+        calls = _auto_generate_data_calls(
+            "Download all released FASTQ files from ENCSR432YKA ENCSR476STT ENCSR448TJV",
+            "download_files",
+        )
+        assert [call["tool"] for call in calls] == ["get_files_by_type"] * 3
+        assert {call["params"]["accession"] for call in calls} == {
+            "ENCSR432YKA", "ENCSR476STT", "ENCSR448TJV",
+        }
+
     def test_non_encode_skill_skips_accession(self):
         """Accessions should only generate calls for ENCODE skills."""
         calls = _auto_generate_data_calls(
@@ -580,6 +590,21 @@ class TestDogmeFileParsing:
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
         assert calls[0]["params"]["file_name"] == "reconciled_abundance.tsv"
 
+    def test_read_markdown_file_generates_find_file_chain(self):
+        blocks = self._blocks_with_job("/tmp/proj/workflow9")
+        calls = _auto_generate_data_calls(
+            "read workflow10/reconcile_notes.md",
+            "analyze_job_results",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) >= 1
+        assert calls[0]["tool"] == "find_file"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow10"
+        assert calls[0]["params"]["file_name"] == "reconcile_notes.md"
+        assert calls[0]["_chain"] == "read_file_content"
+
 
 # ---------------------------------------------------------------------------
 # analyze_job_results catch-all auto-generates get_analysis_summary
@@ -612,6 +637,56 @@ class TestAnalyzeJobResultsCatchAll:
         summary_calls = [c for c in calls if c["tool"] == "get_analysis_summary"]
         assert len(summary_calls) == 1
         assert summary_calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1"
+
+    def test_rna_skill_generic_analysis_adds_summary_and_key_csv_followups(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow6",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_194-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Analyze workflow6", "run_dogme_rna",
+            history_blocks=blocks,
+        )
+
+        assert [c["tool"] for c in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "find_file",
+        ]
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow6"
+        assert calls[1]["params"] == {
+            "work_dir": "/tmp/proj/workflow6",
+            "file_name": "final_stats",
+        }
+        assert calls[1]["_chain"] == "parse_csv_file"
+        assert calls[2]["params"] == {
+            "work_dir": "/tmp/proj/workflow6",
+            "file_name": "qc_summary",
+        }
+        assert calls[2]["_chain"] == "parse_csv_file"
+
+    def test_auto_generates_summary_for_wf_pore_c_without_mode(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow8",
+                "run_uuid": "wf-uuid",
+                "sample_name": "POREC_A",
+                "workflow_key": "wf_pore_c",
+                "mode": None,
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Analyze the results", "analyze_job_results",
+            history_blocks=blocks,
+        )
+
+        summary_calls = [c for c in calls if c["tool"] == "get_analysis_summary"]
+        assert len(summary_calls) == 1
+        assert summary_calls[0]["params"]["work_dir"] == "/tmp/proj/workflow8"
 
     def test_no_catch_all_when_file_parse_matches(self):
         blocks = _make_blocks([
@@ -646,7 +721,103 @@ class TestAnalyzeJobResultsCatchAll:
         assert len(calls) == 1
         assert calls[0]["tool"] == "list_job_files"
         assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
-        assert calls[0]["params"]["extensions"] == ".bed"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_rna_skill_modification_summary_uses_bedmethyl_listing(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Show me the modification summary",
+            "run_dogme_rna",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_generic_skill_mod_summary_uses_bedmethyl_listing(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "aaaa-bbbb",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "Show me the mod summary",
+            "welcome",
+            history_blocks=blocks,
+        )
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_generic_skill_modkit_summary_for_explicit_workflow_uses_requested_workflow(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "uuid-1",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "uuid-2",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show me the modkit summary for workflow1",
+            "welcome",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
+        assert calls[0]["params"]["max_depth"] == 1
+
+    def test_rna_skill_plural_modifications_summary_for_explicit_workflow_uses_requested_workflow(self):
+        blocks = _make_blocks([
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow1",
+                "run_uuid": "uuid-1",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }},
+            {"type": "EXECUTION_JOB", "payload": {
+                "work_directory": "/tmp/proj/workflow2",
+                "run_uuid": "uuid-2",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }},
+        ])
+        calls = _auto_generate_data_calls(
+            "show me the modifications summary for workflow1",
+            "run_dogme_rna",
+            history_blocks=blocks,
+            project_dir="/tmp/proj",
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["tool"] == "list_job_files"
+        assert calls[0]["params"]["work_dir"] == "/tmp/proj/workflow1/bedMethyl"
+        assert calls[0]["params"]["extensions"] == ".bed,.bed.gz"
         assert calls[0]["params"]["max_depth"] == 1
 
     def test_bam_details_fallback_lists_files_first(self):

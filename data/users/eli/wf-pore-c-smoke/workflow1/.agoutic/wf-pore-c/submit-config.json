@@ -1,0 +1,17 @@
+{
+  "input_type": "fastq",
+  "output_flags": {
+    "bed": false,
+    "chromunity": false,
+    "coverage": false,
+    "hi_c": false,
+    "mcool": true,
+    "paired_end": false,
+    "pairs": true
+  },
+  "report_filename": "wf-pore-c-report.html",
+  "sample_name": "POREC_SMOKE",
+  "workflow_key": "wf_pore_c",
+  "workflow_repo": "epi2me-labs/wf-pore-c",
+  "workflow_version": "v1.3.1"
+}

@@ -10,6 +10,8 @@ import contextlib
 import datetime
 import json
 import re
+import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -19,6 +21,26 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+
+class _FakeEncoding:
+    def encode(self, text: str):
+        return list(text or "")
+
+
+if "pandas" not in sys.modules:
+    sys.modules["pandas"] = types.SimpleNamespace(
+        DataFrame=object,
+        Series=object,
+        read_csv=lambda *_args, **_kwargs: None,
+    )
+
+
+if "tiktoken" not in sys.modules:
+    sys.modules["tiktoken"] = types.SimpleNamespace(
+        get_encoding=lambda _name: _FakeEncoding(),
+        Encoding=_FakeEncoding,
+    )
 
 from common.database import Base
 from cortex.memory_service import list_memories
@@ -71,6 +93,24 @@ def seed(SL, tmp_path):
     s.close()
 
 
+_ACTIVE_CLIENT_RESOURCES = []
+
+
+def _cleanup_active_client_resources():
+    while _ACTIVE_CLIENT_RESOURCES:
+        client, stack = _ACTIVE_CLIENT_RESOURCES.pop()
+        with contextlib.suppress(Exception):
+            client.close()
+        stack.close()
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_make_client_resources():
+    _cleanup_active_client_resources()
+    yield
+    _cleanup_active_client_resources()
+
+
 def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     """Build a TestClient with a custom AgentEngine.think mock."""
     mock_engine_cls = MagicMock()
@@ -86,6 +126,7 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     patches = [
         patch("cortex.db.SessionLocal", SL),
         patch("cortex.app.SessionLocal", SL),
+        patch("cortex.chat_downloads.SessionLocal", SL),
         patch("cortex.chat_stages.setup.SessionLocal", SL),
         patch("cortex.chat_stages.overrides.SessionLocal", SL),
         patch("cortex.dependencies.SessionLocal", SL),
@@ -104,17 +145,18 @@ def _make_client(SL, seed, tmp_path, think_fn, extra_patches=None):
     if extra_patches:
         patches.extend(extra_patches)
 
-    for p in patches:
-        p.start()
+    stack = contextlib.ExitStack()
+    try:
+        for p in patches:
+            stack.enter_context(p)
 
-    c = TestClient(app, raise_server_exceptions=False)
-    c.cookies.set("session", "plot-session")
-    yield c
-
-    for p in reversed(patches):
-        p.stop()
-    for p in reversed(patches):
-        p.stop()
+        client = TestClient(app, raise_server_exceptions=False)
+        client.cookies.set("session", "plot-session")
+        _ACTIVE_CLIENT_RESOURCES.append((client, stack))
+        return client
+    except Exception:
+        stack.close()
+        raise
 
 
 def _chat(client, message, skill="welcome", project_id="proj-plot"):
@@ -174,7 +216,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -231,7 +273,7 @@ class TestPlotTagParsing:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
 
         resp = _chat(
             client,
@@ -260,11 +302,8 @@ class TestPlotTagParsing:
 
     def test_project_workflow_shorthand_auto_generates_bed_overlap_call(self, SL, seed, tmp_path):
         analyzer_mcp = AsyncMock()
-        observed: dict[str, dict] = {}
 
         async def analyzer_call_tool(tool_name, **kwargs):
-            observed["tool"] = tool_name
-            observed["params"] = dict(kwargs)
             return {
                 "success": True,
                 "comparison_label": "Auto overlap",
@@ -299,7 +338,7 @@ class TestPlotTagParsing:
             patch("cortex.tool_dispatch.MCPHttpClient", return_value=analyzer_mcp),
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
 
         resp = _chat(
             client,
@@ -308,18 +347,24 @@ class TestPlotTagParsing:
         )
 
         assert resp.status_code == 200
-        assert observed["tool"] == "compare_bed_region_overlaps"
-        assert observed["params"]["folder_a"] == str((tmp_path / "testslopenchrom" / "workflow2" / "openChromatin").resolve())
-        assert observed["params"]["folder_b"] == str((tmp_path / "testopenchrom2" / "workflow4" / "openChromatin").resolve())
-        assert observed["params"]["pattern_a"] == "*.m6Aopen.bed"
-        assert observed["params"]["pattern_b"] == "*.m6Aopen.bed"
-        assert observed["params"]["min_overlap_bp"] == 1
-
         data = resp.json()
-        plot_blocks = data.get("plot_blocks", [])
-        assert plot_blocks
-        chart = (plot_blocks[0].get("payload") or {}).get("charts", [])[0]
-        assert chart["type"] == "venn"
+        assert data.get("gate_block") is None
+        plan_block = data.get("plan_block") or {}
+        plan_payload = plan_block.get("payload") or {}
+        assert plan_payload["plan_type"] == "compare_region_overlaps"
+        assert plan_payload["folder_a"] == str((tmp_path / "testslopenchrom" / "workflow2" / "openChromatin").resolve())
+        assert plan_payload["folder_b"] == str((tmp_path / "testopenchrom2" / "workflow4" / "openChromatin").resolve())
+        assert plan_payload["pattern_a"] == "*.m6Aopen.bed"
+        assert plan_payload["pattern_b"] == "*.m6Aopen.bed"
+        assert plan_payload["min_overlap_bp"] == 1
+        assert plan_payload["plot_type"] == "venn"
+        assert [step["kind"] for step in plan_payload["steps"]] == [
+            "LOCATE_DATA",
+            "REQUEST_APPROVAL",
+            "RUN_SCRIPT",
+            "PARSE_OUTPUT_FILE",
+            "GENERATE_PLOT",
+        ]
 
     def test_plot_payload_preserves_ylabel(self, SL, seed, tmp_path):
         s = SL()
@@ -362,7 +407,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample with y axis label Reads", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -423,7 +468,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "make an upset plot comparing DF1 and DF2 by gene", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -632,7 +677,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -781,7 +826,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -942,7 +987,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1073,7 +1118,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1176,7 +1221,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1287,7 +1332,7 @@ class TestPlotTagParsing:
             patch("cortex.chat_stages.response_assembly.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "make an upset plot from DF3 for transcript_novelty using c2c12r1, c2c12r2, c2c12r3 as the samples where zero is not present and any positive value to be present",
@@ -1342,7 +1387,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by sample", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1409,7 +1454,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1462,7 +1507,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1515,7 +1560,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type in green", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1570,7 +1615,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "get the K562 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1624,7 +1669,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by measure", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1641,7 +1686,7 @@ class TestPlotTagParsing:
                 "Here is a scatter plot.\n[[PLOT: type=scatter, df=DF1, x=score, y=enrichment]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a scatter of score vs enrichment")
         assert resp.status_code == 200
         data = resp.json()
@@ -1659,7 +1704,7 @@ class TestPlotTagParsing:
                 "[[PLOT: histogram of DF2 with Category on the x-axis]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a histogram of DF2")
         assert resp.status_code == 200
         data = resp.json()
@@ -1676,7 +1721,7 @@ class TestPlotTagParsing:
                 "Here's the chart:\n```python\nimport matplotlib.pyplot as plt\nplt.bar(df['x'], df['y'])\n```\n",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot a bar chart by category")
         assert resp.status_code == 200
         data = resp.json()
@@ -1698,7 +1743,7 @@ class TestPlotTagParsing:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by assay in green")
         assert resp.status_code == 200
         data = resp.json()
@@ -1709,6 +1754,26 @@ class TestPlotTagParsing:
         assert charts[0].get("df_id") == 1
         assert charts[0].get("palette") == "green"
 
+    def test_valid_plot_tag_preserves_literal_color_request(self, SL, seed, tmp_path):
+        """Well-formed PLOT tags should still inherit explicit literal colors from the user prompt."""
+        def think(msg, skill, history):
+            return (
+                "Here is the chart.\n"
+                "[[PLOT: type=bar, df=DF1, x=assay, agg=count]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        client = _make_client(SL, seed, tmp_path, think)
+        resp = _chat(client, "plot DF1 by assay in red")
+        assert resp.status_code == 200
+        data = resp.json()
+        plot_blocks = data.get("plot_blocks", [])
+        assert plot_blocks
+        charts = (plot_blocks[0].get("payload") or {}).get("charts", [])
+        assert charts
+        assert charts[0].get("df_id") == 1
+        assert charts[0].get("palette") == "red"
+
     def test_plot_command_override_suppresses_data_calls(self, SL, seed, tmp_path):
         """When user asks for plot and we have valid plot_specs,
         DATA_CALL tags should be suppressed."""
@@ -1718,7 +1783,7 @@ class TestPlotTagParsing:
                 "[[DATA_CALL: service=analyzer, tool=list_job_files, run_uuid=abc]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot this as a bar chart")
         assert resp.status_code == 200
         data = resp.json()
@@ -1735,7 +1800,7 @@ class TestPlotTagParsing:
                 "[[PLOT: type=pie, df=DF3]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "make a pie chart")
         assert resp.status_code == 200
         data = resp.json()
@@ -1790,7 +1855,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think_multi, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think_multi, extra_patches=extra)
         resp = _chat(client, "show me job results for abc-123", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1816,7 +1881,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show results", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -1854,7 +1919,7 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -1880,9 +1945,161 @@ class TestDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "get summary", skill="analyze_job_results")
         assert resp.status_code == 200
+
+    def test_analyze_results_work_dir_only_summary_call_still_returns_markdown(self, SL, seed, tmp_path):
+        """Analyze-results follow-ups should still work when the summary call only provides work_dir."""
+        workflow_dir = tmp_path / "workflow5"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool.return_value = {
+            "summary": "Analysis Summary for: Jamshid999",
+            "mode": "RNA",
+            "status": "COMPLETED",
+            "sample_name": "Jamshid999",
+            "work_dir": str(workflow_dir),
+        }
+
+        def think(msg, skill, history):
+            return (
+                "To analyze the results for Jamshid999, I will first retrieve the job summary.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_dir}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        call_count = [0]
+
+        def think_multi(msg, skill, history):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return think(msg, skill, history)
+            return (
+                "The workflow completed and the analysis summary was retrieved successfully.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.app._resolve_project_dir", return_value=tmp_path),
+            patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think_multi, extra_patches=extra)
+        resp = _chat(client, "analyze results.", skill="analyze_job_results")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        calls = mock_mcp.call_tool.await_args_list
+        assert calls[0].args[0] == "get_analysis_summary"
+        assert calls[0].kwargs == {"work_dir": str(workflow_dir)}
+        assert [call.args[0] for call in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "find_file",
+        ]
+        assert "analysis complete" in md.lower()
+        assert "Raw Query Results" in md
+
+    def test_run_dogme_rna_analysis_summary_tag_triggers_key_csv_followups(self, SL, seed, tmp_path):
+        workflow_dir = tmp_path / "workflow6"
+        workflow_dir.mkdir(parents=True, exist_ok=True)
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_dir),
+                "run_uuid": "run-194-04",
+                "sample_name": "igvfr_194-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        mock_mcp = AsyncMock()
+        mock_mcp.call_tool = AsyncMock(side_effect=[
+            {
+                "summary": "Analysis Summary for: igvfr_194-04",
+                "mode": "RNA",
+                "status": "COMPLETED",
+                "sample_name": "igvfr_194-04",
+                "work_dir": str(workflow_dir),
+                "file_summary": {"csv_files": []},
+            },
+            {
+                "success": True,
+                "work_dir": str(workflow_dir),
+                "search_term": "final_stats",
+                "file_count": 1,
+                "paths": ["annot/igvfr_194-04.mm39_final_stats.csv"],
+                "primary_path": "annot/igvfr_194-04.mm39_final_stats.csv",
+            },
+            {
+                "success": True,
+                "file_path": "annot/igvfr_194-04.mm39_final_stats.csv",
+                "columns": ["metric", "value"],
+                "data": [{"metric": "mapped_reads", "value": 1000}],
+                "total_rows": 1,
+            },
+            {
+                "success": True,
+                "work_dir": str(workflow_dir),
+                "search_term": "qc_summary",
+                "file_count": 1,
+                "paths": ["annot/igvfr_194-04.mm39_qc_summary.csv"],
+                "primary_path": "annot/igvfr_194-04.mm39_qc_summary.csv",
+            },
+            {
+                "success": True,
+                "file_path": "annot/igvfr_194-04.mm39_qc_summary.csv",
+                "columns": ["gene", "count"],
+                "data": [{"gene": "Actb", "count": 42}],
+                "total_rows": 1,
+            },
+        ])
+
+        def think(msg, skill, history):
+            return (
+                "To analyze the results, I will first retrieve the job summary.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_dir}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
+            patch("cortex.app._resolve_project_dir", return_value=tmp_path),
+            patch("cortex.chat_stages.context_prep._resolve_project_dir", return_value=tmp_path),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(client, "Analyze the results", skill="run_dogme_rna")
+
+        assert resp.status_code == 200
+        calls = mock_mcp.call_tool.await_args_list
+        assert [call.args[0] for call in calls] == [
+            "get_analysis_summary",
+            "find_file",
+            "parse_csv_file",
+            "find_file",
+            "parse_csv_file",
+        ]
+        assert calls[1].kwargs == {"work_dir": str(workflow_dir), "file_name": "final_stats"}
+        assert calls[2].kwargs == {"file_path": "annot/igvfr_194-04.mm39_final_stats.csv", "work_dir": str(workflow_dir), "max_rows": 100}
+        assert calls[3].kwargs == {"work_dir": str(workflow_dir), "file_name": "qc_summary"}
+        assert calls[4].kwargs == {"file_path": "annot/igvfr_194-04.mm39_qc_summary.csv", "work_dir": str(workflow_dir), "max_rows": 100}
 
 
 # ===========================================================================
@@ -1954,7 +2171,7 @@ class TestEdgepythonPlotDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "make a heatmap of DF1", skill="analyze_job_results")
 
         assert resp.status_code == 200
@@ -2017,7 +2234,7 @@ class TestEdgepythonPlotDataCallExecution:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://edgepython:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "make a normalized stacked bar chart of DF1 by condition and sample", skill="analyze_job_results")
 
         assert resp.status_code == 200
@@ -2083,7 +2300,7 @@ class TestLegacyTags:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -2110,7 +2327,7 @@ class TestLegacyTags:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "analyze job abc-123", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2145,7 +2362,7 @@ class TestFallbackTagConversion:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "summarize job results", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2169,7 +2386,7 @@ class TestFallbackTagConversion:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "categorize files", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2188,7 +2405,7 @@ class TestENCSRFix:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "Tell me about ENCSR111AAA", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2212,7 +2429,7 @@ class TestApprovalSuppressionDetail:
                 "Found 5 experiments.\n[[APPROVAL_NEEDED]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "find K562 experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2252,7 +2469,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search K562", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2300,7 +2517,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show me results.csv", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -2332,7 +2549,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "plot C2C12 experiments in encode by assay type in purple", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2409,7 +2626,7 @@ class TestEmbeddedDataframes:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "get the C2C12 experiments in ENCODE and make a plot by assay type", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2439,7 +2656,7 @@ class TestTokenTracking:
                 "Here is your answer.",
                 {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "what is DNA?", skill="welcome")
         assert resp.status_code == 200
         data = resp.json()
@@ -2467,7 +2684,7 @@ class TestCleanMarkdown:
                 "Now analyzing your results.",
                 {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
             )
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "analyze the job", skill="ENCODE_Search")
         assert resp.status_code == 200
         data = resp.json()
@@ -2504,7 +2721,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -2529,7 +2746,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files", skill="analyze_job_results")
         assert resp.status_code == 200
 
@@ -2558,7 +2775,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -2595,7 +2812,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         payload = (resp.json().get("agent_block") or {}).get("payload", {})
@@ -2626,7 +2843,7 @@ class TestBrowsingToolBypass:
             patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "list files on hpc3", skill="analyze_job_results")
         assert resp.status_code == 200
         payload = (resp.json().get("agent_block") or {}).get("payload", {})
@@ -2736,7 +2953,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "stage the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
@@ -2789,7 +3006,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "check my slurm defaults", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -2821,7 +3038,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse DNA sample called JamshidDNA at /media/backup_disk/agoutic_root/testdata/GDNA/pod5 on hpc3",
@@ -2854,7 +3071,7 @@ class TestBrowsingToolBypass:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "run Jamshid remotely on hpc3", skill="remote_execution")
         assert resp.status_code == 200
         assert mock_mcp.call_tool.await_count == 1
@@ -2941,7 +3158,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse RNA sample igvfr_698-04 using remote data at /dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip on hpc3",
@@ -3047,7 +3264,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse CDNA sample called Jamshid at /media/backup_disk/agoutic_root/testdata/CDNA/pod5 on hpc3",
@@ -3071,6 +3288,212 @@ class TestBrowsingToolBypass:
         assert extracted.get("gate_action") == "job"
         assert extracted.get("slurm_account") == "SEYEDAM_LAB"
         assert extracted.get("slurm_partition") == "standard"
+
+    def test_remote_run_with_follow_on_profile_phrase_creates_job_approval(self, SL, seed, tmp_path):
+        """Continuing the prompt after `on hpc3` should still produce the remote approval gate."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "agoutic",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "SEYEDAM_LAB",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found the saved remote defaults needed for this run.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-123", "hpc3")),
+            ),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "agoutic",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "SEYEDAM_LAB",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        assert payload.get("skill") == "remote_execution"
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("execution_mode") == "slurm"
+        assert extracted.get("ssh_profile_nickname") == "hpc3"
+        assert extracted.get("sample_name") == "igvfr_698-04"
+
+    def test_remote_run_with_reused_staged_sample_prefers_staged_remote_path_in_summary(self, SL, seed, tmp_path):
+        """Reused staged samples should show the staged remote path in the summary and preserve the saved source path in the gate."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return [
+                    {
+                        "id": "profile-123",
+                        "nickname": "hpc3",
+                        "ssh_username": "seyedam",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                        "default_slurm_gpu_partition": "gpu",
+                    }
+                ]
+            if tool_name == "get_slurm_defaults":
+                return {
+                    "found": True,
+                    "source": "ssh_profile_defaults",
+                    "account": "SEYEDAM_LAB",
+                    "partition": "standard",
+                    "selected_profile_defaults": {
+                        "ssh_profile_id": "profile-123",
+                        "nickname": "hpc3",
+                        "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                        "default_slurm_account": "SEYEDAM_LAB",
+                        "default_slurm_partition": "standard",
+                        "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                        "default_slurm_gpu_partition": "gpu",
+                    },
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "I found the saved remote defaults needed for this run.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch(
+                "cortex.remote_orchestration._resolve_ssh_profile_reference",
+                new=AsyncMock(return_value=("profile-123", "hpc3")),
+            ),
+            patch(
+                "cortex.remote_orchestration._list_user_ssh_profiles",
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "id": "profile-123",
+                            "nickname": "hpc3",
+                            "ssh_username": "seyedam",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "default_slurm_account": "SEYEDAM_LAB",
+                            "default_slurm_partition": "standard",
+                            "default_slurm_gpu_account": "BIOD132_CLASS_GPU",
+                            "default_slurm_gpu_partition": "gpu",
+                        }
+                    ]
+                ),
+            ),
+            patch(
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "igvfr_698-04",
+                        "input_directory": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                        "mode": "RNA",
+                        "reference_genome": ["mm39"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                        "staged_remote_input_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+                        "remote_staged_sample": {
+                            "sample_name": "igvfr_698-04",
+                            "source_path": "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip",
+                            "remote_data_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2",
+                            "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                            "reference_genome": ["mm39"],
+                        },
+                    }
+                ),
+            ),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "run dogme rna on hpc3 using staged sample igvfr_698-04 with mm39",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "Staged Remote Path" in md
+        assert "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2" in md
+        assert "/list" not in md
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("input_directory") == "/dfs9/seyedam-lab/share/igvfr_erisa_drna/igvfr_698-04_dRNA_p2_1/pod5_skip"
+        assert extracted.get("staged_remote_input_path") == "/share/crsp/lab/seyedam/share/agoutic/seyedam/data/fp-2"
 
     def test_remote_run_with_encff_like_local_filename_keeps_launchpad_calls_and_creates_approval(self, SL, seed, tmp_path):
         """Remote execution requests with ENCFF-like local filenames should not reroute launchpad calls to ENCODE."""
@@ -3149,7 +3572,7 @@ class TestBrowsingToolBypass:
             ),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "Analyze the mouse RNA sample C2C12r1 using the file data/ENCFF921XAH.bam on hpc3",
@@ -3172,6 +3595,92 @@ class TestBrowsingToolBypass:
         extracted = gate_payload.get("extracted_params") or {}
         assert extracted.get("input_directory") == "data/ENCFF921XAH.bam"
         assert extracted.get("execution_mode") == "slurm"
+
+    def test_remote_run_falls_back_to_direct_profile_lookup_when_tool_listing_is_empty(self, SL, seed, tmp_path):
+        """Remote execution should still create an approval gate when Launchpad tool listing is stale but direct profile lookup succeeds."""
+        mock_mcp = AsyncMock()
+
+        async def _call_tool(tool_name, **kwargs):
+            if tool_name == "list_ssh_profiles":
+                return []
+            if tool_name == "get_slurm_defaults":
+                assert kwargs.get("profile_nickname") == "hpc3"
+                return {
+                    "found": False,
+                    "source": "none",
+                    "ssh_profile_defaults": [],
+                    "message": "No saved defaults in slurm_defaults or SSH profile defaults.",
+                }
+            raise AssertionError(f"unexpected tool: {tool_name}")
+
+        mock_mcp.call_tool.side_effect = _call_tool
+
+        def think(msg, skill, history):
+            return (
+                "The query did not return the expected data. Found 0 result(s) for SSH profiles.",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        direct_profiles = [
+            {
+                "id": "profile-123",
+                "nickname": "hpc3",
+                "ssh_username": "seyedam",
+                "remote_base_path": "/share/crsp/lab/seyedam/share/agoutic/seyedam",
+                "default_slurm_account": "SEYEDAM_LAB",
+                "default_slurm_partition": "standard",
+                "default_slurm_gpu_account": "SEYEDAM_LAB",
+                "default_slurm_gpu_partition": "gpu",
+            }
+        ]
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", return_value=mock_mcp),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+            patch("cortex.planner.classify_request", return_value="SINGLE_TOOL"),
+            patch("cortex.chat_stages.overrides._resolve_ssh_profile_reference", new=AsyncMock(return_value=("profile-123", "hpc3"))),
+            patch("cortex.app._list_user_ssh_profiles", new=AsyncMock(return_value=direct_profiles)),
+            patch("cortex.remote_orchestration._list_user_ssh_profiles", new=AsyncMock(return_value=direct_profiles)),
+            patch(
+                "cortex.job_parameters.extract_job_parameters_from_conversation",
+                new=AsyncMock(
+                    return_value={
+                        "sample_name": "Jamshid999",
+                        "input_directory": "/media/backup_disk/agoutic_root/testdata/DRNA/pod5",
+                        "mode": "RNA",
+                        "reference_genome": ["mm39", "mad1"],
+                        "ssh_profile_nickname": "hpc3",
+                        "execution_mode": "slurm",
+                    }
+                ),
+            ),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Analyze the mouse RNA sample called Jamshid999 at /media/backup_disk/agoutic_root/testdata/DRNA/pod5 using mm39 and mad1 on hpc3",
+            skill="remote_execution",
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        payload = (data.get("agent_block") or {}).get("payload", {})
+        md = payload.get("markdown", "")
+        assert payload.get("skill") == "remote_execution"
+        assert "I found the saved remote defaults needed to submit this run." in md
+        assert "did not return the expected data" not in md.lower()
+
+        gate = data.get("gate_block") or {}
+        gate_payload = gate.get("payload") or {}
+        assert gate_payload.get("skill") == "remote_execution"
+        assert gate_payload.get("gate_action") == "job"
+        extracted = gate_payload.get("extracted_params") or {}
+        assert extracted.get("ssh_profile_id") == "profile-123"
+        assert extracted.get("ssh_profile_nickname") == "hpc3"
+        assert extracted.get("slurm_account") == "SEYEDAM_LAB"
+        assert extracted.get("slurm_partition") == "standard"
+        assert extracted.get("reference_genome") == ["mm39", "mad1"]
 
 
 class TestDownloadWorkflow:
@@ -3199,7 +3708,7 @@ class TestDownloadWorkflow:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "download ENCFF123ABC", skill="download_files")
         assert resp.status_code == 200
         data = resp.json()
@@ -3208,6 +3717,10 @@ class TestDownloadWorkflow:
         if gate:
             payload = gate.get("payload", {})
             assert "download" in json.dumps(payload).lower() or "approval" in json.dumps(payload).lower()
+            extracted = payload.get("extracted_params", {})
+            files = extracted.get("files", [])
+            assert files
+            assert files[0]["filename"] == "ENCFF123ABC.fastq.gz"
 
 
 # ===========================================================================
@@ -3255,7 +3768,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find ChIP-seq experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -3298,7 +3811,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "find ATAC-seq experiments", skill="ENCODE_Search")
         assert resp.status_code == 200
         # Verify both calls were made (original + swap)
@@ -3348,7 +3861,7 @@ class TestEncodeSearchSwap:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "How many RNA-seq experiments for K562", skill="ENCODE_Search")
         assert resp.status_code == 200
         # Verify: first compound call, then relaxed (without assay_title)
@@ -3393,7 +3906,7 @@ class TestResultTruncation:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://encode:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "search all K562", skill="ENCODE_Search")
         assert resp.status_code == 200
 
@@ -3447,7 +3960,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", return_value="http://analyzer:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(client, "show me data.csv", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -3466,7 +3979,7 @@ class TestFileToolChaining:
             if tool_name == "find_file":
                 return {
                     "success": True,
-                    "primary_path": "results/data.bed",
+                    "primary_path": "results/data.bed.gz",
                     "work_dir": str(workflow_dir),
                 }
             raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
@@ -3487,7 +4000,7 @@ class TestFileToolChaining:
         def think(msg, skill, history):
             return (
                 "Let me count those regions.\n"
-                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=data.bed]]",
+                "[[DATA_CALL: service=analyzer, tool=find_file, run_uuid=abc, filename=data.bed.gz]]",
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
@@ -3496,10 +4009,10 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
-            "count bed regions by chromosome for data.bed",
+            "count bed regions by chromosome for data.bed.gz",
             skill="analyze_job_results",
         )
 
@@ -3507,7 +4020,7 @@ class TestFileToolChaining:
         launchpad_mcp.call_tool.assert_awaited_once_with(
             "run_allowlisted_script",
             script_id="analyze_job_results/count_bed",
-            script_args=["--json", str((workflow_dir / "results/data.bed").resolve())],
+            script_args=["--json", str((workflow_dir / "results/data.bed.gz").resolve())],
             timeout_seconds=60.0,
         )
         data = resp.json()
@@ -3560,7 +4073,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "count BED regions by chromosome for JamshidP.mm39.minus.m6A.filtered.bed",
@@ -3625,7 +4138,7 @@ class TestFileToolChaining:
             patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
         ]
 
-        client = next(_make_client(SL, seed, tmp_path, think, extra_patches=extra))
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
         resp = _chat(
             client,
             "count inosine modifications by chromosome",
@@ -3649,6 +4162,576 @@ class TestFileToolChaining:
         dfs = payload.get("_dataframes", {})
         assert "BED chromosome counts" in dfs
         assert dfs["BED chromosome counts"]["row_count"] == 2
+
+    def test_list_job_files_chains_rna_modification_summary_to_dataframe(self, SL, seed, tmp_path):
+        """Generic modification-summary requests should count all filtered bedMethyl modifications in RNA mode."""
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_dir = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1/bedMethyl")
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz", "name": "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.pseU.filtered.bed", "name": "igvfr_698-04.mm39.plus.pseU.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.bed.gz", "name": "igvfr_698-04.mm39.plus.bed.gz", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"pseU\", \"Chromosome\": \"chr1\", \"Count\": 3}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "pseU", "Chromosome": "chr1", "Count": 3},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "Let me inspect the workflow modification files.\n"
+                "[[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1/bedMethyl, extensions=.bed, max_depth=1]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.pseU.filtered.bed.gz").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.pseU.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "BED chromosome counts" in dfs
+        assert dfs["BED chromosome counts"]["row_count"] == 3
+        assert "Modification totals" in dfs
+        assert dfs["Modification totals"]["row_count"] == 3
+        assert dfs["Modification totals"]["data"] == [
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Count": 7},
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Count": 11},
+            {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "pseU", "Count": 3},
+        ]
+
+    def test_modification_summary_overrides_generic_get_analysis_summary_tag(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow2")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-086-04",
+                "sample_name": "igvfr_086-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-086-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_086-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_086-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_086-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_086-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_086-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_086-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_086-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_086-04.mm39.plus.bed", "name": "igvfr_086-04.mm39.plus.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_086-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_086-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_086-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_086-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+        data = resp.json()
+        payload = (data.get("agent_block") or data.get("plan_block") or {}).get("payload", {})
+        dfs = payload.get("_dataframes", {})
+        assert "Modification totals" in dfs
+        assert dfs["Modification totals"]["row_count"] == 3
+
+    def test_modification_summary_uses_active_workflow_from_cached_state(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow1_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow1_dir = workflow1_root / "bedMethyl"
+        workflow2_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow2")
+
+        s = SL()
+        blocks = [
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=1,
+                type="EXECUTION_JOB",
+                status="DONE",
+                payload_json=json.dumps({
+                    "work_directory": str(workflow1_root),
+                    "run_uuid": "run-igvfr-698-04",
+                    "sample_name": "igvfr_698-04",
+                    "mode": "RNA",
+                }),
+            ),
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=2,
+                type="EXECUTION_JOB",
+                status="DONE",
+                payload_json=json.dumps({
+                    "work_directory": str(workflow2_root),
+                    "run_uuid": "run-igvfr-086-04",
+                    "sample_name": "igvfr_086-04",
+                    "mode": "RNA",
+                }),
+            ),
+            ProjectBlock(
+                id=str(uuid.uuid4()),
+                project_id="proj-plot",
+                owner_id="u-plot",
+                seq=3,
+                type="AGENT_PLAN",
+                status="DONE",
+                payload_json=json.dumps({
+                    "markdown": f"Switched active workflow to workflow1 ({workflow1_root}).",
+                    "state": {
+                        "active_skill": "run_dogme_rna",
+                        "work_dir": str(workflow1_root),
+                        "workflow_key": "dogme",
+                        "sample_name": "igvfr_698-04",
+                        "sample_type": "RNA",
+                        "active_workflow_index": 0,
+                        "workflows": [
+                            {
+                                "work_dir": str(workflow1_root),
+                                "run_uuid": "run-igvfr-698-04",
+                                "sample_name": "igvfr_698-04",
+                                "mode": "RNA",
+                                "workflow_key": "dogme",
+                            },
+                            {
+                                "work_dir": str(workflow2_root),
+                                "run_uuid": "run-igvfr-086-04",
+                                "sample_name": "igvfr_086-04",
+                                "mode": "RNA",
+                                "workflow_key": "dogme",
+                            },
+                        ],
+                    },
+                }),
+            ),
+        ]
+        for block in blocks:
+            s.add(block)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow1_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow1_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.bed", "name": "igvfr_698-04.mm39.plus.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 3, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 3,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow2_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "Show me the modification summary",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow1_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+
+    def test_plural_modifications_summary_for_workflow1_chains_bed_counter(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="FAILED",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-698-04",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 7,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.minus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "name": "igvfr_698-04.mm39.plus.m5C.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.Nm.filtered.bed", "name": "igvfr_698-04.mm39.plus.Nm.filtered.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m5C\", \"Chromosome\": \"chr1\", \"Count\": 5}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"Nm\", \"Chromosome\": \"chr1\", \"Count\": 3}], \"row_count\": 4, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m5C", "Chromosome": "chr1", "Count": 5},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "Nm", "Chromosome": "chr1", "Count": 3},
+                ],
+                "row_count": 4,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow files first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "show me the modifications summary for workflow1",
+            skill="run_dogme_rna",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.Nm.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m5C.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
+
+    def test_modkit_summary_from_generic_skill_overrides_and_chains_bed_counter(self, SL, seed, tmp_path):
+        analyzer_mcp = AsyncMock()
+        launchpad_mcp = AsyncMock()
+        workflow_root = Path("/media/backup_disk/agoutic_root/users/ali-mortazavi/erisa-drna/workflow1")
+        workflow_dir = workflow_root / "bedMethyl"
+
+        s = SL()
+        blk = ProjectBlock(
+            id=str(uuid.uuid4()),
+            project_id="proj-plot",
+            owner_id="u-plot",
+            seq=1,
+            type="EXECUTION_JOB",
+            status="DONE",
+            payload_json=json.dumps({
+                "work_directory": str(workflow_root),
+                "run_uuid": "run-igvfr-698-04",
+                "sample_name": "igvfr_698-04",
+                "mode": "RNA",
+            }),
+        )
+        s.add(blk)
+        s.commit()
+        s.close()
+
+        async def analyzer_call_tool(tool_name, **kwargs):
+            if tool_name == "list_job_files":
+                assert kwargs in (
+                    {
+                        "work_dir": str(workflow_dir),
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                    {
+                        "run_uuid": "run-igvfr-698-04",
+                        "extensions": ".bed,.bed.gz",
+                        "max_depth": 1,
+                    },
+                )
+                return {
+                    "success": True,
+                    "work_dir": str(workflow_dir),
+                    "file_count": 4,
+                    "files": [
+                        {"path": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.minus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.minus.m6A.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "name": "igvfr_698-04.mm39.plus.inosine.filtered.bed", "size": 10},
+                        {"path": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "name": "igvfr_698-04.mm39.plus.m6A.filtered.bed", "size": 10},
+                    ],
+                }
+            raise AssertionError(f"Unexpected analyzer tool: {tool_name}")
+
+        analyzer_mcp.call_tool = analyzer_call_tool
+        launchpad_mcp.call_tool = AsyncMock(return_value={
+            "success": True,
+            "stdout": "{\"columns\": [\"Sample\", \"Genome\", \"Modification\", \"Chromosome\", \"Count\"], \"data\": [{\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"inosine\", \"Chromosome\": \"chr1\", \"Count\": 7}, {\"Sample\": \"igvfr_698-04\", \"Genome\": \"mm39\", \"Modification\": \"m6A\", \"Chromosome\": \"chr1\", \"Count\": 11}], \"row_count\": 2, \"metadata\": {\"label\": \"BED chromosome counts\"}}",
+            "dataframe": {
+                "columns": ["Sample", "Genome", "Modification", "Chromosome", "Count"],
+                "data": [
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "inosine", "Chromosome": "chr1", "Count": 7},
+                    {"Sample": "igvfr_698-04", "Genome": "mm39", "Modification": "m6A", "Chromosome": "chr1", "Count": 11},
+                ],
+                "row_count": 2,
+                "metadata": {"label": "BED chromosome counts"},
+            },
+            "exit_code": 0,
+        })
+
+        def think(msg, skill, history):
+            return (
+                "I will inspect the workflow outputs first.\n"
+                f"[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir={workflow_root}]]",
+                {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            )
+
+        extra = [
+            patch("cortex.tool_dispatch.MCPHttpClient", side_effect=[analyzer_mcp, launchpad_mcp]),
+            patch("cortex.tool_dispatch.get_service_url", side_effect=lambda source: f"http://{source}:8000"),
+        ]
+
+        client = _make_client(SL, seed, tmp_path, think, extra_patches=extra)
+        resp = _chat(
+            client,
+            "show me the modkit summary for workflow1",
+            skill="welcome",
+        )
+
+        assert resp.status_code == 200
+        launchpad_mcp.call_tool.assert_awaited_once_with(
+            "run_allowlisted_script",
+            script_id="analyze_job_results/count_bed",
+            script_args=[
+                "--json",
+                str((workflow_dir / "igvfr_698-04.mm39.minus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.minus.m6A.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.inosine.filtered.bed").resolve()),
+                str((workflow_dir / "igvfr_698-04.mm39.plus.m6A.filtered.bed").resolve()),
+            ],
+            timeout_seconds=60.0,
+        )
 
 
 # ===========================================================================
@@ -3792,7 +4875,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for list dfs")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "list dfs")
         assert resp.status_code == 200
         data = resp.json()
@@ -3807,7 +4890,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df1")
         assert resp.status_code == 200
         data = resp.json()
@@ -3876,7 +4959,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df1 120")
         assert resp.status_code == 200
         data = resp.json()
@@ -3946,7 +5029,7 @@ class TestDFInspectionIntegration:
                 {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
             )
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "plot DF1 by group", skill="analyze_job_results")
         assert resp.status_code == 200
         data = resp.json()
@@ -3961,7 +5044,7 @@ class TestDFInspectionIntegration:
         def think(msg, skill, history):
             raise AssertionError("LLM should NOT be called for head df")
 
-        client = next(_make_client(SL, seed, tmp_path, think))
+        client = _make_client(SL, seed, tmp_path, think)
         resp = _chat(client, "head df")
         assert resp.status_code == 200
         data = resp.json()

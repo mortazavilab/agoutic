@@ -10,10 +10,13 @@ import sys
 from typing import Optional
 import json
 import httpx
+import signal
 
 from launchpad.script_execution import (
     normalize_script_args,
     resolve_allowlisted_script,
+    script_subprocess_session_kwargs,
+    terminate_script_process_tree,
     validate_script_working_directory,
 )
 
@@ -70,6 +73,15 @@ def _extract_script_error_payload(stdout_text: str) -> dict | None:
         return None
     return parsed
 
+
+def _extract_script_json_payload(stdout_text: str) -> dict | None:
+    """Parse a JSON object before its display output is truncated."""
+    try:
+        parsed = json.loads(stdout_text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
 class LaunchpadMCPTools:
     """MCP tools for Launchpad job management."""
     
@@ -118,6 +130,7 @@ class LaunchpadMCPTools:
             cwd=str(script_cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **script_subprocess_session_kwargs(),
         )
 
         try:
@@ -126,7 +139,10 @@ class LaunchpadMCPTools:
             else:
                 stdout, stderr = await process.communicate()
         except asyncio.TimeoutError:
-            process.kill()
+            try:
+                terminate_script_process_tree(process=process, sig=signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             stdout, stderr = await process.communicate()
             return {
                 "success": False,
@@ -139,7 +155,8 @@ class LaunchpadMCPTools:
                 "stderr": _truncate_script_output(stderr.decode("utf-8", errors="replace")),
             }
 
-        stdout_text = _truncate_script_output(stdout.decode("utf-8", errors="replace"))
+        raw_stdout_text = stdout.decode("utf-8", errors="replace")
+        stdout_text = _truncate_script_output(raw_stdout_text)
         stderr_text = _truncate_script_output(stderr.decode("utf-8", errors="replace"))
         success = process.returncode == 0
         result = {
@@ -155,6 +172,9 @@ class LaunchpadMCPTools:
         dataframe = _extract_script_dataframe(stdout_text)
         if dataframe is not None:
             result["dataframe"] = dataframe
+        structured_output = _extract_script_json_payload(raw_stdout_text)
+        if success and structured_output is not None:
+            result["script_output"] = structured_output
         if not success:
             error_payload = _extract_script_error_payload(stdout_text)
             if error_payload is not None:
@@ -182,6 +202,7 @@ class LaunchpadMCPTools:
         modifications: Optional[str] = None,
         input_type: Optional[str] = None,
         entry_point: Optional[str] = None,
+        dogme_revision: Optional[str] = None,
         modkit_filter_threshold: Optional[float] = None,
         min_cov: Optional[int] = None,
         per_mod: Optional[int] = None,
@@ -192,8 +213,11 @@ class LaunchpadMCPTools:
         user_id: Optional[str] = None,
         username: Optional[str] = None,
         project_slug: Optional[str] = None,
+        parent_block_id: Optional[str] = None,
         resume_from_dir: Optional[str] = None,
         execution_mode: str = "local",
+        local_max_task_cpus: Optional[int] = None,
+        local_max_task_memory_gb: Optional[int] = None,
         ssh_profile_id: Optional[str] = None,
         slurm_account: Optional[str] = None,
         slurm_partition: Optional[str] = None,
@@ -238,6 +262,8 @@ class LaunchpadMCPTools:
             per_mod: Optional per-modification threshold
             accuracy: Optional basecalling accuracy level (e.g., "sup", "hac")
             max_gpu_tasks: Optional max concurrent GPU tasks (dorado/openChromatin) per run (default: no maximum, max: 16)
+            local_max_task_cpus: Optional local per-task CPU ceiling used only for local execution
+            local_max_task_memory_gb: Optional local per-task memory ceiling in GB used only for local execution
             custom_dogme_profile: Optional DNA host-modkit override; Launchpad keeps the staged workflow profile container-safe and applies the custom host exports only to the OpenChromatin tasks
             custom_dogme_bind_paths: Optional remote bind paths required by a custom dogme.profile when using SLURM
         
@@ -263,6 +289,8 @@ class LaunchpadMCPTools:
             payload["input_type"] = input_type
         if entry_point is not None:
             payload["entry_point"] = entry_point
+        if dogme_revision is not None:
+            payload["dogme_revision"] = dogme_revision
         if modkit_filter_threshold is not None:
             payload["modkit_filter_threshold"] = modkit_filter_threshold
         if min_cov is not None:
@@ -283,10 +311,16 @@ class LaunchpadMCPTools:
             payload["username"] = username
         if project_slug is not None:
             payload["project_slug"] = project_slug
+        if parent_block_id is not None:
+            payload["parent_block_id"] = parent_block_id
         if resume_from_dir is not None:
             payload["resume_from_dir"] = resume_from_dir
         if ssh_profile_id is not None:
             payload["ssh_profile_id"] = ssh_profile_id
+        if local_max_task_cpus is not None:
+            payload["local_max_task_cpus"] = local_max_task_cpus
+        if local_max_task_memory_gb is not None:
+            payload["local_max_task_memory_gb"] = local_max_task_memory_gb
         if slurm_account is not None:
             payload["slurm_account"] = slurm_account
         if slurm_partition is not None:
@@ -356,6 +390,86 @@ class LaunchpadMCPTools:
             )
         except Exception as e:
             raise RuntimeError(f"Failed to submit job: {_describe_exception(e)}")
+
+    async def preview_workflow(
+        self,
+        workflow_key: str = "dogme",
+        sample_name: Optional[str] = None,
+        mode: Optional[str] = None,
+        input_type: Optional[str] = None,
+        input_path: Optional[str] = None,
+        input_directory: Optional[str] = None,
+        reference_genome: str | list[str] | None = None,
+        reference_fasta: Optional[str] = None,
+        vcf: Optional[str] = None,
+        sample_sheet: Optional[str] = None,
+        cutter: Optional[str] = None,
+        output_directory: Optional[str] = None,
+        workflow_repo: Optional[str] = None,
+        workflow_version: Optional[str] = None,
+        report_filename: Optional[str] = None,
+        output_flags: Optional[dict] = None,
+    ) -> dict:
+        """Build a workflow preview without submitting a Launchpad job."""
+        payload = {
+            "workflow_key": workflow_key,
+        }
+        if sample_name is not None:
+            payload["sample_name"] = sample_name
+        if mode is not None:
+            payload["mode"] = mode
+        if input_type is not None:
+            payload["input_type"] = input_type
+        if input_path is not None:
+            payload["input_path"] = input_path
+        if input_directory is not None:
+            payload["input_directory"] = input_directory
+        if reference_genome is not None:
+            payload["reference_genome"] = reference_genome
+        if reference_fasta is not None:
+            payload["reference_fasta"] = reference_fasta
+        if vcf is not None:
+            payload["vcf"] = vcf
+        if sample_sheet is not None:
+            payload["sample_sheet"] = sample_sheet
+        if cutter is not None:
+            payload["cutter"] = cutter
+        if output_directory is not None:
+            payload["output_directory"] = output_directory
+        if workflow_repo is not None:
+            payload["workflow_repo"] = workflow_repo
+        if workflow_version is not None:
+            payload["workflow_version"] = workflow_version
+        if report_filename is not None:
+            payload["report_filename"] = report_filename
+        if output_flags is not None:
+            payload["output_flags"] = output_flags
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/workflows/preview",
+                    json=payload,
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            detail = ""
+            try:
+                detail = e.response.text
+            except Exception:
+                detail = ""
+            if detail:
+                raise RuntimeError(
+                    f"Failed to preview workflow: HTTP {e.response.status_code} from {e.request.url} - {detail}"
+                )
+            raise RuntimeError(
+                f"Failed to preview workflow: HTTP {e.response.status_code} from {e.request.url}"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to preview workflow: {_describe_exception(e)}")
 
     async def stage_remote_sample(
         self,
@@ -481,7 +595,7 @@ class LaunchpadMCPTools:
         Returns:
             {
                 "run_uuid": str,
-                "status": "PENDING" | "RUNNING" | "COMPLETED" | "FAILED",
+                "status": "PENDING" | "RUNNING" | "STALE" | "COMPLETED" | "FAILED",
                 "progress_percent": int (0-100),
                 "message": str
             }
@@ -502,6 +616,41 @@ class LaunchpadMCPTools:
                 return response.json()
         except Exception as e:
             raise RuntimeError(f"Failed to check status: {str(e)}")
+
+    async def find_job_by_parent_block(self, project_id: str, parent_block_id: str) -> dict:
+        """Find the job created for a Cortex workflow-plan block."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.server_url}/jobs/by-parent",
+                    params={"project_id": project_id, "parent_block_id": parent_block_id},
+                    headers=self._headers(),
+                    timeout=self.status_timeout,
+                )
+                if response.status_code == 404:
+                    return {}
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to find job by parent block: {_describe_exception(e)}")
+
+    async def cancel_job(self, run_uuid: str) -> dict:
+        """Cancel an active local or SLURM job by its run UUID."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.server_url}/jobs/{run_uuid}/cancel",
+                    headers=self._headers(),
+                    timeout=self.timeout,
+                )
+                if response.status_code == 404:
+                    raise RuntimeError(f"Job {run_uuid} not found")
+                if response.status_code == 400:
+                    raise RuntimeError(response.json().get("detail", "Cannot cancel job"))
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            raise RuntimeError(f"Failed to cancel job: {str(e)}")
 
     async def sync_job_results(
         self,
@@ -907,6 +1056,8 @@ TOOL_REGISTRY = {
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
                 "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run. Omit for no explicit maximum; max allowed is 16."},
                 "execution_mode": {"type": "string", "enum": ["local", "slurm"], "description": "Execution backend to use (default: local)"},
+                "local_max_task_cpus": {"type": "integer", "description": "Maximum CPUs any one Dogme task may request during local execution. Ignored for SLURM runs."},
+                "local_max_task_memory_gb": {"type": "integer", "description": "Maximum memory in GB any one Dogme task may request during local execution. Ignored for SLURM runs."},
                 "ssh_profile_id": {"type": "string", "description": "Saved SSH profile to use for SLURM execution"},
                 "slurm_account": {"type": "string", "description": "SLURM account/allocation"},
                 "slurm_partition": {"type": "string", "description": "SLURM partition"},
@@ -928,6 +1079,38 @@ TOOL_REGISTRY = {
                 "script_working_directory": {"type": "string", "description": "Explicit script working directory under allowlisted roots"},
             },
             "required": ["sample_name", "mode"],
+        }
+    },
+    "preview_workflow": {
+        "description": "Build a workflow preview by workflow_key without submitting a Launchpad job. Supports dogme previews and Phase 1 wf-pore-c dry-run previews.",
+        "tool_function": "preview_workflow",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workflow_key": {"type": "string", "description": "Workflow family key such as dogme or wf_pore_c"},
+                "sample_name": {"type": "string", "description": "Optional sample name for the preview"},
+                "mode": {"type": "string", "description": "Dogme mode such as DNA, RNA, or CDNA"},
+                "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Input file type when relevant"},
+                "input_path": {"type": "string", "description": "Workflow-specific input path, used by wf-pore-c previews"},
+                "input_directory": {"type": "string", "description": "Workflow input directory, used by dogme previews and as a fallback path field"},
+                "reference_genome": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}}
+                    ],
+                    "description": "Dogme reference genome or genomes"
+                },
+                "reference_fasta": {"type": "string", "description": "Reference FASTA path for wf-pore-c previews"},
+                "vcf": {"type": "string", "description": "Optional VCF path for wf-pore-c previews"},
+                "sample_sheet": {"type": "string", "description": "Optional sample sheet path for wf-pore-c previews"},
+                "cutter": {"type": "string", "description": "Restriction enzyme name for wf-pore-c previews"},
+                "output_directory": {"type": "string", "description": "Planned output directory"},
+                "workflow_repo": {"type": "string", "description": "Optional workflow repository override"},
+                "workflow_version": {"type": "string", "description": "Optional workflow revision override"},
+                "report_filename": {"type": "string", "description": "Optional report filename override"},
+                "output_flags": {"type": "object", "description": "Optional workflow-specific output toggles"}
+            },
+            "required": ["workflow_key"]
         }
     },
     "stage_remote_sample": {
@@ -974,6 +1157,17 @@ TOOL_REGISTRY = {
             },
             "required": ["run_uuid"],
         }
+    },
+    "cancel_job": {
+        "description": "Cancel an active local or SLURM job",
+        "tool_function": "cancel_job",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "run_uuid": {"type": "string", "description": "Job UUID"},
+            },
+            "required": ["run_uuid"],
+        },
     },
     "sync_job_results": {
         "description": "Manually retry remote-to-local result synchronization for a completed SLURM run.",

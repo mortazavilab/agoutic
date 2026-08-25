@@ -1,12 +1,17 @@
 """Planner tests for local and remote staging workflow plan steps."""
 
+import pytest
+
 from cortex.schemas import ConversationState
+from cortex.plan_classifier import _detect_plan_type_from_manifests
 from cortex.plan_params import build_de_group_clarification
 from cortex.planner import (
     _detect_plan_type,
     _extract_plan_params,
     _template_compare_region_overlaps,
+    _template_haplotype_with_vcf,
     _template_run_de_pipeline,
+    _template_run_wf_pore_c,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
     _template_run_workflow,
@@ -67,6 +72,20 @@ def test_detect_plan_type_matches_reconcile_the_bams_request():
     assert _detect_plan_type("I want to reconcile the bams of C2C12r1 and C2C12r3") == "reconcile_bams"
 
 
+def test_detect_plan_type_matches_haplotype_request():
+    assert _detect_plan_type("haplotype RNA workflow7 with file ./parent.vcf") == "haplotype_with_vcf"
+
+
+def test_detect_plan_type_matches_haplotype_slash_request():
+    assert _detect_plan_type("/haplotype DNA workflow7 ./parent.vcf") == "haplotype_with_vcf"
+
+
+def test_detect_plan_type_matches_haplotype_mouse_founder_cross_project_request():
+    message = "Haplotype mouse sample B6 Cast F1 in erisa-drna:workflow5"
+    assert _detect_plan_type_from_manifests(message) == "haplotype_with_vcf"
+    assert _detect_plan_type(message) == "haplotype_with_vcf"
+
+
 def test_detect_plan_type_matches_region_overlap_request():
     assert (
         _detect_plan_type(
@@ -74,6 +93,14 @@ def test_detect_plan_type_matches_region_overlap_request():
         )
         == "compare_region_overlaps"
     )
+
+
+def test_detect_plan_type_respects_wf_pore_c_feature_flag(monkeypatch):
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", False)
+    assert _detect_plan_type("run wf-pore-c on ./reads.fastq with ./ref.fa") is None
+
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", True)
+    assert _detect_plan_type("run wf-pore-c on ./reads.fastq with ./ref.fa") == "run_wf_pore_c"
 
 
 def test_generate_plan_uses_deterministic_region_overlap_template():
@@ -104,6 +131,374 @@ def test_generate_plan_uses_deterministic_region_overlap_template():
         "PARSE_OUTPUT_FILE",
         "GENERATE_PLOT",
     ]
+
+
+def test_extract_plan_params_haplotype_sets_mode_workflow_and_vcf():
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    params = _extract_plan_params(
+        "haplotype RNA workflow7 with file ./parent.vcf",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["vcf_path"] == "./parent.vcf"
+    assert params["work_dir"] == "/tmp/project/workflow7"
+    assert params["workflow_dirs"] == ["/tmp/project/workflow7"]
+
+
+def test_extract_plan_params_haplotype_supports_cross_project_workflow_ref(tmp_path, monkeypatch):
+    owner_root = tmp_path / "owner"
+    current_project = owner_root / "currentproject"
+    other_project = owner_root / "otherproject"
+    (current_project / "workflow10").mkdir(parents=True)
+    (other_project / "workflow7").mkdir(parents=True)
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir=str(current_project / "workflow10"),
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: str(other_project / "mgp_REL2021_snps_founders.vcf.gz") if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype B6CASTF1 RNA mouse sample otherproject:workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir=str(current_project),
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["workflow_dirs"] == [str(other_project / "workflow7")]
+    assert params["work_dir"] == str(other_project / "workflow7")
+    assert params["output_directory"] == str(current_project / "workflow11")
+
+
+def test_haplotype_template_orders_preflight_before_approval_and_run():
+    plan = _template_haplotype_with_vcf(
+        {
+            "work_dir": "/tmp/project/workflow7",
+            "vcf_path": "./parent.vcf",
+            "input_type": "RNA",
+            "output_directory": "/tmp/project/workflow8",
+        }
+    )
+    kinds = [step["kind"] for step in plan["steps"]]
+
+    assert plan["plan_type"] == "haplotype_with_vcf"
+    assert kinds == [
+        "LOCATE_DATA",
+        "CHECK_EXISTING",
+        "REQUEST_APPROVAL",
+        "RUN_SCRIPT",
+        "LOCATE_DATA",
+        "PARSE_OUTPUT_FILE",
+        "WRITE_SUMMARY",
+    ]
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+    assert preflight_args[:4] == ["--json", "--preflight-only", "--mode", "RNA"]
+    assert "./parent.vcf" in preflight_args
+    assert run_args[:3] == ["--json", "--mode", "RNA"]
+    assert plan["steps"][3]["tool_calls"][0]["params"]["timeout_seconds"] == 43200.0
+
+
+def test_extract_plan_params_haplotype_mouse_defaults_founder_vcf_and_samples(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse sample CASTB6F1 workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_path"] == "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["work_dir"] == "/tmp/project/workflow7"
+
+
+def test_extract_plan_params_haplotype_mouse_supports_spaced_f1_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse sample B6 Cast F1 workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_mode_before_spaced_f1_cross_project_ref(tmp_path, monkeypatch):
+    owner_root = tmp_path / "owner"
+    current_project = owner_root / "testhaplo"
+    other_project = owner_root / "erisa-drna"
+    (current_project / "workflow10").mkdir(parents=True)
+    (other_project / "workflow5").mkdir(parents=True)
+
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir=str(current_project / "workflow10"),
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: str(other_project / "mgp_REL2021_snps_founders.vcf.gz") if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "Haplotype mouse RNA sample B6 Cast F1 in erisa-drna:workflow5",
+        state,
+        "haplotype_with_vcf",
+        project_dir=str(current_project),
+    )
+
+    assert params["input_type"] == "RNA"
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+    assert params["workflow_dirs"] == [str(other_project / "workflow5")]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_between_pair_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse between B6 and CAST workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_extract_plan_params_haplotype_mouse_supports_vs_pair_phrase(monkeypatch):
+    state = ConversationState(
+        active_skill="analyze_job_results",
+        active_project="proj-1",
+        work_dir="/tmp/project/workflow10",
+    )
+
+    monkeypatch.setattr(
+        "cortex.plan_params.default_haplotype_vcf_for_reference",
+        lambda reference: "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz" if reference == "mm39" else None,
+    )
+
+    params = _extract_plan_params(
+        "haplotype mouse B6 vs CAST workflow7",
+        state,
+        "haplotype_with_vcf",
+        project_dir="/tmp/project",
+    )
+
+    assert params["reference_genome"] == "mm39"
+    assert params["vcf_defaulted"] is True
+    assert params["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+
+def test_haplotype_template_threads_founder_samples_into_preflight_and_run():
+    plan = _template_haplotype_with_vcf(
+        {
+            "work_dir": "/tmp/project/workflow7",
+            "vcf_path": "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz",
+            "vcf_defaulted": True,
+            "vcf_selected_samples": ["C57BL_6J", "CAST_EiJ"],
+            "reference_genome": "mm39",
+            "input_type": "RNA",
+            "output_directory": "/tmp/project/workflow8",
+        }
+    )
+
+    assert plan["reference_genome"] == "mm39"
+    assert plan["vcf_defaulted"] is True
+    assert plan["vcf_selected_samples"] == ["C57BL_6J", "CAST_EiJ"]
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+
+    assert preflight_args.count("--vcf-sample") == 2
+    assert preflight_args[-4:] == ["--output-dir", "/tmp/project/workflow8"] or "--output-dir" in preflight_args
+    assert "--vcf" in preflight_args
+    assert run_args.count("--vcf-sample") == 2
+    assert run_args[run_args.index("--vcf") + 1] == "/refs/mm39/mgp_REL2021_snps_founders.vcf.gz"
+
+
+
+
+def test_extract_plan_params_run_wf_pore_c_sets_preview_defaults(tmp_path, monkeypatch):
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+
+    input_bam = project_dir / "sample.concatemers.bam"
+    input_bam.write_text("bam")
+    reference = project_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+    vcf = project_dir / "sample.vcf.gz"
+    vcf.write_text("vcf")
+
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    params = _extract_plan_params(
+        (
+            f"run wf-pore-c on {input_bam} with reference {reference} "
+            f"and vcf {vcf} sample name POREC_A no hi-c chromunity coverage"
+        ),
+        ConversationState(active_skill="run_wf_pore_c", active_project="proj-1", work_dir=str(project_dir)),
+        "run_wf_pore_c",
+        project_dir=str(project_dir),
+    )
+
+    assert params["workflow_key"] == "wf_pore_c"
+    assert params["file_path"] == str(input_bam)
+    assert params["input_type"] == "bam"
+    assert params["reference_fasta"] == str(reference)
+    assert params["vcf"] == str(vcf)
+    assert params["sample_name"] == "POREC_A"
+    assert params["workflow_version"] == "v1.3.1"
+    assert params["report_filename"] == "wf-pore-c-report.html"
+    assert params["output_flags"]["pairs"] is True
+    assert params["output_flags"]["mcool"] is True
+    assert params["output_flags"]["hi_c"] is False
+    assert params["output_flags"]["chromunity"] is True
+    assert params["output_flags"]["coverage"] is True
+
+
+def test_extract_plan_params_run_wf_pore_c_rejects_paths_outside_user_jail(tmp_path, monkeypatch):
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    input_bam = outside_dir / "sample.concatemers.bam"
+    input_bam.write_text("bam")
+    reference = outside_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+
+    with pytest.raises(ValueError, match="user jail"):
+        _extract_plan_params(
+            f"run wf-pore-c on {input_bam} with reference {reference}",
+            ConversationState(active_skill="run_wf_pore_c", active_project="proj-1", work_dir=str(project_dir)),
+            "run_wf_pore_c",
+            project_dir=str(project_dir),
+        )
+
+
+def test_run_wf_pore_c_template_is_preview_only():
+    plan = _template_run_wf_pore_c(
+        {
+            "sample_name": "POREC_A",
+            "file_path": "/data/porec/sample.concatemers.bam",
+            "input_type": "bam",
+            "reference_fasta": "/refs/reference.fa",
+            "output_directory": "/projects/demo/workflow4",
+            "output_flags": {
+                "pairs": True,
+                "mcool": True,
+                "hi_c": False,
+                "bed": False,
+                "chromunity": False,
+                "coverage": False,
+                "paired_end": False,
+            },
+        }
+    )
+
+    assert plan["plan_type"] == "run_wf_pore_c"
+    assert plan["workflow_key"] == "wf_pore_c"
+    assert plan["preview_only"] is True
+    assert [step["kind"] for step in plan["steps"]] == ["VALIDATE_INPUTS", "REQUEST_APPROVAL"]
+    assert plan["steps"][0]["id"] == "validate_wf_pore_c_inputs"
+    assert plan["steps"][1]["id"] == "approve_wf_pore_c_preview"
+
+
+def test_generate_plan_uses_deterministic_wf_pore_c_template(monkeypatch, tmp_path):
+    monkeypatch.setattr("cortex.plan_classifier.WF_PORE_C_ENABLED", True)
+    agoutic_root = tmp_path / "agoutic-data"
+    project_dir = agoutic_root / "users" / "alice" / "proj-1"
+    project_dir.mkdir(parents=True)
+    monkeypatch.setattr("cortex.user_jail.AGOUTIC_DATA", agoutic_root)
+
+    input_fastq = project_dir / "reads.fastq"
+    input_fastq.write_text("fastq")
+    reference = project_dir / "reference.fa"
+    reference.write_text(">chr1\nACGT\n")
+
+    class _Engine:
+        def plan(self, *_args, **_kwargs):
+            raise AssertionError("wf-pore-c preview plans should not fall through to engine.plan")
+
+    state = ConversationState(
+        active_skill="run_wf_pore_c",
+        active_project="proj-1",
+        work_dir=str(project_dir),
+    )
+
+    plan = generate_plan(
+        f"run wf-pore-c on {input_fastq} with {reference}",
+        "run_wf_pore_c",
+        state,
+        _Engine(),
+        project_dir=str(project_dir),
+    )
+
+    assert plan is not None
+    assert plan["plan_type"] == "run_wf_pore_c"
+    assert plan["workflow_key"] == "wf_pore_c"
+    assert [step["kind"] for step in plan["steps"]] == ["VALIDATE_INPUTS", "REQUEST_APPROVAL"]
 
 
 def test_detect_plan_type_matches_grouped_de_compare_request():
@@ -144,6 +539,18 @@ def test_reconcile_bams_template_orders_preflight_before_approval_and_run():
     assert run_step["requires_approval"] is True
     assert run_step["tool_calls"][0]["params"]["script_id"] == "reconcile_bams/reconcile_bams"
     assert "--json" in run_step["tool_calls"][0]["params"]["script_args"]
+
+
+def test_reconcile_bams_template_passes_requested_reference_to_preflight_and_run():
+    plan = _template_reconcile_bams(
+        {"work_dir": "/tmp/project", "output_prefix": "merged", "reference": "mm39"}
+    )
+
+    preflight_args = plan["steps"][1]["tool_calls"][0]["params"]["script_args"]
+    run_args = plan["steps"][3]["tool_calls"][0]["params"]["script_args"]
+
+    assert preflight_args[:6] == ["--json", "--preflight-only", "--output-prefix", "merged", "--reference", "mm39"]
+    assert run_args[:5] == ["--json", "--output-prefix", "merged", "--reference", "mm39"]
 
 
 def test_reconcile_bams_template_locate_step_uses_workflow_annot_dirs():
@@ -412,6 +819,26 @@ def test_extract_plan_params_reconcile_annotation_gtf():
     assert params["annotation_gtf"] == "/tmp/manual.GRCh38.annotation.gtf"
 
 
+def test_extract_plan_params_reconcile_requested_reference():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs for mm39 across workflow2 and workflow3",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["reference"] == "mm39"
+
+
+def test_extract_plan_params_reconcile_requested_mad1_reference():
+    params = _extract_plan_params(
+        "Reconcile annotated BAMs for mad1 across workflow2 and workflow3",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+    )
+
+    assert params["reference"] == "mad1"
+
+
 def test_extract_plan_params_grouped_de_from_active_workflow():
     params = _extract_plan_params(
         "compare the AD samples exc and jbh to the control samples gko and lwf",
@@ -617,6 +1044,21 @@ def test_extract_plan_params_reconcile_does_not_treat_to_reconcile_as_output_dir
     assert "output_directory" not in params
 
 
+def test_extract_plan_params_reconcile_defaults_output_directory_to_next_project_workflow(tmp_path):
+    project_dir = tmp_path / "proj"
+    (project_dir / "workflow2").mkdir(parents=True)
+    (project_dir / "workflow5").mkdir()
+
+    params = _extract_plan_params(
+        "reconcile annotated BAMs across workflow2 and workflow5",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_dir=str(project_dir),
+    )
+
+    assert params["output_directory"] == str(project_dir / "workflow6")
+
+
 def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_known_base():
     params = _extract_plan_params(
         (
@@ -641,6 +1083,40 @@ def test_extract_plan_params_reconcile_cross_project_workflow_refs_resolve_from_
         "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27/workflow1",
         "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-1/workflow1",
         "/share/crsp/lab/seyedam/share/agoutic/elnaz/project-2026-03-27-2/workflow1",
+    ]
+
+
+def test_extract_plan_params_reconcile_uses_owner_resolved_shared_project_paths():
+    params = _extract_plan_params(
+        "reconcile bams from owned-project:workflow2 and shared-project:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_workflow_paths={
+            ("owned-project", "workflow2"): "/agoutic/users/alim/owned-project/workflow2",
+            ("shared-project", "workflow7"): "/agoutic/users/project-owner/shared-project/workflow7",
+        },
+    )
+
+    assert params["workflow_dirs"] == [
+        "/agoutic/users/alim/owned-project/workflow2",
+        "/agoutic/users/project-owner/shared-project/workflow7",
+    ]
+
+
+def test_extract_plan_params_reconcile_uses_owner_qualified_project_path():
+    params = _extract_plan_params(
+        "reconcile requester:analysis:workflow2 and shared-owner:analysis:workflow7",
+        ConversationState(active_skill="reconcile_bams", active_project="proj-1"),
+        "reconcile_bams",
+        project_workflow_paths={
+            ("requester", "analysis", "workflow2"): "/agoutic/users/requester/analysis/workflow2",
+            ("shared-owner", "analysis", "workflow7"): "/agoutic/users/shared-owner/analysis/workflow7",
+        },
+    )
+
+    assert params["workflow_dirs"] == [
+        "/agoutic/users/requester/analysis/workflow2",
+        "/agoutic/users/shared-owner/analysis/workflow7",
     ]
 
 

@@ -17,7 +17,10 @@ from cortex.chat_sync_handler import (
     _render_list_dfs,
 )
 from cortex.db import row_to_dict
-from cortex.db_helpers import _create_block_internal, save_conversation_message
+from cortex.db_helpers import _create_block_internal, _resolve_project_dir, save_conversation_message
+from cortex.file_commands import detect_file_intent, execute_file_command, parse_file_command
+from cortex.help_commands import detect_help_intent, execute_help_command, parse_help_command, render_slash_commands_markdown
+from cortex.list_commands import detect_list_intent, execute_list_command, parse_list_command
 from cortex.memory_commands import (
     detect_memory_intent,
     execute_memory_command,
@@ -27,12 +30,57 @@ from cortex.memory_commands import (
 from cortex.skill_commands import detect_skill_intent, execute_skill_command, parse_skill_command, resolve_skill_key
 from cortex.workflow_commands import (
     detect_workflow_intent,
+    execute_manual_workflow_analysis,
     execute_use_workflow,
     execute_workflow_command,
     parse_workflow_command,
 )
 
 logger = get_logger(__name__)
+
+
+def _normalize_quick_exit_text(message: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[?.!,]+$", "", str(message or "").strip().lower())).strip()
+
+
+def _slash_commands_markdown() -> str:
+    return render_slash_commands_markdown()
+
+
+def _is_slash_commands_request(message: str) -> bool:
+    msg = _normalize_quick_exit_text(message)
+    return msg in {
+        "/commands",
+        "/slash-commands",
+        "/help-commands",
+        "show commands",
+        "list commands",
+        "show slash commands",
+        "list slash commands",
+        "what slash commands are available",
+    }
+
+
+def _is_capabilities_request(message: str) -> bool:
+    msg = _normalize_quick_exit_text(message)
+    return msg in {
+        "what can you do",
+        "what are your capabilities",
+        "what can i do",
+        "list features",
+        "show capabilities",
+    }
+
+
+def _resolve_workflow_command_project_dir(ctx: ChatContext) -> str:
+    if ctx.project_dir_path:
+        return str(ctx.project_dir_path)
+    if ctx.project_dir:
+        return str(ctx.project_dir)
+    if not ctx.session or not ctx.user or not ctx.project_id:
+        return ""
+    resolved = _resolve_project_dir(ctx.session, ctx.user, ctx.project_id)
+    return str(resolved) if resolved else ""
 
 
 # ── 200  Capabilities ─────────────────────────────────────────────────────
@@ -42,11 +90,7 @@ class CapabilitiesStage:
     priority = 200
 
     async def should_run(self, ctx: ChatContext) -> bool:
-        phrases = [
-            "what can you do", "what are your capabilities", "help",
-            "what can i do", "list features", "show capabilities",
-        ]
-        return any(p in ctx.user_msg_lower for p in phrases)
+        return _is_capabilities_request(ctx.message)
 
     async def run(self, ctx: ChatContext) -> None:
         capabilities_text = (
@@ -67,11 +111,17 @@ class CapabilitiesStage:
             "from DE results or custom gene sets\n"
             "7. **Search IGVF data** — Browse IGVF datasets, files, samples, and "
             "genes from the IGVF portal\n\n"
+            "Use `/commands` to list all slash commands by category and `/help <topic>` to ask how to prompt AGOUTIC for a task, skill, or slash command.\n\n"
             "Useful slash commands:\n"
+            "- `/commands`\n"
+            "- Help: `/help`, `/help remote slurm`, `/help /list files`, `/help remote_execution`\n"
+            "- Inventory: `/list samples`, `/list staged [--profile NAME]`, `/list imported`, `/list dfs`, `/list workflows`, `/list files [target] [--project] [--depth N]`\n"
             "- Skills: `/skills`, `/skill <skill_key>`, `/use-skill <skill_key>`\n"
-            "- Workflows: `/use <workflow>`, `/rerun <workflow>`, `/rename <workflow> <new_name>`, `/delete <workflow>`\n"
+            "- Workflows: `/use <workflow>`, `/analyze [workflow[, workflow2, ...]]`, `/reanalyze [workflow[, workflow2, ...]]`, `/summarize [workflow[, workflow2, ...]] [-- focus text]`, `/rerun [workflow[, workflow2, ...]]`, `/delete [workflow[, workflow2, ...]]`, `/sync-workflow [workflow[, workflow2, ...]]`\n"
+            "- Files: `/read-file <path> [--lines N] [--mode auto|plain|markdown|html_text|html_raw]`\n"
             "- Differential expression: `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2`\n"
             "- Memory: `/remember <text>`, `/remember-global <text>`, `/remember-df DF5 as <name>`, `/memories`, `/pin #<id>`, `/unpin #<id>`, `/restore #<id>`, `/annotate <sample> key=value`, `/search-memories <query>`, `/upgrade-to-global #<id>`\n\n"
+            "Try asking things like `How do I stage a sample on hpc3?`, `How do I prompt you to run Dogme with a staged sample?`, or `How do I use /list files?`\n\n"
             "What would you like to do?\n"
         )
         agent_block = _create_block_internal(
@@ -95,6 +145,56 @@ class CapabilitiesStage:
 
 
 register_stage(CapabilitiesStage())
+
+
+class HelpCommandStage:
+    name = "help_command"
+    priority = 204
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_help_command(ctx.message) is not None or detect_help_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        command = parse_help_command(ctx.message) or detect_help_intent(ctx.message)
+        markdown = execute_help_command(command, active_skill=ctx.active_skill or ctx.skill or "welcome")
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="help_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(HelpCommandStage())
+
+
+class CommandsCatalogStage:
+    name = "commands_catalog"
+    priority = 205
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return _is_slash_commands_request(ctx.message)
+
+    async def run(self, ctx: ChatContext) -> None:
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            _slash_commands_markdown(),
+            prompt_type="commands_catalog",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(CommandsCatalogStage())
 
 
 # ── 210  Prompt inspection ─────────────────────────────────────────────────
@@ -211,6 +311,52 @@ class DfCommandStage:
 register_stage(DfCommandStage())
 
 
+class ListCommandStage:
+    name = "list_command"
+    priority = 223
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_list_command(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        list_cmd = parse_list_command(ctx.message)
+
+        if not ctx.history_blocks and list_cmd.action in {"dfs", "files"}:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_list_command(
+            ctx.session,
+            list_cmd,
+            user_id=ctx.user.id,
+            project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            history_blocks=ctx.history_blocks,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="list_command",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(ListCommandStage())
+
+
 # ── 225  Skill slash commands ──────────────────────────────────────────────
 
 class SkillCommandStage:
@@ -286,6 +432,121 @@ class MemoryCommandStage:
 register_stage(MemoryCommandStage())
 
 
+class FileCommandStage:
+    name = "file_command"
+    priority = 233
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return parse_file_command(ctx.message) is not None or detect_file_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        file_cmd = parse_file_command(ctx.message) or detect_file_intent(ctx.message)
+
+        if not ctx.history_blocks:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_file_command(
+            file_cmd,
+            history_blocks=ctx.history_blocks,
+            project_dir=str(ctx.project_dir_path or ctx.project_dir or ""),
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="file_command" if ctx.message.strip().startswith("/") else "file_intent",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(FileCommandStage())
+
+
+class WorkflowReanalyzeStage:
+    name = "workflow_reanalyze"
+    priority = 234
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        return cmd is not None and cmd.action == "reanalyze"
+
+    async def run(self, ctx: ChatContext) -> None:
+        workflow_cmd = parse_workflow_command(ctx.message) or detect_workflow_intent(ctx.message)
+        workflow_refs = workflow_cmd.workflow_refs or ([workflow_cmd.workflow_ref] if workflow_cmd.workflow_ref else [])
+        if not workflow_refs:
+            workflow_refs = [""]
+
+        created_blocks = []
+        errors = []
+        for workflow_ref in workflow_refs:
+            cmd = workflow_cmd if workflow_ref == workflow_cmd.workflow_ref else type(workflow_cmd)(
+                **{**workflow_cmd.__dict__, "workflow_ref": workflow_ref, "workflow_refs": [workflow_ref]}
+            )
+            agent_block, error_markdown = await execute_manual_workflow_analysis(
+                ctx.session,
+                cmd,
+                project_id=ctx.project_id,
+                project_dir=_resolve_workflow_command_project_dir(ctx),
+                owner_id=ctx.user.id,
+                model=ctx.model or "default",
+            )
+            if agent_block is not None:
+                created_blocks.append(agent_block)
+            elif error_markdown:
+                errors.append(error_markdown)
+
+        if not created_blocks:
+            resp = await _create_prompt_response(
+                ctx.session,
+                _req_shim(ctx),
+                ctx.user_block,
+                ctx.user.id,
+                ctx.active_skill,
+                ctx.model or "default",
+                "\n".join(errors) or "Manual automatic analysis failed.",
+                prompt_type="workflow_intent" if not ctx.message.strip().startswith("/") else "workflow_command",
+            )
+            ctx.short_circuit(resp)
+            return
+
+        if errors:
+            resp = await _create_prompt_response(
+                ctx.session,
+                _req_shim(ctx),
+                ctx.user_block,
+                ctx.user.id,
+                ctx.active_skill,
+                ctx.model or "default",
+                "\n".join(errors),
+                prompt_type="workflow_intent" if not ctx.message.strip().startswith("/") else "workflow_command",
+            )
+            ctx.short_circuit(resp)
+            return
+
+        ctx.short_circuit({
+            "status": "ok",
+            "user_block": row_to_dict(ctx.user_block),
+            "agent_block": row_to_dict(created_blocks[-1]),
+            "gate_block": None,
+        })
+
+
+register_stage(WorkflowReanalyzeStage())
+
+
 class WorkflowCommandStage:
     name = "workflow_command"
     priority = 235
@@ -296,10 +557,15 @@ class WorkflowCommandStage:
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = parse_workflow_command(ctx.message)
+        clean_tracking: list[dict] = []
         markdown = await execute_workflow_command(
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            owner_id=ctx.user.id,
+            model=ctx.model or "default",
+            clean_tracking=clean_tracking,
         )
         resp = await _create_prompt_response(
             ctx.session,
@@ -310,6 +576,7 @@ class WorkflowCommandStage:
             ctx.model or "default",
             markdown,
             prompt_type="workflow_command",
+            extra_payload={"_clean_runs": clean_tracking} if clean_tracking else None,
         )
         ctx.short_circuit(resp)
 
@@ -329,10 +596,15 @@ class WorkflowIntentStage:
 
     async def run(self, ctx: ChatContext) -> None:
         workflow_cmd = detect_workflow_intent(ctx.message)
+        clean_tracking: list[dict] = []
         markdown = await execute_workflow_command(
             ctx.session,
             workflow_cmd,
             project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            owner_id=ctx.user.id,
+            model=ctx.model or "default",
+            clean_tracking=clean_tracking,
         )
         resp = await _create_prompt_response(
             ctx.session,
@@ -343,11 +615,58 @@ class WorkflowIntentStage:
             ctx.model or "default",
             markdown,
             prompt_type="workflow_intent",
+            extra_payload={"_clean_runs": clean_tracking} if clean_tracking else None,
         )
         ctx.short_circuit(resp)
 
 
 register_stage(WorkflowIntentStage())
+
+
+class ListIntentStage:
+    name = "list_intent"
+    priority = 239
+
+    async def should_run(self, ctx: ChatContext) -> bool:
+        return detect_list_intent(ctx.message) is not None
+
+    async def run(self, ctx: ChatContext) -> None:
+        from sqlalchemy import select
+        from cortex.models import ProjectBlock
+
+        list_cmd = detect_list_intent(ctx.message)
+
+        if not ctx.history_blocks and list_cmd.action in {"dfs", "files"}:
+            history_result = ctx.session.execute(
+                select(ProjectBlock)
+                .where(ProjectBlock.project_id == ctx.project_id)
+                .where(ProjectBlock.type.in_(["USER_MESSAGE", "AGENT_PLAN", "EXECUTION_JOB"]))
+                .order_by(ProjectBlock.seq.asc())
+            )
+            ctx.history_blocks = history_result.scalars().all()
+
+        markdown = await execute_list_command(
+            ctx.session,
+            list_cmd,
+            user_id=ctx.user.id,
+            project_id=ctx.project_id,
+            project_dir=_resolve_workflow_command_project_dir(ctx),
+            history_blocks=ctx.history_blocks,
+        )
+        resp = await _create_prompt_response(
+            ctx.session,
+            _req_shim(ctx),
+            ctx.user_block,
+            ctx.user.id,
+            ctx.active_skill,
+            ctx.model or "default",
+            markdown,
+            prompt_type="list_intent",
+        )
+        ctx.short_circuit(resp)
+
+
+register_stage(ListIntentStage())
 
 class MemoryIntentStage:
     name = "memory_intent"

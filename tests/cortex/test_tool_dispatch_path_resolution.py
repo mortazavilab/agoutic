@@ -15,7 +15,63 @@ def _make_block(payload: dict):
 class TestToolDispatchPathResolution:
     def test_consortium_alias_preserved_over_base_alias(self):
         tool_aliases, _ = _get_aliases()
-        assert tool_aliases["get_file"] == "get_file_metadata"
+        # IGVF overrides the base get_file -> read_file_content alias.
+        assert tool_aliases["igvf"]["get_file"] == "get_file_metadata"
+
+    def test_encode_accession_keeps_encode_tool_routing(self):
+        tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
+        match = tag_pattern.match(
+            "[[DATA_CALL: consortium=encode, tool=get_experiment, accession=ENCSR589FUJ]]"
+        )
+        assert match is not None
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[match],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=[],
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="tell me about ENCSR589FUJ",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="ENCODE_Search",
+        )
+
+        encode_calls = calls_by_source["encode"]
+        assert len(encode_calls) == 1
+        assert encode_calls[0]["tool"] == "get_experiment"
+        assert encode_calls[0]["params"]["accession"] == "ENCSR589FUJ"
+
+    def test_encode_accession_overrides_mismatched_igvf_source(self):
+        tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
+        match = tag_pattern.match(
+            "[[DATA_CALL: consortium=igvf, tool=get_experiment, accession=ENCSR589FUJ]]"
+        )
+        assert match is not None
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[match],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=[],
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="tell me about ENCSR589FUJ",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="welcome",
+        )
+
+        assert "igvf" not in calls_by_source or not calls_by_source["igvf"]
+        encode_calls = calls_by_source["encode"]
+        assert len(encode_calls) == 1
+        assert encode_calls[0]["tool"] == "get_experiment"
+        assert encode_calls[0]["params"]["accession"] == "ENCSR589FUJ"
 
     def test_igvf_file_metadata_does_not_hit_encode_rerouter(self):
         tag_pattern = re.compile(r'\[\[DATA_CALL: (consortium|service)=([^,]+), tool=([^,]+),?\s*(.*?)\]\]')
@@ -87,3 +143,35 @@ class TestToolDispatchPathResolution:
         assert analyzer_calls[0]["tool"] == "find_file"
         assert analyzer_calls[0]["params"]["work_dir"] == "/media/backup_disk/agoutic_root/users/elnaz-a/c2c12-reconciled/workflow2"
         assert "run_uuid" not in analyzer_calls[0]["params"]
+
+    def test_multi_encode_auto_calls_survive_stale_tag_flag(self):
+        accessions = ("ENCSR432YKA", "ENCSR476STT", "ENCSR448TJV")
+        auto_calls = [
+            {
+                "source_type": "consortium",
+                "source_key": "encode",
+                "tool": "get_files_by_type",
+                "params": {"accession": accession},
+            }
+            for accession in accessions
+        ]
+
+        calls_by_source = build_calls_by_source(
+            data_call_matches=[],
+            legacy_encode_matches=[],
+            legacy_analysis_matches=[],
+            auto_calls=auto_calls,
+            has_any_tags=True,
+            user_id="u-1",
+            project_id="proj-1",
+            user_message="Download FASTQ files for ENCSR432YKA ENCSR476STT ENCSR448TJV",
+            conversation_history=[],
+            history_blocks=[],
+            project_dir="",
+            active_skill="ENCODE_Search",
+        )
+
+        assert [
+            call["params"]["accession"]
+            for call in calls_by_source["encode"]
+        ] == list(accessions)

@@ -1,5 +1,6 @@
 """Behavioral tests for SLURM cache flow (hit/miss/refresh/fallback)."""
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -41,19 +42,27 @@ class _FakeConn:
 
 
 class _FakeStatusConn(_FakeConn):
-    def __init__(self, sacct_output: str = "", squeue_output: str = "", trace_output: str = "", slurm_out_output: str = ""):
+    def __init__(self, sacct_output: str = "", squeue_output: str = "", trace_output: str = "", slurm_out_output: str = "", usage_sacct_output: str = "", trace_path: str = "/remote/trace.txt"):
         super().__init__()
         self.sacct_output = sacct_output
         self.squeue_output = squeue_output
         self.trace_output = trace_output
         self.slurm_out_output = slurm_out_output
+        self.usage_sacct_output = usage_sacct_output
+        self.trace_path = trace_path
 
     async def run(self, command: str, check: bool = False):
         self.commands.append(command)
+        if "sacct -X -j" in command:
+            return SimpleNamespace(stdout=self.usage_sacct_output, stderr="", exit_status=0)
         if "sacct -j" in command:
             return SimpleNamespace(stdout=self.sacct_output, stderr="", exit_status=0)
         if "squeue -j" in command:
             return SimpleNamespace(stdout=self.squeue_output, stderr="", exit_status=0)
+        if "__AGOUTIC_TRACE_PATH__" in command:
+            if not self.trace_output:
+                return SimpleNamespace(stdout="", stderr="", exit_status=0)
+            return SimpleNamespace(stdout=f"__AGOUTIC_TRACE_PATH__:{self.trace_path}\n{self.trace_output}", stderr="", exit_status=0)
         if "tail -n 5000" in command and ("*_trace.txt" in command or "/trace.txt" in command):
             return SimpleNamespace(stdout=self.trace_output, stderr="", exit_status=0)
         if "tail -n 500" in command and "slurm-" in command and ".out" in command:
@@ -286,7 +295,7 @@ async def test_submit_uses_fallback_when_cache_resolution_fails(monkeypatch, pro
 
 
 @pytest.mark.anyio
-async def test_submit_writes_remote_config_and_references_it(monkeypatch, profile):
+async def test_submit_derives_missing_requested_staged_reference_path(monkeypatch, profile):
     backend = SlurmBackend()
     conn = _FakeConn(existing_paths={"/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_candle"})
 
@@ -297,7 +306,7 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
         sample_name="sample",
         mode="DNA",
         input_directory="/tmp/input",
-        reference_genome=["mm39"],
+        reference_genome=["GRCh38"],
         ssh_profile_id="profile-1",
         slurm_account="cpu-request",
         slurm_partition="cpu-part-request",
@@ -332,7 +341,7 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
 
     async def _ensure_assets(*args, **kwargs):
         return ({
-            "mm39": {
+            "GRCh38": {
                 "requires_kallisto": False,
                 "missing_required_assets": [],
                 "all_required_present": True,
@@ -380,16 +389,18 @@ async def test_submit_writes_remote_config_and_references_it(monkeypatch, profil
     assert '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme' in submit_script_payloads[0]
     assert "-c /remote/eli/agoutic/proj-1/workflow4/nextflow.config" in submit_script_payloads[0]
 
-    # Controller CPU values come from profile defaults; GPU values also use profile defaults.
-    assert "cpuAccount = 'cpu-default'" in config_write[0]
-    assert "cpuPartition = 'cpu-part-default'" in config_write[0]
+    # The workflow config should reflect the approved request overrides.
+    assert "cpuAccount = 'cpu-request'" in config_write[0]
+    assert "cpuPartition = 'cpu-part-request'" in config_write[0]
     assert "gpuAccount = 'gpu-default'" in config_write[0]
     assert "gpuPartition = 'gpu-part-default'" in config_write[0]
 
-    # Remote staged reference cache should be used in genome_annot_refs.
-    mm39_cfg = REFERENCE_GENOMES["mm39"]
-    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['fasta']).name}" in config_write[0]
-    assert f"/remote/eli/agoutic/ref/mm39/{Path(mm39_cfg['gtf']).name}" in config_write[0]
+    # A staged sample can retain another reference's cache metadata. The
+    # requested reference must still use its derived remote cache path.
+    grch38_cfg = REFERENCE_GENOMES["GRCh38"]
+    assert f"/remote/eli/agoutic/ref/grch38/{Path(grch38_cfg['fasta']).name}" in config_write[0]
+    assert f"/remote/eli/agoutic/ref/grch38/{Path(grch38_cfg['gtf']).name}" in config_write[0]
+    assert str(grch38_cfg["fasta"]) not in config_write[0]
 
     # Staged input cache should be symlinked to workflow-local pod5 directory.
     symlink_cmds = [c for c in conn.commands if "ln -sfn" in c and "/workflow4/pod5" in c]
@@ -993,14 +1004,22 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
     conn = _FakeStatusConn(
         sacct_output="RUNNING|0:0|\n",
         trace_output=(
-            "task_id\thash\tnative_id\tname\tstatus\texit\n"
-            "1\tda/2fa490\t50043101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t0\n"
-            "2\t5/abc123\t50043106\tmainWorkflow:softwareVTask\tCOMPLETED\t0\n"
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\tda/2fa490\t50043101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t30s\t100%\t1G\t2G\t0\n"
+            "2\t5/abc123\t50043106\tmainWorkflow:softwareVTask\tCOMPLETED\t45s\t100%\t1500M\t2G\t0\n"
+            "3\tfe/e700c5\t50043107\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t300%\t4G\t6G\t0\n"
         ),
         slurm_out_output=(
             "executor >  slurm (3)\n"
             "[fe/e700c5] mainWorkflow:doradoTask (1) | 0 of 1\n"
         ),
+        usage_sacct_output=(
+            "50043100|cpu-default|RUNNING|90|00:00:15|500M|billing=1,cpu=1\n"
+            "50043101|cpu-default|COMPLETED|30|00:00:20|1G|billing=1,cpu=1\n"
+            "50043106|cpu-default|COMPLETED|45|00:00:40|1500M|billing=1,cpu=1\n"
+            "50043107|gpu-default|RUNNING|60|00:00:50|4G|billing=2,cpu=4,gres/gpu=1\n"
+        ),
+        trace_path="/remote/eli/agoutic/proj-1/workflow7/trace.txt",
     )
 
     from launchpad import db as launchpad_db
@@ -1042,6 +1061,202 @@ async def test_check_status_reports_remote_trace_progress(monkeypatch, profile):
     assert status.tasks["total"] == 3
     assert status.tasks["running"] == ["mainWorkflow:doradoTask (1)"]
     assert "2/3 completed" in status.message
+    assert status.workflow_usage["source"] == "slurm_sacct+nextflow_trace"
+    assert status.workflow_usage["cpu_seconds"] == 125.0
+    assert status.workflow_usage["gpu_seconds"] == 60.0
+    assert status.workflow_usage["task_realtime_seconds"] == 225.0
+    assert status.workflow_usage["billing_units"] == 0.079
+    assert status.workflow_usage["billing_hours_by_account"] == {
+        "cpu-default": 0.046,
+        "gpu-default": 0.033,
+    }
+    assert status.workflow_usage["billing_entries"] == [
+        {
+            "resource_type": "CPU",
+            "account": "cpu-default",
+            "billing_hours": 0.046,
+        },
+        {
+            "resource_type": "GPU",
+            "account": "gpu-default",
+            "billing_hours": 0.033,
+        },
+    ]
+    assert status.workflow_usage["slurm_accounted_job_count"] == 4
+    assert status.workflow_usage["slurm_launcher_accounted"] is True
+    assert any("sacct -X -j" in command and "50043100" in command for command in conn.commands)
+
+
+@pytest.mark.asyncio
+async def test_check_status_reports_failed_remote_trace_progress(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(
+        sacct_output="FAILED|1:0|None\n",
+        trace_output=(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\t1a/11309b\t50053101\tmainWorkflow:doradoDownloadTask\tCOMPLETED\t30s\t100%\t1G\t2G\t0\n"
+            "2\t15/8e2ad6\t50053102\tmainWorkflow:softwareVTask\tCOMPLETED\t45s\t100%\t1500M\t2G\t0\n"
+            "3\t8a/e8d3e0\t50053103\tmainWorkflow:doradoTask (1)\tCOMPLETED\t60s\t300%\t4G\t6G\t0\n"
+            "4\t7d/7e33ed\t50053104\tmainWorkflow:annotateRNATask (1)\tFAILED\t90s\t150%\t2G\t3G\t1\n"
+        ),
+        slurm_out_output=(
+            "executor >  slurm (4)\n"
+            "[1a/11309b] mainWorkflow:doradoDownloadTask | 1 of 1 ✔\n"
+            "[15/8e2ad6] mainWorkflow:softwareVTask     | 1 of 1 ✔\n"
+            "[8a/e8d3e0] mainWorkflow:doradoTask (1)  | 1 of 1 ✔\n"
+            "[7d/7e33ed] mainWorkflow:annotateRNATask (1) | 0 of 1\n"
+        ),
+    )
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6f",
+            status="FAILED",
+            progress_percent=0,
+            run_stage="failed",
+            slurm_job_id="50053100",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow8",
+            workflow_usage_json=None,
+            workflow_usage_synced_at=None,
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6f")
+
+    assert status.status == "FAILED"
+    assert status.progress_percent >= 60
+    assert status.tasks["completed_count"] == 3
+    assert status.tasks["failed_count"] == 1
+    assert status.tasks["total"] == 4
+    assert "exit code 1:0" in status.message
+    assert "Pipeline: 3/4 completed" in status.message
+
+
+@pytest.mark.asyncio
+async def test_check_status_without_remote_trace_leaves_workflow_usage_empty(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(sacct_output="RUNNING|0:0|\n")
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6b",
+            status="RUNNING",
+            progress_percent=0,
+            run_stage="running",
+            slurm_job_id="50043110",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow8",
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6b")
+
+    assert status.status == "RUNNING"
+    assert status.workflow_usage is None
+
+
+@pytest.mark.asyncio
+async def test_check_status_reuses_recent_live_workflow_usage_without_full_usage_refresh(monkeypatch, profile):
+    backend = SlurmBackend()
+    conn = _FakeStatusConn(
+        sacct_output="RUNNING|0:0|\n",
+        trace_output=(
+            "task_id\thash\tnative_id\tname\tstatus\trealtime\t%cpu\tpeak_rss\tpeak_vmem\texit\n"
+            "1\tfe/e700c5\t50043107\tmainWorkflow:doradoTask (1)\tRUNNING\t60s\t300%\t4G\t6G\t0\n"
+        ),
+        slurm_out_output=(
+            "executor >  slurm (1)\n"
+            "[fe/e700c5] mainWorkflow:doradoTask (1) | 0 of 1\n"
+        ),
+    )
+
+    cached_usage = {
+        "source": "slurm_sacct+nextflow_trace",
+        "accounting_mode": "slurm",
+        "cpu_queue_seconds": 12.0,
+        "gpu_queue_seconds": 34.0,
+    }
+    cached_synced_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+
+    from launchpad import db as launchpad_db
+
+    async def _get_job_by_uuid(*args, **kwargs):
+        return SimpleNamespace(
+            run_uuid="run-6c",
+            status="RUNNING",
+            progress_percent=0,
+            run_stage="running",
+            slurm_job_id="50043100",
+            transfer_state=None,
+            result_destination="local",
+            ssh_profile_id="profile-1",
+            user_id="user-1",
+            slurm_state=None,
+            remote_work_dir="/remote/eli/agoutic/proj-1/workflow7",
+            workflow_usage_json=cached_usage,
+            workflow_usage_synced_at=cached_synced_at,
+        )
+
+    async def _connect(*args, **kwargs):
+        return conn
+
+    async def _load_profile(*args, **kwargs):
+        return profile
+
+    async def _noop_update(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(launchpad_db, "get_job_by_uuid", _get_job_by_uuid)
+    monkeypatch.setattr(backend, "_update_job_slurm_state", _noop_update)
+    monkeypatch.setattr(backend, "_load_profile", _load_profile)
+    monkeypatch.setattr(backend._ssh_manager, "connect", _connect)
+
+    status = await backend.check_status("run-6c")
+
+    assert status.status == "RUNNING"
+    assert status.workflow_usage == cached_usage
+    assert status.workflow_usage_synced_at == cached_synced_at.isoformat()
+    assert not any("sacct -X -j" in command for command in conn.commands)
+    assert not any("__AGOUTIC_TRACE_PATH__" in command for command in conn.commands)
 
 
 def test_parse_task_status_texts_excludes_numbered_tasks_already_completed_in_trace():

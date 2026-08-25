@@ -29,7 +29,7 @@ from sqlalchemy.pool import StaticPool
 from common.database import Base
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
-    ProjectBlock, Conversation, ConversationMessage,
+    ProjectBlock, Conversation, ConversationMessage, SystemSetting,
 )
 from cortex.app import app
 
@@ -108,6 +108,49 @@ def _mock_think(message, skill, history):
         f"Here is my plan for **{skill}**.\n\nI'll do something smart.",
         {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
     )
+
+
+def _set_maintenance_mode(session_factory, *, mode: bool, message: str = "", starts_at: str | None = None):
+    sess = session_factory()
+    try:
+        for key, value in {
+            "maintenance_mode": "true" if mode else "false",
+            "maintenance_message": message,
+            "maintenance_starts_at": starts_at or "",
+        }.items():
+            existing = sess.get(SystemSetting, key)
+            if existing is None:
+                sess.add(SystemSetting(key=key, value=value))
+            else:
+                existing.value = value
+        sess.commit()
+    finally:
+        sess.close()
+
+
+def _seed_conversation(session_factory, conv_id="conv-1", proj_id="proj-chat", user_id="u-chat"):
+    sess = session_factory()
+    try:
+        conv = Conversation(
+            id=conv_id,
+            project_id=proj_id,
+            user_id=user_id,
+            title="Maintenance test conversation",
+        )
+        sess.add(conv)
+        sess.flush()
+        sess.add(
+            ConversationMessage(
+                id=f"{conv_id}-msg-1",
+                conversation_id=conv_id,
+                role="user",
+                content="Hello",
+                seq=1,
+            )
+        )
+        sess.commit()
+    finally:
+        sess.close()
 
 
 @pytest.fixture()
@@ -197,7 +240,23 @@ class TestCapabilitiesResponse:
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert "what i can help you with" in data["agent_block"]["payload"]["markdown"].lower()
+        markdown = data["agent_block"]["payload"]["markdown"].lower()
+        assert "help: prompting agoutic" in markdown
+        assert "/commands" in markdown
+
+    def test_commands_trigger(self, client):
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "/commands",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        markdown = data["agent_block"]["payload"]["markdown"]
+        assert "### Slash Commands" in markdown
+        assert "/help <topic>" in markdown
+        assert "/sync-workflow" in markdown
+        assert data["gate_block"] is None
 
     def test_show_capabilities(self, client):
         resp = client.post("/chat", json={
@@ -226,6 +285,50 @@ class TestCapabilitiesResponse:
         payload = resp.json()["agent_block"]["payload"]
         assert "differential expression" in payload["markdown"].lower()
         assert "reconciled abundance" in payload["markdown"].lower()
+
+
+class TestMaintenanceModeChatEntry:
+    def test_non_admin_chat_submission_returns_503_with_configured_message(self, client, session_factory):
+        _set_maintenance_mode(
+            session_factory,
+            mode=True,
+            message="Cluster maintenance in progress.",
+        )
+
+        resp = client.post("/chat", json={
+            "project_id": "proj-chat",
+            "message": "run an analysis",
+        })
+
+        assert resp.status_code == 503
+        assert resp.json() == {
+            "error": "maintenance_mode",
+            "message": "Cluster maintenance in progress.",
+        }
+
+    def test_admin_chat_submission_succeeds_during_maintenance(self, admin_client, session_factory):
+        _set_maintenance_mode(session_factory, mode=True, message="Admins only")
+
+        resp = admin_client.post("/chat", json={
+            "project_id": "proj-admin",
+            "message": "help",
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_read_only_project_and_conversation_views_still_succeed_during_maintenance(self, client, session_factory):
+        _set_maintenance_mode(session_factory, mode=True, message="Read-only window")
+        _seed_conversation(session_factory)
+
+        projects_resp = client.get("/projects")
+        assert projects_resp.status_code == 200
+
+        conversations_resp = client.get("/projects/proj-chat/conversations")
+        assert conversations_resp.status_code == 200
+
+        messages_resp = client.get("/conversations/conv-1/messages")
+        assert messages_resp.status_code == 200
 
 
 class TestPromptInspectionResponse:

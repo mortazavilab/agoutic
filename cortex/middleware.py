@@ -1,11 +1,12 @@
 """
 Authentication middleware for AGOUTIC.
 
-Validates session cookies on every request and attaches the user to request.state.
+Validates session cookies or bearer tokens on every request and attaches the
+user to request.state.
 """
 
 from datetime import datetime, timedelta
-from fastapi import Request, HTTPException
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from sqlalchemy import select
@@ -16,6 +17,21 @@ from cortex.models import User, Session as SessionModel
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+def get_request_session_token(request: Request) -> tuple[str | None, str | None]:
+    """Return the session token and its transport for the incoming request."""
+    auth_header = str(request.headers.get("Authorization") or "").strip()
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+        if bearer_token:
+            return bearer_token, "bearer"
+
+    session_token = request.cookies.get("session")
+    if session_token:
+        return session_token, "cookie"
+
+    return None, None
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -31,6 +47,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     EXEMPT_PATHS = [
         "/auth/login",
         "/auth/callback",
+        "/auth/exchange",
         "/auth/logout",
         "/auth/heartbeat",
         "/health",
@@ -43,8 +60,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if any(request.url.path.startswith(path) for path in self.EXEMPT_PATHS):
             return await call_next(request)
         
-        # Get session cookie
-        session_id = request.cookies.get("session")
+        session_id, auth_transport = get_request_session_token(request)
         
         if not session_id:
             logger.debug("Unauthenticated request", path=request.url.path)
@@ -116,6 +132,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
             
             # Attach user to request state
             request.state.user = user
+            request.state.session_token = session_id
+            request.state.auth_transport = auth_transport
 
             # Sliding session extension: when the session is past its
             # halfway point, automatically push the expiry forward so

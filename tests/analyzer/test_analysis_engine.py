@@ -16,11 +16,13 @@ from unittest.mock import patch, MagicMock
 from analyzer.analysis_engine import (
     discover_files,
     categorize_files,
+    generate_analysis_summary,
     read_file_content,
     parse_csv_file,
     parse_xgenepy_outputs,
     resolve_work_dir,
 )
+from analyzer.schemas import JobFileSummary
 
 
 # ---------------------------------------------------------------------------
@@ -36,6 +38,8 @@ def job_dir(tmp_path):
     # Create some analysis output files
     (wd / "final_stats.csv").write_text("gene,score,pval\nBRCA1,0.95,0.001\nTP53,0.88,0.005\n")
     (wd / "summary.txt").write_text("Analysis complete.\n10 genes processed.\n")
+    (wd / "report.html").write_text("<html><body><h1>QC report</h1><p>All checks passed.</p></body></html>")
+    (wd / "notes.md").write_text("# Summary\n\n- item one\n")
     (wd / "regions.bed").write_text("chr1\t100\t200\tpeak1\t500\nchr2\t300\t400\tpeak2\t750\n")
     (wd / "data.tsv").write_text("sample\tcount\nliver\t42\nheart\t37\n")
     (wd / "output.bam").write_bytes(b"\x00" * 100)
@@ -182,6 +186,27 @@ class TestReadFileContent:
         )
         assert "exon" in result.content
 
+    def test_auto_render_html_as_readable_text(self, job_dir):
+        result = read_file_content(work_dir_path=str(job_dir), file_path="report.html")
+        assert result.render_mode == "html_text"
+        assert "QC report" in result.content
+        assert "All checks passed." in result.content
+        assert "<h1>" not in result.content
+
+    def test_render_raw_html_when_requested(self, job_dir):
+        result = read_file_content(
+            work_dir_path=str(job_dir),
+            file_path="report.html",
+            render_mode="html_raw",
+        )
+        assert result.render_mode == "html_raw"
+        assert "<h1>QC report</h1>" in result.content
+
+    def test_auto_render_markdown_as_markdown(self, job_dir):
+        result = read_file_content(work_dir_path=str(job_dir), file_path="notes.md")
+        assert result.render_mode == "markdown"
+        assert result.content.startswith("# Summary")
+
 
 # ---------------------------------------------------------------------------
 # parse_csv_file
@@ -275,3 +300,416 @@ class TestParseXgenePyOutputs:
                 work_dir_path=str(tmp_path),
                 output_dir="../../outside",
             )
+
+
+class TestGenerateAnalysisSummary:
+    def test_generate_summary_accepts_work_dir_only_when_job_resolves(self, job_dir):
+        job = MagicMock(
+            run_uuid="run-555",
+            sample_name="Jamshid999",
+            workflow_key="dogme",
+            mode="RNA",
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+        empty_summary = JobFileSummary(
+            txt_files=[],
+            csv_files=[],
+            bed_files=[],
+            other_files=[],
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job) as lookup:
+            with patch("analyzer.analysis_engine.categorize_files", return_value=empty_summary) as categorize:
+                with patch("analyzer.analysis_engine.resolve_work_dir", return_value=job_dir):
+                    summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        lookup.assert_called_once_with(run_uuid=None, work_dir_path=str(job_dir))
+        categorize.assert_called_once_with("run-555", work_dir_path=str(job_dir))
+        assert summary.run_uuid == "run-555"
+        assert summary.sample_name == "Jamshid999"
+        assert summary.workflow_key == "dogme"
+        assert summary.work_dir == str(job_dir)
+
+    def test_generate_summary_recognizes_wf_pore_c_with_nullable_mode(self, tmp_path):
+        job_dir = tmp_path / "workflow8"
+        job_dir.mkdir()
+        (job_dir / "wf-pore-c-report.html").write_text("<html><body>report</body></html>", encoding="utf-8")
+        pairs_dir = job_dir / "pairs"
+        pairs_dir.mkdir()
+        (pairs_dir / "sample.pairs.gz").write_text("pairs\n", encoding="utf-8")
+        cooler_dir = job_dir / "cooler"
+        cooler_dir.mkdir()
+        (cooler_dir / "sample.mcool").write_text("mcool\n", encoding="utf-8")
+        hic_dir = job_dir / "hi-c"
+        hic_dir.mkdir()
+        (hic_dir / "sample.hic").write_text("hic\n", encoding="utf-8")
+        (job_dir / "pairs.stats.txt").write_text(
+            "total\t100\n"
+            "cis\t80\n"
+            "trans\t20\n"
+            "total_dups\t10\n",
+            encoding="utf-8",
+        )
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_repo": "epi2me-labs/wf-pore-c",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "POREC_A",
+                        "sample_sheet": None,
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "POREC_A",
+                        "output_flags": {"pairs": True, "mcool": True, "hi_c": True},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": [
+                            "wf-pore-c-report.html",
+                            "pairs/{alias}.pairs.gz",
+                            "cooler/{alias}.mcool",
+                            "hi-c/{alias}.hic",
+                        ],
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c",
+            sample_name="POREC_A",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job) as lookup:
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        lookup.assert_called_once_with(run_uuid=None, work_dir_path=str(job_dir))
+        assert summary.run_uuid == "run-pore-c"
+        assert summary.sample_name == "POREC_A"
+        assert summary.workflow_key == "wf_pore_c"
+        assert summary.mode is None
+        assert summary.summary_contract["workflow_key"] == "wf_pore_c"
+        assert summary.result_sync_spec["report_filename"] == "wf-pore-c-report.html"
+        assert summary.key_results["Workflow Report"] == "Available"
+        assert summary.workflow_summary["artifacts"]["pairs"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["mcool"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["hic"]["present"] is True
+        assert summary.workflow_summary["artifacts"]["report_html"]["present"] is True
+        assert summary.workflow_summary["sample_alias"] == "POREC_A"
+        assert summary.workflow_summary["metadata"]["reference_fasta"] == "/refs/grch38.fa"
+        assert summary.workflow_summary["metadata"]["cutter"] == "NlaIII"
+        assert summary.workflow_summary["metadata"]["workflow_version"] == "v1.3.1"
+        assert summary.parsed_reports["pairs_stats"]["total_pairs"] == 100
+        assert summary.parsed_reports["pairs_stats"]["cis_trans_ratio"] == 4.0
+        assert summary.parsed_reports["pairs_stats"]["duplicate_rate"] == 0.1
+
+    def test_generate_summary_infers_wf_pore_c_sample_alias_from_sample_sheet(self, tmp_path):
+        job_dir = tmp_path / "workflow9"
+        job_dir.mkdir()
+        sample_sheet = tmp_path / "samples.csv"
+        sample_sheet.write_text("sample,fastq\nSHEET_ALIAS,/data/sample.fastq.gz\n", encoding="utf-8")
+        (job_dir / "wf-pore-c-report.html").write_text("<html></html>", encoding="utf-8")
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "",
+                        "sample_sheet": str(sample_sheet),
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "",
+                        "output_flags": {"pairs": False, "mcool": False, "hi_c": False},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": ["wf-pore-c-report.html"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c-sheet",
+            sample_name="",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_summary["sample_alias"] == "SHEET_ALIAS"
+
+    def test_generate_summary_warns_when_requested_wf_pore_c_outputs_are_missing(self, tmp_path):
+        job_dir = tmp_path / "workflow10"
+        job_dir.mkdir()
+        (job_dir / "wf-pore-c-report.html").write_text("<html></html>", encoding="utf-8")
+        (job_dir / "pairs.stats.txt").write_text("total\t10\n", encoding="utf-8")
+        (job_dir / ".agoutic.workflow.json").write_text(
+            json.dumps(
+                {
+                    "workflow_key": "wf_pore_c",
+                    "validated_inputs": {
+                        "reference_fasta": "/refs/grch38.fa",
+                        "cutter": "NlaIII",
+                        "workflow_version": "v1.3.1",
+                        "sample_name": "POREC_WARN",
+                    },
+                    "summary_contract": {
+                        "workflow_key": "wf_pore_c",
+                        "workflow_version": "v1.3.1",
+                        "report_filename": "wf-pore-c-report.html",
+                        "sample_name": "POREC_WARN",
+                        "output_flags": {"pairs": True, "mcool": True, "hi_c": False},
+                    },
+                    "result_sync_spec": {
+                        "workflow_key": "wf_pore_c",
+                        "report_filename": "wf-pore-c-report.html",
+                        "expected_outputs": [
+                            "wf-pore-c-report.html",
+                            "pairs/{alias}.pairs.gz",
+                            "cooler/{alias}.mcool",
+                        ],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-pore-c-warn",
+            sample_name="POREC_WARN",
+            workflow_key="wf_pore_c",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_summary["artifacts"]["pairs"]["present"] is False
+        assert summary.workflow_summary["artifacts"]["mcool"]["present"] is False
+        assert any("Missing requested output: .pairs.gz" == warning for warning in summary.warnings)
+        assert any("Missing requested output: cooler/{alias}.mcool" == warning for warning in summary.warnings)
+        assert any("pairs.stats.txt missing summary metrics" in warning for warning in summary.warnings)
+
+    def test_generate_summary_infers_reconcile_bams_from_layout(self, tmp_path):
+        job_dir = tmp_path / "workflow11"
+        (job_dir / "input").mkdir(parents=True)
+        (job_dir / "output").mkdir()
+        (job_dir / "output" / "reconciled.inputs.tsv").write_text(
+            "sample\tbam\treference\nS1\t/a.bam\tGRCh38\nS2\t/b.bam\tGRCh38\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "reconciled.bam.bai").write_bytes(b"\x00" * 8)
+        (job_dir / "annotation.gtf").write_text("chr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"g1\";\n", encoding="utf-8")
+        (job_dir / "reconciled_summary.txt").write_text(
+            "reconcileBams.py version test\n"
+            "=== Summary of Findings ===\n"
+            "  - Known transcripts:                            120\n"
+            "  - Nic transcripts:                              18\n"
+            "  - Nnc transcripts:                               7\n"
+            "  - Number of novel genes (with AGG IDs): 14\n"
+            "  - Number of novel transcripts (with AGT IDs): 25\n"
+            "Filtered novel transcripts by min_TPM 5.0 in >= 2 samples: removed 3 novel transcripts, remaining total 142\n"
+            "\n=== Novel transcript models by type (after filtering) ===\n"
+            "Total novel transcripts (after filtering): 22\n"
+            "  - NIC: 15\n"
+            "  - NNC: 7\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_novelty_by_sample.csv").write_text(
+            "sample,KNOWN,NIC,NNC\nS1,1000,120,30\nS2,900,110,25\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\tgene_novelty\ttranscript_novelty\n"
+            "G1\tTX1\tKnown\tKNOWN\n"
+            "G1\tTX2\tKnown\tNIC\n"
+            "G2\tTX3\tNovel\tNNC\n",
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-reconcile",
+            sample_name="reconciled",
+            workflow_key="dogme",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "reconcile_bams"
+        assert summary.key_results["Inputs Manifest"] == "Available"
+        assert summary.key_results["Reconciled BAM"] == "Available"
+        assert summary.workflow_summary["metadata"]["input_bam_count"] == 2
+        assert summary.workflow_summary["metadata"]["reference"] == "GRCh38"
+        assert summary.workflow_summary["artifacts"]["annotation_gtf"]["present"] is True
+        assert summary.workflow_summary["metadata"]["transcript_category_counts"]["KNOWN"] == 120
+        assert summary.workflow_summary["metadata"]["gene_count"] == 2
+        assert summary.workflow_summary["metadata"]["isoform_count"] == 3
+        assert summary.workflow_summary["metadata"]["novel_gene_count"] == 14
+        assert summary.workflow_summary["metadata"]["novel_transcript_count"] == 25
+        assert summary.workflow_summary["metadata"]["novel_model_counts_after_filtering"]["NIC"] == 15
+        assert summary.workflow_summary["metadata"]["novelty_category_totals"]["KNOWN"] == 1900
+        assert summary.parsed_reports["reconciled_summary"].startswith("reconcileBams.py version test")
+        assert summary.parsed_reports["reconciled_novelty"]["total_rows"] == 2
+        assert summary.parsed_reports["reconcile_abundance"]["total_rows"] == 3
+
+    def test_generate_summary_infers_reconcile_bams_from_canonical_outputs_without_input_output_dirs(self, tmp_path):
+        job_dir = tmp_path / "workflow9"
+        job_dir.mkdir()
+        (job_dir / "exc.GRCh38.annotated.reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "gko.GRCh38.annotated.reconciled.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "exc.GRCh38.annotated.mapping.tsv").write_text("metric\tvalue\nreads\t100\n", encoding="utf-8")
+        (job_dir / "gko.GRCh38.annotated.mapping.tsv").write_text("metric\tvalue\nreads\t90\n", encoding="utf-8")
+        (job_dir / "reconciled.gtf").write_text("chr1\ttest\tgene\t1\t10\t.\t+\t.\tgene_id \"g1\";\n", encoding="utf-8")
+        (job_dir / "reconciled_summary.txt").write_text(
+            "reconcileBams.py version test\n"
+            "=== Summary of Findings ===\n"
+            "  - Known transcripts:                            120\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_novelty_by_sample.csv").write_text(
+            "sample,KNOWN,NIC\nexc,100,5\ngko,90,4\n",
+            encoding="utf-8",
+        )
+        (job_dir / "reconciled_abundance.tsv").write_text(
+            "gene_ID\ttranscript_ID\tgene_novelty\ttranscript_novelty\n"
+            "G1\tTX1\tKnown\tKNOWN\n",
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-reconcile-top-level",
+            sample_name="reconciled",
+            workflow_key="dogme",
+            mode="RNA",
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "reconcile_bams"
+        assert summary.key_results["Summary Report"] == "Available"
+        assert summary.key_results["Novelty by Sample"] == "Available"
+
+    def test_generate_summary_infers_haplotype_with_vcf_from_layout(self, tmp_path):
+        job_dir = tmp_path / "workflow12"
+        job_dir.mkdir()
+        (job_dir / "sample.haplotyped.bam").write_bytes(b"\x00" * 32)
+        (job_dir / "sample.h1.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.h2.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.ambiguous.haplotyped.bam").write_bytes(b"\x00" * 16)
+        (job_dir / "sample.haplotyped.bam.bai").write_bytes(b"\x00" * 8)
+        (job_dir / "sample.summary.tsv").write_text(
+            "bam_name\ttotal_reads\th1\th2\tambiguous\nsample.haplotyped.bam\t100\t45\t40\t15\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.chromosomes.tsv").write_text(
+            "chromosome\th1\th2\nchr1\t10\t11\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.genes.tsv").write_text(
+            "gene\th1\th2\nGENE1\t4\t5\n",
+            encoding="utf-8",
+        )
+        (job_dir / "sample.transcripts.tsv").write_text(
+            "transcript\th1\th2\nTX1\t2\t3\n",
+            encoding="utf-8",
+        )
+
+        job = MagicMock(
+            run_uuid="run-haplotype",
+            sample_name="sample",
+            workflow_key="dogme",
+            mode=None,
+            status="COMPLETED",
+            nextflow_work_dir=str(job_dir),
+            output_directory=str(job_dir),
+        )
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=job):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "haplotype_with_vcf"
+        assert summary.key_results["Genome Summary"] == "Available"
+        assert summary.key_results["Chromosome Summary"] == "Available"
+        assert summary.workflow_summary["artifacts"]["haplotyped_bam"]["count"] == 4
+        assert summary.workflow_summary["artifacts"]["ambiguous_bam"]["count"] == 1
+        assert summary.workflow_summary["metadata"]["assignment_labels"] == ["h1", "h2"]
+        assert summary.parsed_reports["haplotype_summary"]["data"][0]["total_reads"] == "100"
+
+    def test_generate_summary_supports_work_dir_only_differential_expression_workflow(self, tmp_path):
+        job_dir = tmp_path / "workflow16"
+        (job_dir / "de_inputs").mkdir(parents=True)
+        (job_dir / "de_results").mkdir()
+        (job_dir / "de_inputs" / "ad_vs_control_gene_counts.tsv").write_text(
+            "gene\tS1\tS2\tS3\tS4\nGeneA\t10\t12\t30\t28\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_inputs" / "ad_vs_control_gene_sample_info.csv").write_text(
+            "sample,group\nS1,control\nS2,control\nS3,ad\nS4,ad\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_results" / "de_results.tsv").write_text(
+            "gene\tlogFC\tFDR\nGeneA\t1.5\t0.01\nGeneB\t-2.1\t0.02\nGeneC\t0.2\t0.5\n",
+            encoding="utf-8",
+        )
+        (job_dir / "de_results" / "volcano_ad_vs_control_gene.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (job_dir / "de_results" / "volcano_ad_vs_control_gene.svg").write_text("<svg></svg>", encoding="utf-8")
+
+        with patch("analyzer.analysis_engine._get_job_by_run_uuid_or_work_dir", return_value=None):
+            summary = generate_analysis_summary(work_dir_path=str(job_dir))
+
+        assert summary.workflow_key == "differential_expression"
+        assert summary.sample_name == "workflow16"
+        assert summary.key_results["DE Results"] == "Available"
+        assert summary.key_results["Volcano Plot"] == "Available"
+        assert summary.key_results["Input Counts"] == "Available"
+        assert summary.key_results["Sample Count"] == 4
+        assert summary.key_results["Significant Features"] == 2
+        assert summary.workflow_summary["metadata"]["comparison_name"] == "ad_vs_control_gene"
+        assert summary.workflow_summary["metadata"]["up_count"] == 1
+        assert summary.workflow_summary["metadata"]["down_count"] == 1
+        assert summary.parsed_reports["de_results"]["data"][0]["gene"] == "GeneA"
+        assert summary.parsed_reports["de_sample_info"]["data"][0]["group"] == "control"

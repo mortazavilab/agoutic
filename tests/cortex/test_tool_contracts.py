@@ -221,6 +221,28 @@ class TestValidateAgainstSchema:
         # Missing required + invalid enum + stripped unknown
         assert len(violations) >= 2
 
+    def test_work_dir_only_get_analysis_summary_is_valid(self):
+        _inject_schema("analyzer", {
+            "get_analysis_summary": {
+                "parameters": {
+                    "properties": {
+                        "run_uuid": {"type": "string"},
+                        "work_dir": {"type": "string"},
+                    },
+                    "required": [],
+                },
+            },
+        })
+
+        cleaned, violations = validate_against_schema(
+            "get_analysis_summary",
+            {"work_dir": "/media/backup_disk/agoutic_root/users/ali-mortazavi/testmulti/workflow5"},
+            "analyzer",
+        )
+
+        assert cleaned == {"work_dir": "/media/backup_disk/agoutic_root/users/ali-mortazavi/testmulti/workflow5"}
+        assert violations == []
+
 
 # ---------------------------------------------------------------------------
 # invalidate_schema_cache

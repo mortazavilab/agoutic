@@ -18,6 +18,7 @@ class ConversationState:
     work_dir: str | None = None
     sample_name: str | None = None
     sample_type: str | None = None          # DNA / RNA / CDNA
+    workflow_key: str | None = None         # dogme / wf_pore_c
     reference_genome: str | None = None
     active_experiment: str | None = None     # ENCSR accession from conversation
     active_file: str | None = None           # ENCFF accession from conversation
@@ -78,6 +79,8 @@ class BlockOut(BaseModel):
 class BlockStreamOut(BaseModel):
     blocks: list[BlockOut]
     latest_seq: int
+    oldest_seq: int = 0
+    has_older: bool = False
 
 class BlockUpdate(BaseModel):
     status: Optional[str] = None
@@ -256,6 +259,55 @@ class StageStatusResponse(BaseModel):
     manifest_relative_path: str
 
 
+# ==================== Project Collaborator Schemas ====================
+
+class ProjectCollaboratorOut(BaseModel):
+    user_id: str
+    email: str
+    display_name: Optional[str] = None
+    username: Optional[str] = None
+    role: Literal["owner", "editor", "viewer"]
+    invited_by: Optional[str] = None
+    invited_by_email: Optional[str] = None
+    created_at: str
+    updated_at: str
+    last_accessed: str
+    is_owner: bool = False
+
+
+class ProjectCollaboratorListOut(BaseModel):
+    project_id: str
+    owner_id: str
+    collaborators: list[ProjectCollaboratorOut] = Field(default_factory=list)
+
+
+class ProjectCollaboratorCreateRequest(BaseModel):
+    email: str
+    role: Literal["viewer", "editor"]
+
+
+class ProjectCollaboratorUpdateRequest(BaseModel):
+    role: Literal["viewer", "editor"]
+
+
+class ProjectOwnershipTransferRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+
+
+class ProjectCollaboratorMutationOut(BaseModel):
+    status: str
+    project_id: str
+    user_id: str
+    email: str
+    role: Literal["owner", "editor", "viewer"]
+
+
+class ProjectLeaveResponse(BaseModel):
+    status: str
+    project_id: str
+    user_id: str
+
+
 # ==================== Memory Schemas ====================
 
 class MemoryCreate(BaseModel):
@@ -296,3 +348,17 @@ class MemoryListOut(BaseModel):
     """Paginated list of memory entries."""
     memories: list[MemoryOut] = Field(default_factory=list)
     total: int = 0
+
+
+class MaintenanceStateOut(BaseModel):
+    mode: bool
+    message: str = ""
+    starts_at: Optional[str] = None
+    updated_by_email: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class MaintenanceStateUpdate(BaseModel):
+    mode: bool
+    message: str = ""
+    starts_at: Optional[str] = None

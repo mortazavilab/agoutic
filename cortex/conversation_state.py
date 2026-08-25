@@ -24,6 +24,54 @@ def _is_script_source_dir(path_value: str) -> bool:
     return bool(path_value and "/skills/" in path_value and "/scripts" in path_value)
 
 
+def _normalized_workflow_key(payload: dict | None) -> str:
+    raw_value = ""
+    if isinstance(payload, dict):
+        raw_value = payload.get("workflow_key")
+    normalized = str(raw_value or "").strip().lower()
+    return normalized or "dogme"
+
+
+def _normalized_workflow_record(payload: dict | None) -> dict:
+    source = dict(payload or {})
+    source["work_dir"] = _sanitize_path(str(source.get("work_dir") or source.get("work_directory") or ""))
+    source["sample_name"] = str(source.get("sample_name") or "")
+    source["mode"] = str(source.get("mode") or "")
+    source["workflow_key"] = _normalized_workflow_key(source)
+    source["run_uuid"] = _sanitize_path(str(source.get("run_uuid") or ""))
+    source["run_type"] = str(source.get("run_type") or "dogme") or "dogme"
+    return source
+
+
+def _backfill_state_workflow_context(state: "ConversationState") -> None:
+    normalized_workflows = [
+        _normalized_workflow_record(workflow)
+        for workflow in (state.workflows or [])
+        if isinstance(workflow, dict)
+    ]
+    state.workflows = normalized_workflows
+
+    active_workflow = None
+    if state.workflows:
+        if isinstance(state.active_workflow_index, int) and 0 <= state.active_workflow_index < len(state.workflows):
+            active_workflow = state.workflows[state.active_workflow_index]
+        else:
+            state.active_workflow_index = len(state.workflows) - 1
+            active_workflow = state.workflows[state.active_workflow_index]
+
+    if active_workflow:
+        if not state.work_dir and active_workflow.get("work_dir"):
+            state.work_dir = active_workflow["work_dir"]
+        if not state.sample_name and active_workflow.get("sample_name"):
+            state.sample_name = active_workflow["sample_name"]
+        if not state.sample_type and active_workflow.get("mode"):
+            state.sample_type = active_workflow["mode"]
+        if not state.workflow_key:
+            state.workflow_key = active_workflow.get("workflow_key") or "dogme"
+    elif not state.workflow_key and state.sample_type:
+        state.workflow_key = "dogme"
+
+
 # ---------------------------------------------------------------------------
 # _build_conversation_state
 # ---------------------------------------------------------------------------
@@ -54,6 +102,7 @@ def _build_conversation_state(
                 if cached and isinstance(cached, dict):
                     state = ConversationState.from_dict(cached)
                     state.active_skill = active_skill
+                    _backfill_state_workflow_context(state)
                     for _newer_blk in reversed(history_blocks):
                         if _newer_blk.id == blk.id:
                             break
@@ -97,7 +146,7 @@ def _build_conversation_state(
                         _sample_re2 = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
                         _path_re2 = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
                         _type_re2 = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
-                        _genome_re2 = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
+                        _genome_re2 = re.compile(r'\b(GRCh38|mm39|mad1|hg38|mm10)\b', re.I)
                         _fresh_params: dict[str, str] = {}
                         for _msg in reversed(conversation_history):
                             if _msg.get("role") != "user":
@@ -136,17 +185,9 @@ def _build_conversation_state(
             if blk.type != "EXECUTION_JOB":
                 continue
             _pl = get_block_payload(blk)
-            _wd = _sanitize_path(_pl.get("work_directory") or "")
-            _uuid = _sanitize_path(_pl.get("run_uuid") or "")
-            _run_type = _pl.get("run_type", "dogme")
-            if _wd or _uuid:
-                state.workflows.append({
-                    "work_dir": _wd,
-                    "sample_name": _pl.get("sample_name", ""),
-                    "mode": _pl.get("mode", ""),
-                    "run_uuid": _uuid,
-                    "run_type": _run_type,
-                })
+            workflow_record = _normalized_workflow_record(_pl)
+            if workflow_record.get("work_dir") or workflow_record.get("run_uuid"):
+                state.workflows.append(workflow_record)
         if state.workflows:
             # Prefer pipeline workflows over utility scripts whose work_dir
             # points at a skills/scripts source folder.  Script runs that
@@ -161,6 +202,7 @@ def _build_conversation_state(
             state.work_dir = latest.get("work_dir")
             state.sample_name = latest.get("sample_name")
             state.sample_type = latest.get("mode")
+            state.workflow_key = latest.get("workflow_key")
             state.active_workflow_index = len(state.workflows) - 1
 
     # --- Extract active plan from WORKFLOW_PLAN blocks ---
@@ -236,7 +278,7 @@ def _build_conversation_state(
         _sample_re = re.compile(r'(?:called?|named?|sample[_ ]?name)\s+["\']?(\w+)', re.I)
         _path_re = re.compile(r'(?:path|directory|folder)\s*[:=]?\s*(/\S+)', re.I)
         _type_re = re.compile(r'\b(cdna|c-dna|cDNA|rna|dna)\b', re.I)
-        _genome_re = re.compile(r'\b(GRCh38|mm39|hg38|mm10)\b', re.I)
+        _genome_re = re.compile(r'\b(GRCh38|mm39|mad1|hg38|mm10)\b', re.I)
         for msg in reversed(conversation_history):
             if msg.get("role") != "user":
                 continue
@@ -258,6 +300,8 @@ def _build_conversation_state(
                 if _m:
                     state.collected_params["reference_genome"] = _m.group(1)
 
+    _backfill_state_workflow_context(state)
+
     return state
 
 
@@ -272,32 +316,75 @@ def _extract_job_context_from_history(
     """
     Scan conversation / block history for job context.
 
-    Returns a dict with:
-      - 'work_dir'  : str — work directory of the *most recent* job
-      - 'run_uuid'  : str — run UUID of the most recent job (internal only)
-      - 'workflows' : list[dict] — all workflows in the project
-           Each dict: {work_dir, sample_name, mode, run_uuid}
+        Returns a dict with:
+            - 'work_dir'  : str — work directory of the *most recent* job
+            - 'run_uuid'  : str — run UUID of the most recent job (internal only)
+            - 'workflow_key': str — workflow family of the most recent job
+            - 'workflows' : list[dict] — all workflows in the project
+                     Each dict: {work_dir, sample_name, mode, workflow_key, run_uuid}
     """
     context: dict = {}
 
     # --- Primary source: EXECUTION_JOB blocks (authoritative) -----------
     workflows: list[dict] = []
+    latest_exec_index = -1
     if history_blocks:
-        for blk in history_blocks:
+        for idx, blk in enumerate(history_blocks):
             if blk.type != "EXECUTION_JOB":
                 continue
             _pl = get_block_payload(blk)
-            _wd = _sanitize_path(_pl.get("work_directory") or "")
-            _uuid = _sanitize_path(_pl.get("run_uuid") or "")
-            _run_type = _pl.get("run_type", "dogme")
-            if _wd or _uuid:
-                workflows.append({
-                    "work_dir": _wd,
-                    "sample_name": _pl.get("sample_name", ""),
-                    "mode": _pl.get("mode", ""),
-                    "run_uuid": _uuid,
-                    "run_type": _run_type,
-                })
+            workflow_record = _normalized_workflow_record(_pl)
+            if workflow_record.get("work_dir") or workflow_record.get("run_uuid"):
+                workflows.append(workflow_record)
+                latest_exec_index = idx
+
+        for idx in range(len(history_blocks) - 1, -1, -1):
+            blk = history_blocks[idx]
+            if blk.type != "AGENT_PLAN":
+                continue
+            _pl = get_block_payload(blk)
+            cached = _pl.get("state")
+            if not isinstance(cached, dict):
+                continue
+            cached_workflows = [
+                _normalized_workflow_record(workflow)
+                for workflow in (cached.get("workflows") or [])
+                if isinstance(workflow, dict)
+            ]
+            if not cached_workflows:
+                continue
+            if latest_exec_index >= 0 and idx <= latest_exec_index:
+                break
+
+            active_index = cached.get("active_workflow_index")
+            if isinstance(active_index, int) and 0 <= active_index < len(cached_workflows):
+                selected = cached_workflows[active_index]
+            else:
+                cached_work_dir = _sanitize_path(str(cached.get("work_dir") or ""))
+                selected = next(
+                    (workflow for workflow in cached_workflows if workflow.get("work_dir") == cached_work_dir),
+                    cached_workflows[-1],
+                )
+
+            if workflows:
+                selected = next(
+                    (
+                        workflow for workflow in workflows
+                        if (
+                            selected.get("work_dir") and workflow.get("work_dir") == selected.get("work_dir")
+                        ) or (
+                            selected.get("run_uuid") and workflow.get("run_uuid") == selected.get("run_uuid")
+                        )
+                    ),
+                    selected,
+                )
+
+            context["work_dir"] = selected.get("work_dir", "")
+            context["run_uuid"] = selected.get("run_uuid", "")
+            context["workflow_key"] = selected.get("workflow_key") or "dogme"
+            context["workflows"] = workflows or cached_workflows
+            return context
+
         if workflows:
             # Prefer the most recent pipeline (dogme) workflow over utility
             # scripts whose work_directory points at the skill's scripts
@@ -311,6 +398,7 @@ def _extract_job_context_from_history(
             latest = (pipeline_workflows or workflows)[-1]
             context["work_dir"] = latest["work_dir"]
             context["run_uuid"] = latest["run_uuid"]
+            context["workflow_key"] = latest.get("workflow_key") or "dogme"
             context["workflows"] = workflows
             return context
 

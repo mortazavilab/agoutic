@@ -276,7 +276,8 @@ async def read_file_content_tool(
     file_path: str,
     work_dir: Optional[str] = None,
     run_uuid: Optional[str] = None,
-    preview_lines: Optional[int] = None
+    preview_lines: Optional[int] = None,
+    render_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Read content from a specific file in a job's work directory.
@@ -286,6 +287,7 @@ async def read_file_content_tool(
         work_dir: Absolute path to the workflow directory (preferred)
         run_uuid: Job UUID (legacy fallback)
         preview_lines: Optional line limit for preview (default: all lines)
+        render_mode: How to render content: auto, plain, markdown, html_text, or html_raw
 
     Returns:
         Dict with file content and metadata
@@ -295,7 +297,11 @@ async def read_file_content_tool(
             preview_lines = MAX_PREVIEW_LINES
 
         content_response = read_file_content(
-            run_uuid, file_path, preview_lines, work_dir_path=work_dir
+            run_uuid,
+            file_path,
+            preview_lines,
+            work_dir_path=work_dir,
+            render_mode=render_mode,
         )
 
         return {
@@ -305,7 +311,9 @@ async def read_file_content_tool(
             "content": content_response.content,
             "line_count": content_response.line_count,
             "is_truncated": content_response.is_truncated,
-            "file_size_bytes": content_response.file_size
+            "file_size_bytes": content_response.file_size,
+            "render_mode": content_response.render_mode,
+            "source_extension": content_response.source_extension,
         }
     
     except FileNotFoundError as e:
@@ -566,6 +574,7 @@ async def get_analysis_summary_tool(
         # Basic info table
         output += "Field | Value\n--- | ---\n"
         output += f"Sample Name | {summary.sample_name}\n"
+        output += f"Workflow Key | {summary.workflow_key}\n"
         output += f"Mode | {summary.mode}\n"
         output += f"Status | {summary.status}\n"
         output += f"Work Directory | {summary.work_dir}\n\n"
@@ -616,12 +625,19 @@ async def get_analysis_summary_tool(
             "success": True,
             "summary": output,
             # Structured data for programmatic access
+            "run_uuid": summary.run_uuid,
             "mode": summary.mode,
+            "workflow_key": summary.workflow_key,
             "status": summary.status,
             "sample_name": summary.sample_name,
             "work_dir": summary.work_dir,
             "all_file_counts": summary.all_file_counts,
             "key_results": summary.key_results,
+            "parsed_reports": summary.parsed_reports,
+            "summary_contract": summary.summary_contract,
+            "result_sync_spec": summary.result_sync_spec,
+            "workflow_summary": summary.workflow_summary,
+            "warnings": summary.warnings,
             "file_summary": {
                 "csv_files": [f.dict() for f in summary.file_summary.csv_files],
                 "bed_files": [f.dict() for f in summary.file_summary.bed_files],
@@ -788,6 +804,10 @@ TOOL_SCHEMAS = {
                 "preview_lines": {
                     "type": "integer",
                     "description": "Optional line limit for preview"
+                },
+                "render_mode": {
+                    "type": "string",
+                    "description": "Optional render mode: auto, plain, markdown, html_text, or html_raw"
                 }
             },
             "required": ["file_path"]
@@ -932,14 +952,14 @@ TOOL_SCHEMAS = {
             "properties": {
                 "run_uuid": {
                     "type": "string",
-                    "description": "Job UUID (needed for DB metadata lookup)"
+                    "description": "Job UUID (legacy fallback — optional when work_dir is provided)"
                 },
                 "work_dir": {
                     "type": "string",
-                    "description": "Absolute path to the workflow directory"
+                    "description": "Absolute path to the workflow directory (preferred)"
                 },
             },
-            "required": ["run_uuid"]
+            "required": []
         }
     },
     "categorize_job_files": {

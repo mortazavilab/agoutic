@@ -157,8 +157,25 @@ mkdir -p $AGOUTIC_DATA/database $AGOUTIC_DATA/launchpad_work $AGOUTIC_DATA/launc
 
 Slash commands currently fall into two buckets:
 
-- **Deterministic quick exits** — skill commands, workflow commands, and all memory commands are handled by the backend without calling the LLM.
-- **Planner-routed commands** — `/de` enters the differential-expression planning flow and can still ask follow-up questions when required inputs are missing.
+- **Deterministic quick exits** — help commands, skill commands, workflow commands, inventory commands, and all memory commands are handled by the backend without calling the LLM.
+- **Planner-routed commands** — `/de` and `/haplotype` enter approval-gated planning flows and can still ask follow-up questions when required inputs are missing.
+
+### Help Commands
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/help` | `/help remote slurm` | Explain how to ask AGOUTIC for a task, slash command, or skill, with concrete prompt examples and required details |
+| `/commands` | `/commands` | List slash commands by category |
+
+Natural-language prompt coaching is also supported for common AGOUTIC tasks, for example:
+
+- `how do I stage a sample on hpc3`
+- `how do I prompt you to run Dogme with a staged sample`
+- `how do I sync workflow12 back from the cluster`
+- `how do I haplotype workflow7 with a VCF`
+- `how do I use /list files`
+
+Prompt-coach coverage currently includes slash commands, skills, workflow import, remote SLURM stage/run/sync flows, differential expression, VCF haplotyping, and dataframe/plotting workflows.
 
 ### Skill Commands
 
@@ -173,11 +190,51 @@ Slash commands currently fall into two buckets:
 | Command | Syntax | Description |
 |---|---|---|
 | `/use` | `/use workflow7` | Switch the active workflow context for follow-up browsing and analysis |
+| `/summarize` | `/summarize workflow7 workflow8 -- mapping and QC` | Compare saved `*_analysis.md` workflow reports in chat and save a combined markdown summary under the project `summaries/` folder |
 | `/rerun` | `/rerun workflow7` | Rerun the matching workflow/job in the current project |
 | `/rename` | `/rename workflow7 treated-r1` | Rename the matching workflow/job |
 | `/delete` | `/delete workflow7` | Delete the matching workflow/job |
+| `/clean` | `/clean workflow7` | Gzip each loose `bedMethyl/*.bed` file individually and remove `work/` plus immediate-child `dor*` folders while keeping the workflow folder |
+| `/list-launchpad-workflows` | `/list-launchpad-workflows` | List workflows that are currently tracked in Launchpad for the active project |
+| `/import-workflow` | `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote` | Import an existing local or remote Dogme workflow into the current project as the next `workflowN`; metadata is inferred from the workflow `.config` files |
+| `/sync-workflow` | `/sync-workflow workflow12` | Retry or continue syncing outputs for a remote or imported workflow |
 
 Workflow references can match a workflow folder, workflow alias, workflow display name, or sample name.
+
+`/summarize` reads existing saved workflow analysis markdown rather than rerunning analysis. With no workflow targets it scans the active project for immediate-child `workflow*` folders that already contain saved `*_analysis.md` files. The slash form accepts optional focus text after ` -- `, for example `/summarize workflow7 workflow8 -- mapping and QC`. Natural language can use phrasing such as `summarize workflow7 workflow8 focusing on mapping and QC`.
+
+`/clean workflowN` and `/clean workflow7 workflow8` accept the same comma- or space-separated workflow references as the other workflow commands. Use `/clean workflows` to target all tracked Launchpad workflows plus any untracked immediate-child `workflow*` folders in the active project. Use `/clean remote workflowN` when you want the same cleanup performed against the remote workflow directory instead of the local copy.
+
+`/delete workflowN` can also remove an untracked on-disk `workflow*` folder when it exists as an immediate child of the current project root but has no Launchpad job row.
+
+### Inventory Commands
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/list samples` | `/list samples` | List your user-wide local sample inventory from the central data folder |
+| `/list staged` | `/list staged --profile hpc3` | List remote staged samples, optionally filtered to one profile |
+| `/list imported` | `/list imported` | List imported workflows across all accessible projects |
+| `/list dfs` | `/list dfs` | List dataframes currently available in the chat context |
+| `/list workflows` | `/list workflows` | List tracked and on-disk workflows for the active project |
+| `/list files` | `/list files annot --depth 2` | List files in the active workflow by default, or use `--project` to browse from the project root |
+
+Natural language equivalents are also supported for direct inventory lookups, for example:
+
+- `show my samples`
+- `show staged samples on hpc3`
+- `what imported samples do i have`
+- `show workflows in this project`
+- `list files in workflow7/annot`
+
+The Streamlit My Data page now surfaces the same inventories in tabs for Local Samples, Staged Samples, Imported Samples, Workflows, and Files.
+
+### Workflow Import and Sync
+
+- Remote import slash command: `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote`
+- Remote import natural language: `import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12`
+- Continue or retry sync later: `/sync-workflow workflow12`
+- Optional flags: `--full-copy`, `--sample-name NAME`, `--mode DNA|RNA|CDNA`, `--reference GRCh38,mm39`, `--modifications 5mCG_5hmCG,6mA`
+- By default AGOUTIC copies the same result subset as a normal remote copy-back. Use `--full-copy` when you want the entire workflow directory.
 
 ### Differential Expression Slash Command
 
@@ -186,6 +243,24 @@ Workflow references can match a workflow folder, workflow alias, workflow displa
 | `/de` | `/de treated=treated_1,treated_2 vs control=ctrl_1,ctrl_2` | Run edgePython differential expression from the current workflow abundance context with explicit sample groups |
 
 Use natural-language DE requests when you want to point at a dataframe or counts file, or when you want AGOUTIC to clarify missing groups before running the plan.
+
+### Haplotype With VCF Slash Command
+
+| Command | Syntax | Description |
+|---|---|---|
+| `/haplotype` | `/haplotype RNA workflow7 /data/parents.vcf.gz` | Haplotype DNA, RNA, or cDNA workflow BAMs against a VCF; AGOUTIC auto-compresses plain `.vcf` inputs and auto-builds missing VCF indexes when it can write beside the source file, and approval shows the exact BAM inputs, selected VCF samples, labels, and output workflow |
+
+Natural language equivalents are also supported, for example:
+
+- `haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- `haplotype DNA workflow5 /data/family.vcf.gz`
+
+Input resolution rules:
+
+- RNA and cDNA workflows use `annot/*.annotated.bam`
+- DNA workflows use mapped BAMs from `bams/`
+- Reconcile workflows use root-level `*.annotated.bam` outputs
+- Plain `.vcf` inputs are auto-compressed to `.vcf.gz` and indexed, and `.vcf.gz` inputs missing `.tbi` or `.csi` are auto-indexed when the source directory is writable
 
 ### Memory Slash Commands
 

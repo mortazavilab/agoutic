@@ -82,7 +82,7 @@ Analyzer follows the **dual-interface pattern** established by Launchpad:
 - `get_job_work_dir()` - Locate job work directory
 
 **File Reading**
-- `read_file_content()` - Read text files with preview limits
+- `read_file_content()` - Read text, markdown, and HTML files with preview limits and render modes (`plain`, `markdown`, `html_text`, `html_raw`)
 - Security: Path validation, size limits
 
 **Parsing**
@@ -98,7 +98,7 @@ Analyzer exposes 8 MCP tools for AI agents:
 
 1. **`list_job_files`** - List all files in a workflow directory (or subfolder) with optional extension filtering
 2. **`find_file`** - Find a specific file by name (exact or partial, case-insensitive) — skips `work/` intermediates
-3. **`read_file_content`** - Read file content with preview limits
+3. **`read_file_content`** - Read txt/markdown/HTML content with preview limits and optional render modes
 4. **`parse_csv_file`** - Parse CSV/TSV files with column stats
 5. **`parse_bed_file`** - Parse BED format files
 6. **`parse_xgenepy_outputs`** - Parse canonical XgenePy outputs (`fit_summary.json`, `assignments.tsv`, `proportion_cis.tsv`, `model_metadata.json`, `run_manifest.json`, `plots/`)

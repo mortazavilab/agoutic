@@ -1,8 +1,9 @@
 import asyncio
 import os
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from analyzer.mcp_tools import compare_bed_region_overlaps_tool, list_job_files
+from analyzer.mcp_tools import compare_bed_region_overlaps_tool, get_analysis_summary_tool, list_job_files
 
 
 def test_list_job_files_allow_missing_returns_empty_success(tmp_path):
@@ -122,3 +123,37 @@ def test_compare_bed_region_overlaps_folder_search_chooses_newest_match(tmp_path
     assert result["success"] is True
     assert result["sample_a"]["bed_path"] == str(newer_a.resolve())
     assert result["sample_a"]["matched_count"] == 2
+
+
+def test_get_analysis_summary_tool_surfaces_structured_workflow_fields():
+    summary = MagicMock(
+        run_uuid="run-reconcile",
+        sample_name="reconciled",
+        workflow_key="reconcile_bams",
+        mode=None,
+        status="COMPLETED",
+        work_dir="/work/workflow9",
+        all_file_counts={"txt_count": 1, "csv_count": 2, "bed_count": 0, "other_count": 3, "total_files": 6},
+        key_results={"Summary Report": "Available", "Isoforms": 67166},
+        parsed_reports={"reconciled_summary": "Known transcripts: 36181"},
+        summary_contract={},
+        result_sync_spec={},
+        workflow_summary={"metadata": {"isoform_count": 67166}, "artifacts": {"summary_report": {"present": True}}},
+        warnings=["example warning"],
+        file_summary=MagicMock(
+            csv_files=[],
+            bed_files=[],
+            txt_files=[],
+            other_files=[],
+        ),
+    )
+
+    with patch("analyzer.mcp_tools.generate_analysis_summary", return_value=summary):
+        result = asyncio.run(get_analysis_summary_tool(run_uuid="run-reconcile", work_dir="/work/workflow9"))
+
+    assert result["success"] is True
+    assert result["workflow_key"] == "reconcile_bams"
+    assert result["parsed_reports"]["reconciled_summary"] == "Known transcripts: 36181"
+    assert result["workflow_summary"]["metadata"]["isoform_count"] == 67166
+    assert result["warnings"] == ["example warning"]
+    assert "Workflow Key | reconcile_bams" in result["summary"]

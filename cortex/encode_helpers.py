@@ -483,12 +483,13 @@ def _validate_encode_params(tool: str, params: dict, user_message: str) -> dict:
             logger.info("Stripped auto-organism (user didn't request it)",
                        removed_organism=removed)
 
-    # --- Fix 4: replace hallucinated ENCSR with what the user explicitly stated ---
-    # If the user message contains a valid ENCSR accession and the LLM put a
-    # *different* ENCSR in "accession", always trust the user's value.
+    # --- Fix 4: replace an unambiguous hallucinated ENCSR ---
+    # When exactly one experiment appears in the user message, it is safe to
+    # replace a different model-provided accession. Multi-experiment requests
+    # carry one valid accession per generated call and must remain distinct.
     if "accession" in params and params["accession"]:
         _encsr_in_msg = re.findall(r'(ENCSR[A-Z0-9]{6})', user_message, re.IGNORECASE)
-        if _encsr_in_msg:
+        if len(_encsr_in_msg) == 1:
             _user_encsr = _encsr_in_msg[0].upper()
             if params["accession"].upper() != _user_encsr:
                 logger.warning(

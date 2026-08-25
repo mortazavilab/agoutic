@@ -1,0 +1,1 @@
+For differential_expression reports, prioritize group comparison context, significant feature counts, thresholds, effect-size patterns, and the main downstream interpretation cautions when those values are available.

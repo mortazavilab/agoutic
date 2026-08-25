@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -120,3 +122,36 @@ def normalize_script_args(args: list[str] | None) -> list[str]:
             raise ValueError("script_args must contain only strings")
         normalized.append(item)
     return normalized
+
+
+def script_subprocess_session_kwargs() -> dict[str, object]:
+    """Return subprocess kwargs that isolate standalone scripts into their own process group."""
+    if os.name == "nt":
+        return {}
+    return {"start_new_session": True}
+
+
+def terminate_script_process_tree(
+    *,
+    process=None,
+    pid: int | None = None,
+    sig: int = signal.SIGTERM,
+) -> bool:
+    """Terminate a standalone script process and any children it spawned."""
+    target_pid = pid or getattr(process, "pid", None)
+    if target_pid is None:
+        return False
+
+    if os.name != "nt":
+        os.killpg(target_pid, sig)
+        return True
+
+    if process is not None:
+        if sig == signal.SIGKILL:
+            process.kill()
+        else:
+            process.terminate()
+        return True
+
+    os.kill(target_pid, sig)
+    return True

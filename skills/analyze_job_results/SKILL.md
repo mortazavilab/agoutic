@@ -2,18 +2,21 @@
 
 ## Description
 
-This skill analyzes completed Dogme pipeline job results. It examines output files (txt, csv, bed) from completed jobs and generates QC reports, summaries, and statistical analyses.
+This skill analyzes completed workflow results across Dogme, `reconcile_bams`, `haplotype_with_vcf`, `differential_expression`, and `wf_pore_c`. It examines synced output files (txt, csv/tsv, bed, reports, plots) from completed or otherwise analyzable workflows and routes only when deeper Dogme mode-specific interpretation is actually needed.
 
-**⚠️ CRITICAL: This skill is analysis-first. Do NOT submit new Dogme or Nextflow jobs. The only allowed execution exception is a local allowlisted utility script that inspects an existing BED file and returns per-chromosome counts. For normal result analysis, only use the /analysis/* endpoints listed below.**
+If a workflow is marked `FAILED` or `CANCELLED` but its result files have been synced and are present on disk, it is still a valid analysis target. When the user explicitly names that workflow, prefer checking the requested workflow's files first instead of automatically switching to a different completed workflow.
+
+**⚠️ CRITICAL: This skill is analysis-first. Do NOT submit new Dogme, script, or Nextflow jobs. The only allowed execution exception is a local allowlisted utility script that inspects an existing BED file and returns per-chromosome counts. For normal result analysis, only use the /analysis/* endpoints listed below.**
 
 ## Skill Scope & Routing
 
 ### ✅ This Skill Handles:
 - Retrieving analysis summaries for completed jobs
 - Initial job verification and metadata lookup
-- **Routing to mode-specific analysis skills** (DNA/RNA/cDNA)
+- **Routing Dogme results to mode-specific analysis skills** (DNA/RNA/cDNA) when deeper interpretation is needed
 - File discovery and categorization for any completed job
 - Initial QC overview before detailed interpretation
+- Workflow-family-aware summaries for `reconcile_bams`, `haplotype_with_vcf`, `differential_expression`, and `wf_pore_c`
 - Counting BED regions per chromosome via the bundled allowlisted script when the user explicitly asks for chromosome counts from a BED file
 - BAM-adjacent result triage using supported Analyzer tools only (`list_job_files`,
   `find_file`, `read_file_content`, `parse_csv_file`, `parse_bed_file`) when
@@ -29,7 +32,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 ### ❌ This Skill Does NOT Handle:
 
-- **Detailed mode-specific interpretation** → Routes to mode-specific skills
+- **Detailed Dogme mode-specific interpretation** → Routes to mode-specific skills only after `workflow_key=dogme` is confirmed
   ### BAM Detail Fallback (Supported Tools Only)
 
   If the user asks for BAM details (header, mapped/unmapped, alignment summary):
@@ -41,9 +44,9 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
   **Never call unsupported tools such as `show_bam_details`.**
 
-  - DNA results → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
-  - RNA results → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
-  - cDNA results → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
+  - Dogme DNA results → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
+  - Dogme RNA results → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
+  - Dogme cDNA results → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
 
 - **Submitting new jobs** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
   - "Run analysis on my data"
@@ -65,10 +68,10 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 
 ### 🔀 General Routing Rules:
 
-**This skill acts as a router:**
-1. Verifies job exists and gets mode (DNA/RNA/CDNA)
-2. **Immediately switches to the mode-specific skill** for detailed analysis
-3. Mode-specific skills handle file parsing, metric interpretation, and results presentation
+**This skill is the main entrypoint for completed-workflow analysis:**
+1. Verifies the workflow exists and gets `workflow_key` plus mode
+2. Keeps `reconcile_bams`, `haplotype_with_vcf`, `differential_expression`, and `wf_pore_c` inside this skill for family-specific summary and file browsing
+3. Switches to Dogme DNA/RNA/cDNA skills only when the workflow family is Dogme and the user needs mode-specific interpretation
 
 **If user asks about:**
 - **New local data** → `[[SKILL_SWITCH_TO: analyze_local_sample]]`
@@ -76,7 +79,7 @@ This skill analyzes completed Dogme pipeline job results. It examines output fil
 - **ENCODE searches** → `[[SKILL_SWITCH_TO: encode_search]]`
 - **General help** → `[[SKILL_SWITCH_TO: welcome]]`
 
-**When uncertain:** This is a temporary routing skill. Always switch to a mode-specific skill (DNA/RNA/cDNA) after getting the job summary.
+**When uncertain:** Prefer staying on this skill unless the summary clearly shows a Dogme workflow that needs DNA/RNA/cDNA interpretation.
 
 ## Inputs
 
@@ -132,9 +135,17 @@ For modification-count requests, use the workflow's `bedMethyl` folder and match
 
 `<sample>.<genome>.plus.<modification>.filtered.bed`
 
+or
+
+`<sample>.<genome>.plus.<modification>.filtered.bed.gz`
+
 and
 
 `<sample>.<genome>.minus.<modification>.filtered.bed`
+
+or
+
+`<sample>.<genome>.minus.<modification>.filtered.bed.gz`
 
 Use both plus and minus files when both exist for the requested modification. If only one exists, use the one that exists.
 
@@ -216,55 +227,43 @@ The script:
 
 ### IMMEDIATE EXECUTION FOR ANALYSIS REQUESTS
 
-**Execute immediately with get_analysis_summary to get mode for routing:**
+Start with the workflow summary so you have both `workflow_key` and `mode`:
 
 ```
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**Then immediately switch to the appropriate Dogme skill based on the mode field from get_analysis_summary.**
-
-**If user just wants summary/overview, use get_analysis_summary:**
-
-```
-[[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
-```
-
-**But for analysis requests, use list_job_files with filtering to exclude work files:**
+If the user asks for a file inventory, available outputs, or a quick overview, you may also call:
 
 ```
 [[DATA_CALL: service=analyzer, tool=list_job_files, work_dir=<work_dir>, extensions=.csv,.tsv,.bed,.txt]]
 ```
 
-**This shows only final result files (CSV, TSV, BED, TXT) and excludes work/intermediate files that bloat the counts.**
+### Routing Logic
 
-**Then immediately switch to the appropriate Dogme skill based on the mode field in the response.**
+After `get_analysis_summary`, branch by `workflow_key` first:
 
-**ROUTING LOGIC - Execute this EXACT pattern:**
+- If `workflow_key` is `reconcile_bams`, stay on this skill and summarize reconcile outputs.
+- If `workflow_key` is `haplotype_with_vcf`, stay on this skill and summarize haplotype outputs.
+- If `workflow_key` is `wf_pore_c`, stay on this skill and summarize contact-map outputs.
+- If `workflow_key` is `dogme` or missing, use `mode` to decide whether to switch to a Dogme mode-specific skill.
+
+Only Dogme workflows should switch away from this skill:
+
 ```
-# Get the mode from the JSON response
+# Dogme-only routing
 # If mode equals "CDNA" exactly:
 [[SKILL_SWITCH_TO: run_dogme_cdna]]
-# If mode equals "DNA" exactly:  
+# If mode equals "DNA" exactly:
 [[SKILL_SWITCH_TO: run_dogme_dna]]
 # If mode equals "RNA" exactly:
 [[SKILL_SWITCH_TO: run_dogme_rna]]
 ```
 
-**CRITICAL: Do NOT use complex conditionals. Use exact string matching.**
-
-**❌ ABSOLUTELY DO NOT:**
-- Output "STEP 1: Verify job exists..."
-- Output "STEP 2: Route to mode-specific skill..."
-- Output "Call: GET /analysis/jobs/..."
-- Output "📋 Raw Query Results"
-- Describe any numbered steps
-- Explain your process
-
-**✅ ONLY:**
-- Execute the tool call
-- Switch skills immediately using exact string match
-- Let Dogme skill handle everything else
+For `reconcile_bams`, `haplotype_with_vcf`, and `wf_pore_c`:
+- Do NOT switch to Dogme skills just because the workflow contains BAMs or TSVs.
+- Do summarize the workflow-family-specific outputs directly from Analyzer results.
+- Do keep follow-up file browsing, report reading, and summary requests on this skill unless the user explicitly asks to switch contexts.
 
 ---
 
@@ -348,23 +347,13 @@ Context injection shows:
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**After you get the response with `mode` field:**
+**After you get the response with `workflow_key` and `mode`:**
 
-⚠️ **IMMEDIATELY switch to the appropriate Dogme skill. DO NOT DISPLAY the summary response:**
+- If `workflow_key` is `reconcile_bams`, `haplotype_with_vcf`, or `wf_pore_c`, stay on this skill and handle the requested file parsing directly.
+- If `workflow_key` is `dogme` or missing, then switch to the appropriate Dogme skill based on `mode`.
 
-**CRITICAL: Check the mode value EXACTLY:**
-- Look for `"mode": "CDNA"` (case sensitive, exact match)
-- If mode is "CDNA" → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
-- If mode is "DNA" → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
-- If mode is "RNA" → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
-
-**⚠️ KNOWN ISSUE: If mode="CDNA" but agent switches to DNA skill:**
-- This indicates the conditional logic failed
-- Force manual override: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
-- Do NOT use the conditional routing if it chooses wrong skill
-
-Switch to the appropriate Dogme skill based on mode:
-- If `mode=CDNA`: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`  ← Check CDNA first (most specific)
+Dogme-only switch rules:
+- If `mode=CDNA`: `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
 - If `mode=DNA` or `mode=Fiber-seq`: `[[SKILL_SWITCH_TO: run_dogme_dna]]`
 - If `mode=RNA`: `[[SKILL_SWITCH_TO: run_dogme_rna]]`
 
@@ -380,13 +369,12 @@ Switch to the appropriate Dogme skill based on mode:
 - ❌ DO NOT spend time describing "I will parse the file"
 - ❌ DO NOT explain the steps first
 - ❌ DO NOT print warnings without executing
-- ❌ DO NOT display ANY output before switching skills
-- ❌ DO NOT call multiple tools — just get mode and switch skill
+- ❌ DO NOT display ANY output before switching skills for Dogme workflows
+- ❌ DO NOT call multiple tools before deciding the workflow family
 - ✅ DO use the work_dir from the context injection
 - ✅ DO call get_analysis_summary immediately
-- ✅ DO switch to Dogme skill IMMEDIATELY after receiving response
-- ✅ DO NOT display summary table or file listing before skill switch
-- ✅ Let the Dogme skill handle find_file and parse_csv_file calls
+- ✅ DO switch to a Dogme skill only when the workflow family is Dogme
+- ✅ DO keep non-Dogme parsing on this skill
 
 ### 2. Job Verification and Mode-Aware Routing
 
@@ -396,45 +384,24 @@ Once you have the workflow directory, get the analysis summary first:
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-The summary includes the job's **mode** (DNA, RNA, or CDNA). Based on the mode, switch to the appropriate analysis interpretation skill:
+The summary includes the job's **workflow family** via `workflow_key`, plus **mode** for Dogme workflows.
 
-**Mode → Analysis skill:**
-- CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`  ← Check CDNA first
+**Workflow family → next action:**
+- `reconcile_bams` → stay on this skill and summarize reconcile manifests, BAM outputs, annotation files, and reports
+- `haplotype_with_vcf` → stay on this skill and summarize haplotyped BAMs plus summary TSVs
+- `wf_pore_c` → stay on this skill and summarize contact-map outputs
+- `dogme` or missing → use `mode` to switch to the Dogme interpretation skill
+
+**Dogme mode → analysis skill:**
+- CDNA → `[[SKILL_SWITCH_TO: run_dogme_cdna]]`
 - DNA or Fiber-seq → `[[SKILL_SWITCH_TO: run_dogme_dna]]`
 - RNA (direct RNA) → `[[SKILL_SWITCH_TO: run_dogme_rna]]`
 
-Each of these skills contains mode-specific guidance on:
-- What output files to look for
-- How to interpret modification data (DNA/RNA have modifications, cDNA does not)
-- What quality thresholds and metrics matter
-
 **⚠️ CRITICAL: After receiving the analysis summary response:**
-- ❌ DO NOT display/show the summary output
-- ❌ DO NOT say "Here's the job summary" or "Files available"
-- ❌ DO NOT describe the file counts or statistics
-- ✅ DO immediately execute [[SKILL_SWITCH_TO: ...]] with NO other output
-- ✅ Let the Dogme skill handle all analysis and presentation
-
-**Example - CORRECT flow:**
-```
-User: "analyze job UUID xyz"
-
-[INTERNALLY: Call get_analysis_summary, receive mode=CDNA]
-[Do NOT display the response]
-
-[[SKILL_SWITCH_TO: run_dogme_cdna]]
-```
-
-**Example - INCORRECT flow (don't do this):**
-```
-User: "analyze job UUID xyz"
-
-[Call get_analysis_summary, receive mode=CDNA]
-[DISPLAY: "Job jamshid (UUID: xyz) has 12 CSV files, 1 BED file..."]  ❌ WRONG
-[Then say: "Now analyzing..." or "Let me parse the key files..."] ❌ WRONG
-
-[[SKILL_SWITCH_TO: run_dogme_cdna]]
-```
+- ❌ DO NOT dump raw summary JSON to the user
+- ❌ DO NOT force non-Dogme workflows into Dogme skills
+- ✅ DO keep non-Dogme workflow analysis on this skill
+- ✅ DO switch immediately only for Dogme workflows that need mode-specific interpretation
 
 **CRITICAL: This is a READ-ONLY skill for normal analysis. The single exception is the local allowlisted BED-count utility described above, which should run directly through the dedicated script tool without approval and without Dogme/Nextflow submission semantics.**
 

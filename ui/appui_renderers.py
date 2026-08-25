@@ -8,7 +8,121 @@ import plotly.graph_objects as go
 import streamlit as st
 
 
-def _render_md_with_dataframes(md: str, block_id: str, section: str):
+def _looks_like_downloadable_project_path(path_value: str) -> bool:
+    cleaned = str(path_value or "").strip().strip('"\'`')
+    if not cleaned:
+        return False
+    lowered = cleaned.lower()
+    if lowered.startswith(("http://", "https://")):
+        return False
+    if cleaned.startswith("/"):
+        file_name = Path(cleaned).name
+        if not file_name or "." not in file_name:
+            return False
+        return True
+    return bool(re.match(r"^(workflow\d+|summaries|data)(?:/|$)", cleaned, re.IGNORECASE))
+
+
+def _extract_downloadable_project_paths(md: str) -> list[str]:
+    text = str(md or "")
+    candidates: list[str] = []
+
+    for inline_code in re.findall(r"`([^`\n]+)`", text):
+        if _looks_like_downloadable_project_path(inline_code):
+            candidates.append(inline_code.strip())
+
+    for raw_path in re.findall(r"(?<![\w])(?:/[^\s`<>()\[\]{}\"']+|(?:workflow\d+|summaries|data)/[^\s`<>()\[\]{}\"']+)", text, flags=re.IGNORECASE):
+        if _looks_like_downloadable_project_path(raw_path):
+            candidates.append(raw_path.strip())
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return ordered
+
+
+def _download_filename_from_headers(headers: dict | None, fallback_path: str) -> str:
+    content_disposition = str((headers or {}).get("content-disposition") or "")
+    match = re.search(r'filename="?([^";]+)"?', content_disposition, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return Path(str(fallback_path or "")).name or "download"
+
+
+def _should_render_inline_download_control(path_value: str) -> bool:
+    lower_path = str(path_value or "").strip().lower()
+    if not lower_path:
+        return False
+
+    raw_sequence_suffixes = (
+        ".fastq",
+        ".fastq.gz",
+        ".fq",
+        ".fq.gz",
+        ".bam",
+        ".cram",
+        ".sam",
+        ".pod5",
+        ".fast5",
+    )
+    return not lower_path.endswith(raw_sequence_suffixes)
+
+
+def _project_file_download_url(api_url: str, project_id: str, path_value: str) -> str:
+    from urllib.parse import quote
+
+    base_url = str(api_url or "").rstrip("/")
+    encoded_path = quote(str(path_value or ""), safe="")
+    return f"{base_url}/projects/{project_id}/files/download?path={encoded_path}"
+
+
+def _render_project_file_download_controls(
+    md: str,
+    *,
+    block_id: str,
+    section: str,
+    api_url: str | None = None,
+    project_id: str | None = None,
+    request_fn=None,
+):
+    """Render download controls for project file paths found in markdown.
+
+    Avoid eager file fetches while rendering chat: inline controls should never
+    download multi-GB project assets just to paint a button.
+    """
+    if not api_url or not project_id or request_fn is None:
+        return
+
+    def _render_link_button(*, label: str, url: str, key: str) -> None:
+        try:
+            st.link_button(label=label, url=url, key=key)
+        except TypeError:
+            st.link_button(label=label, url=url)
+
+    for index, path_value in enumerate(_extract_downloadable_project_paths(md)):
+        if not _should_render_inline_download_control(path_value):
+            continue
+
+        file_name = Path(path_value).name or "download"
+        _render_link_button(
+            label=f"⬇️ Download {file_name}",
+            url=_project_file_download_url(api_url, project_id, path_value),
+            key=f"_project_download_{block_id}_{section}_{index}",
+        )
+
+
+def _render_md_with_dataframes(
+    md: str,
+    block_id: str,
+    section: str,
+    *,
+    api_url: str | None = None,
+    project_id: str | None = None,
+    request_fn=None,
+):
     """Render markdown while converting pipe tables to interactive dataframes."""
     lines = md.splitlines(keepends=True)
     buf_text: list[str] = []
@@ -19,6 +133,14 @@ def _render_md_with_dataframes(md: str, block_id: str, section: str):
         chunk = "".join(buf_text).strip()
         if chunk:
             st.markdown(chunk)
+            _render_project_file_download_controls(
+                chunk,
+                block_id=block_id,
+                section=section,
+                api_url=api_url,
+                project_id=project_id,
+                request_fn=request_fn,
+            )
         buf_text.clear()
 
     def flush_table():
@@ -2011,7 +2133,12 @@ def _build_plotly_figure(chart_spec: dict, df: pd.DataFrame, df_label: str, plot
 
 
 def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_template: str):
-    """Render AGENT_PLOT charts."""
+    """Render AGENT_PLOT charts.
+
+    Uses the per-project dataframe index for O(1) df_id resolution instead of
+    scanning all blocks on every render. Falls back to the legacy scan path if
+    the index is not available (e.g., during isolated tests).
+    """
     charts = payload.get("charts", [])
     if not charts:
         st.info("No chart specifications found in this plot block.")
@@ -2022,13 +2149,41 @@ def _render_plot_block(payload: dict, all_blocks: list, block_id: str, plotly_te
         key = (chart.get("df_id"), chart.get("type"))
         groups[key].append(chart)
 
+    # Try to use the per-project dataframe index for fast resolution.
+    # Guard against isolated tests that mock `st` without session_state.
+    project_id = ""
+    try:
+        if hasattr(st, "session_state"):
+            project_id = str(st.session_state.get("active_project_id") or "").strip()
+    except Exception:
+        project_id = ""
+    use_index = bool(project_id)
+
+    try:
+        from appui_active_state import resolve_df_by_index, build_df_index_from_blocks
+        if use_index and st.session_state.get(f"_df_index_{project_id}") is None:
+            # Build index on first use if not already built
+            all_blocks_list = st.session_state.get("blocks", [])
+            build_df_index_from_blocks(project_id, all_blocks_list)
+    except (ImportError, ModuleNotFoundError, AttributeError):
+        use_index = False
+
     chart_idx = 0
     for (df_id, chart_type), chart_group in groups.items():
         if df_id is None:
             st.warning("Chart missing DataFrame reference (df=DFN).")
             continue
 
-        df, df_label = _resolve_df_by_id(df_id, all_blocks)
+        # Resolve dataframe using index or legacy scan
+        if use_index:
+            try:
+                from appui_active_state import resolve_df_by_index
+                df, df_label = resolve_df_by_index(df_id, project_id)
+            except (ImportError, ModuleNotFoundError):
+                df, df_label = _resolve_df_by_id(df_id, all_blocks)
+        else:
+            df, df_label = _resolve_df_by_id(df_id, all_blocks)
+
         if df is None or df.empty:
             st.warning(f"DataFrame DF{df_id} not found in conversation history.")
             continue
@@ -2135,13 +2290,13 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
                 import base64
 
                 image_bytes = base64.b64decode(image_b64)
-                st.image(image_bytes, caption=caption, use_container_width=True)
+                st.image(image_bytes, caption=caption, width="stretch")
                 continue
             if not Path(image_path).exists():
                 st.caption(f"{caption}: {image_path}")
                 continue
             _safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", f"wf_img_{block_id}_{step_suffix}_{image_idx}")
-            st.image(image_path, caption=caption, use_container_width=True)
+            st.image(image_path, caption=caption, width="stretch")
 
     charts = payload.get("charts", [])
     dfs = payload.get("_dataframes", {})

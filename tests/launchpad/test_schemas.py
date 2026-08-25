@@ -24,8 +24,31 @@ class TestSubmitJobRequest:
         )
         assert req.project_id == "proj-1"
         assert req.sample_name == "sample1"
+        assert req.workflow_key == "dogme"
         assert req.mode == "DNA"
         assert req.input_type == "pod5"  # default
+
+    def test_normalizes_workflow_key(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="sample1",
+            workflow_key="DOGME",
+            mode="DNA",
+            input_directory="/data/pod5",
+        )
+
+        assert req.workflow_key == "dogme"
+
+    def test_non_dogme_workflow_allows_missing_mode(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="sample1",
+            workflow_key="wf_pore_c",
+            input_directory="/data/reads.fastq.gz",
+        )
+
+        assert req.workflow_key == "wf_pore_c"
+        assert req.mode is None
 
     def test_genome_string_normalised_to_list(self):
         req = SubmitJobRequest(
@@ -52,6 +75,15 @@ class TestSubmitJobRequest:
         with pytest.raises(ValidationError):
             SubmitJobRequest(
                 project_id="p", sample_name="", mode="DNA",
+                input_directory="/d",
+            )
+
+    def test_dogme_requires_mode(self):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                workflow_key="dogme",
                 input_directory="/d",
             )
 
@@ -91,8 +123,24 @@ class TestSubmitJobRequest:
         )
         assert req.modkit_filter_threshold == 0.9
         assert req.per_mod == 5
-        assert req.accuracy == "sup"
+        assert req.accuracy == "hac"
         assert req.max_gpu_tasks is None
+
+    def test_rna_default_accuracy_is_sup(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="RNA",
+            input_directory="/d",
+        )
+
+        assert req.accuracy == "sup"
+
+    def test_cdna_default_accuracy_is_hac(self):
+        req = SubmitJobRequest(
+            project_id="p", sample_name="s", mode="CDNA",
+            input_directory="/d",
+        )
+
+        assert req.accuracy == "hac"
 
     def test_max_gpu_tasks_range_validation(self):
         with pytest.raises(ValidationError):
@@ -102,6 +150,44 @@ class TestSubmitJobRequest:
                 mode="DNA",
                 input_directory="/d",
                 max_gpu_tasks=17,
+            )
+
+    def test_local_max_task_cpus_range_validation(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            local_max_task_cpus=8,
+        )
+        assert req.local_max_task_cpus == 8
+
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                local_max_task_cpus=0,
+            )
+
+    def test_local_max_task_memory_gb_range_validation(self):
+        req = SubmitJobRequest(
+            project_id="p",
+            sample_name="s",
+            mode="DNA",
+            input_directory="/d",
+            local_max_task_memory_gb=48,
+        )
+        assert req.local_max_task_memory_gb == 48
+
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="p",
+                sample_name="s",
+                mode="DNA",
+                input_directory="/d",
+                local_max_task_memory_gb=0,
             )
 
     def test_slurm_requires_user_and_profile(self):
@@ -277,6 +363,7 @@ class TestJobDetailsResponse:
         resp = JobDetailsResponse(
             run_uuid="abc",
             project_id="proj-1",
+            workflow_key="dogme",
             workflow_index=1,
             workflow_alias="workflow1",
             workflow_folder_name="workflow1",
@@ -296,6 +383,30 @@ class TestJobDetailsResponse:
         assert resp.error_message is None
         assert resp.workflow_alias == "workflow1"
         assert resp.workflow_display_name == "sample-a-renamed"
+
+    def test_allows_nullable_mode_for_non_dogme_rows(self):
+        resp = JobDetailsResponse(
+            run_uuid="abc",
+            project_id="proj-1",
+            workflow_key="wf_pore_c",
+            workflow_index=1,
+            workflow_alias="workflow1",
+            workflow_folder_name="workflow1",
+            workflow_display_name="sample-a-renamed",
+            sample_name="s1",
+            mode=None,
+            status="COMPLETED",
+            progress_percent=100,
+            submitted_at=None,
+            started_at=None,
+            completed_at=None,
+            output_directory=None,
+            error_message=None,
+            report=None,
+        )
+
+        assert resp.workflow_key == "wf_pore_c"
+        assert resp.mode is None
 
 
 class TestJobSubmitResponse:

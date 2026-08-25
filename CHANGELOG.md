@@ -1,12 +1,531 @@
-## [Unreleased]
+## [3.7.6] - 2026-08-11
+
+### Features
+
+- **Added an optional separate rsync transfer host for remote SLURM profiles:** Remote SSH profiles can now use a dedicated transfer host for input staging and output downloads while continuing to submit and monitor SLURM jobs through the existing SSH host. When omitted, rsync falls back to the SLURM host and reuses the profile's credentials, port, and remote paths.
+- **Added parallel multi-sample DOGME batches:** Users can submit two or more explicit `sample_name: /path` or `sample_name=/path` entries in one Dogme request. A batch shares its assay mode, reference, execution target, and resource settings, presents one approval gate, and launches isolated per-sample runs with the requested submission parallelism while respecting the server-wide execution capacity.
+- **Added cDNA FASTQ batch support:** Explicit batches of `.fastq`, `.fastq.gz`, `.fq`, or `.fq.gz` inputs now configure each sample for Dogme's `fastqCDNA` entry point. Each batch entry remains one FASTQ input and receives its own run/output directory.
+- **Added batch lifecycle visibility and controls:** Task Center now projects a DOGME batch parent with per-sample child statuses, including partial completion. Users can cancel a batch through `POST /dogme-batches/{gate_block_id}/cancel`; completed outputs are preserved while pending and active siblings are cancelled.
+- **Added failed-sample batch retries:** `POST /dogme-batches/{gate_block_id}/retry` creates a linked batch containing only failed or cancelled samples. The default review-first mode creates an editable approval gate; `?review_before_submit=false` reuses the original shared settings and begins submission directly. Original runs and outputs are retained for auditability.
+- **Added Dogme revision selection to the approval gate:** Users can choose the default Dogme release or the `devel` branch before submission. Selecting `devel` forwards an explicit Nextflow `-r devel` revision for both local and remote execution.
 
 ### Bug Fixes
 
+- **Preserved remote profile transfer hosts through the Cortex proxy:** Remote profile create and update payloads now forward `transfer_host` to Launchpad instead of silently filtering it from the request.
+- **Resolved shared-project sources for cross-project BAM reconciliation:** Reconcile requests now verify access to each named project and resolve every source workflow under its owner's project directory, allowing an owned workflow and a workflow shared with the requester to be reconciled together. Owner-qualified references such as `owner:project:workflow7` disambiguate projects with the same slug.
+- **Preserved Dogme input modes when resuming failed runs:** Job records now retain the submitted input type and entry point, so new BAM remap jobs resume as `bam`/`remap` and cDNA FASTQ jobs resume as `fastq`/`fastqCDNA` for both local and SLURM execution. Legacy runs with a recorded FASTQ file path are also recovered as cDNA FASTQ runs instead of falling back to POD5.
+- **Fixed remote staging for explicitly named local FASTQs:** Stage-only requests now preserve paths introduced with `using`, recognize profile names followed by biological qualifiers such as `on hpc3 human CDNA`, and mark local-source validation steps so the executor does not fall back to Analyzer's workflow-only file lookup. This keeps staging requests on the selected SLURM profile instead of failing before approval or falling back to local multi-FASTQ submission.
+- **Fixed ENCODE FASTQ follow-ups dropping file lookups:** Follow-up requests that started from an experiment-results dataframe now preserve `get_files_by_type` calls, allowing the agent to retrieve FASTQ accessions. Redundant file lookups remain suppressed when the injected dataframe already contains file rows.
+- **Fixed multi-sample DOGME approval handling:** Explicit batch sample names and all input FASTQs are now preserved when a legacy approval path is used. Batch approval forms display shared genome, hpc3/SLURM, resource, and parallelism settings, apply approved shared settings to every sample, and retain the full batch payload instead of collapsing it into one synthetic single-sample run.
+- **Recovered accepted remote submissions after a response timeout:** SLURM jobs now carry their workflow-plan ID through Launchpad. When the submit response times out after Launchpad has accepted the job, Cortex recovers its run UUID and continues normal status polling instead of showing a false failed workflow.
+- **Queued remote staging beyond transfer capacity:** Large SLURM batches now accept staging requests after the configured concurrent-transfer limit is reached. Excess samples remain trackable as queued staging tasks and start automatically as earlier transfers finish, rather than failing with HTTP 429.
+- **Fixed Task Center duplicate action keys during active batches:** Removed nested Streamlit task-dock fragments that could render the same task action button twice and raise `StreamlitDuplicateElementKey`.
+- **Fixed Dogme devel revision submissions through MCP:** The approval-selected `dogme_revision` is now accepted by the MCP tool surface and forwarded to Launchpad, preventing submission failures caused by an unexpected keyword argument.
+
+### Tests
+
+- **Added focused DOGME batch coverage:** Tests cover request detection, sample/path validation, cDNA FASTQ parameter extraction, one approval payload, concurrent submission coordination, terminal status aggregation, task projection, cancellation, and retry cloning.
+
+## [3.7.5] - 2026-07-24
+
+### Features
+
+- **Expanded administrator operations:** Admins can cancel other users' active remote result-sync and ENCODE downloads, list all projects including archived projects, archive or permanently delete projects, and view all users' SSH connection profiles (read-only for profiles owned by others) through the Admin UI.
+
+- **Automatically discover complete reference folders:** At service startup, AGOUTIC now registers new `$AGOUTIC_DATA/references/<name>/` directories containing exactly one FASTA-family file and one GTF-family file. Discovered references appear in the UI catalog and use the normal remote staging flow; explicit catalog entries remain authoritative, while incomplete or ambiguous folders are skipped.
+
+### Bug Fixes
+
+- **Fixed multi-experiment ENCODE file requests omitting later accessions:** Explicit FASTQ, BAM, POD5, and file-download requests now bypass first-pass model routing (stage 360 early override) and enumerate every requested `ENCSR` accession deterministically via stage 800 override, even when previous ENCODE query data is in context. Results from multiple experiments are combined into a single "Requested FASTQ files (N)" dataframe with an Experiment column for easy comparison, then released requested files are collected into the approval-gated download plan. Per-experiment MCP sessions ensure one failing lookup doesn't block the others. Debug fields `auto_calls_count`, `dispatched_calls`, and `executed_result_counts` surface routing issues in chat debug output.
+- **Recognized explicit existing remote input directories:** Requests such as `existing remote POD5 directory: /path` now preserve the remote path and use it directly, avoiding unnecessary staging or copying.
+- **Recovered stale saved SSH profile IDs by nickname:** Remote execution now resolves a configured profile nickname when its stored profile ID no longer exists, allowing renamed or recreated profiles to be selected correctly.
+- **Fixed remote BAM remap path detection:** Explicit remote file phrasing such as `remote unmapped.bam file <path> ... on hpc3` now preserves the source file as a direct remote input, preventing fallback staging from substituting the local project data directory or an empty cache path.
+- **Preserved completed remote workflow status when result sync fails:** A failed local copy-back now remains a retryable `transfer_failed` state with its rsync error detail, rather than marking an otherwise completed SLURM workflow as failed in status cards and notifications.
+- **Fixed remote reference paths for reused staged samples:** Dogme SLURM configuration now derives the remote cache path for every requested reference genome missing from reused staged-sample metadata, preventing Nextflow from falling back to a local FASTA/GTF path when a run selects a different reference such as GRCh38.
+- **Restored older-message loading for large projects with pending workflows:** Chat history pagination now renders independently of the live task dock, so pending workflow tasks no longer hide the control; older block pages are fetched on demand beyond the initial history window.
+- **Made long remote staging uploads resilient to transient SSH disconnects:** Direct and local-auth-broker `rsync` transfers now send SSH keepalives and automatically resume up to two recognized transport failures (including remote-host closures, resets, and broken pipes) from the existing `.rsync-partial` data while preserving the overall transfer deadline.
+- **Extended local SSH broker logins to 72 hours by default:** The local-auth session lifetime now defaults to 259200 seconds, preventing long remote staging operations from losing their authenticated broker session; deployments can still override `LOCAL_AUTH_SESSION_TTL_SECONDS`.
+- **Replaced deprecated `st.components.v1.html` with `st.html`:** Resolves Streamlit 1.51+ deprecation warning (`st.components.v1.html will be removed after 2026-06-01`). Now using Streamlit 1.58.0 going forward.
+- **Fixed duplicate Streamlit element key crashes in task dock and live block fragments:** Removed the fixed inner `key="task_dock"` container from `_render_task_dock_sections()` and the explicit `key=` argument from `_render_live_block_fragment()`, both of which collided when fragment timers overlapped with full-page reruns. Retasked CSS styling to the outer project-scoped mount containers instead.
+- **Fixed remote jobs appearing stuck in PENDING after login:** The UI live-status helper (`ui/appui_services.py`) was hard-capping every `/jobs/{run_uuid}/status` request at 5 seconds, causing Streamlit to silently fall back to stale block payloads when Cortex → Launchpad → SSH polls took longer. The cap is now removed so the configured `LIVE_JOB_STATUS_TIMEOUT_SECONDS` (default 60 s) is honored.
+- **Fixed SLURM scheduler poll failures masking active result copy-back:** When `SlurmBackend.check_status()` raised an exception during SSH/sacct polling, it returned a generic "Failed to poll scheduler" message even when the job was already in `downloading_outputs`. The fallback now preserves transfer state, progress detail, and workflow usage for active sync jobs.
+- **Fixed sidebar token chart crashing on broken pyarrow/brotli environments:** Wrapped `st.line_chart` rendering in `_render_token_usage_chart()` with a best-effort try/except so import or ABI failures do not crash the entire UI.
+- **Fixed inline project file download buttons failing on older Streamlit versions:** `st.link_button(label=..., url=..., key=...)` now retries without `key=` when the Streamlit version does not accept it, preventing `TypeError` in markdown renderers.
+
+### Performance
+
+- **Streamlit chat now separates active live cards from cold project history:** Added a per-project active-state index in `ui/appui_active_state.py`, switched project block refresh to incremental `since_seq` fetches in `ui/appui_tasks.py`, and updated `ui/appUI.py` so idle projects stay on a slow discovery cadence while active execution, staging, and download cards render through dedicated live fragment paths instead of keeping the whole visible chat window hot.
+- **Task dock now follows the same discovery-versus-live model as chat:** `ui/appUI.py` now uses project-scoped task-dock caches plus a split between idle discovery and active task rendering, reducing repeated `/projects/{project_id}/tasks` work on old projects while still letting active work update automatically.
+- **Completed, failed, cancelled, stale, and synced workflow history now stays cold unless reactivated:** The UI now tracks active run UUIDs and transfer states explicitly, follows the newest rerun attempt rather than stale history, and stops polling terminal jobs/downloads/staging tasks until a rerun, resume, or sync transition makes that specific workflow active again.
+- **Reduced UI RAM and rerender cost for large project histories:** Added TTL-based Session State eviction for non-figure download/export payloads in `ui/appui_cache_ttl.py`, switched plot/dataframe lookup onto a per-project dataframe index in `ui/appui_renderers.py`, and made terminal logs plus embedded dataframe sections lazier in `ui/appui_block_part1.py` and `ui/appui_block_part2.py` so old histories cost less CPU and memory.
+- **Execution status cards are now structured for full active-card fragmentization:** `ui/appui_block_part2.py` now separates the live execution-status body from the mutation/action controls, keeping the fragment boundary cleaner for per-card live updates and future `parallel=True` adoption on read-only active fragments.
+
+### Tests
+
+- **Added remote transfer recovery regression coverage:** Focused Launchpad tests now reproduce a remote-host closure/broken-pipe failure and verify both direct and local-auth-broker `rsync` paths resume with their preserved partial directory and SSH keepalive options.
+- **Added focused UI regression coverage for the new refresh model:** `tests/ui/test_app_source_helpers.py` now covers the idle discovery interval, live-card classification for execution/staging/download blocks, and the helper wiring needed by the fragmentized execution-card path. Focused validation continues to use `tests/cortex/test_block_endpoints.py` alongside the UI suite to keep the incremental block-stream contract covered.
+
+- **Added focused admin-control coverage:** Tests cover admin-only project and active-download inventories, cross-user project visibility, and UI API helper filtering.
+
+
+## [3.7.4] - 2026-06-24
+
+### Features
+
+- **Analysis reports are now saved to the workflow folder:** After a Dogme job completes or `/reanalyze` is run, the LLM-generated markdown analysis report is written as `<workflowN>_<YYYYMMDD_HHMMSS>_analysis.md` in the workflow directory. Each reanalyze creates a new timestamped file so historical reports accumulate. Implemented via `_save_analysis_report()` in `cortex/job_polling.py`, called from both the auto-trigger path and `execute_manual_workflow_analysis()`. Atomic writes use `tempfile.mkstemp` + `os.replace`; failures are logged but never break the analysis flow.
+- **Added LLM-driven `/summarize` workflow report comparisons:** AGOUTIC can now compare existing saved workflow analysis markdown reports across one or more workflows, or across all workflow folders in the active project that already contain saved `*_analysis.md` files. The summarize path resolves workflow targets deterministically, loads the latest saved report per workflow, applies repo-managed summary prompts with optional workflow-family overrides, accepts optional focus text such as `/summarize workflow7 workflow8 -- mapping and QC`, returns a combined markdown comparison in chat, and saves the same output under a project-level `summaries/` directory.
+- **Added chat-driven project file downloads for saved summaries and workflow files:** Assistant responses that mention downloadable project paths now render a UI download control, Cortex exposes a project-scoped authenticated file download endpoint for files inside the active project tree, and natural-language requests such as `download workflow10/report.html` or `download workflow-summary-20260624_163203.md` now resolve existing local project files without going through the broader external-download planning flow.
+
+### Bug Fixes
+
+- **Fixed ENCODE dataframe follow-up crash caused by empty payloads in history rows:** `_HistoryRow` in `cortex/chat_stages/history.py` now includes `id`, `status`, and original `payload_json` (JSON string) fields required by `conversation_state.py`. Previously, missing `id`/`status` fields caused `AttributeError` and `payload_json` was set to `{}` instead of the original JSON string, making ENCODE dataframe follow-up questions return hallucinated cell types (e.g., C2C12 instead of HepG2).
+- **Fixed stale workflow-plan state after local copyback:** The job-status proxy now reconciles persisted `WORKFLOW_PLAN` steps when it observes a terminal synced run (`COMPLETED + outputs_downloaded`). Previously the Nextflow card showed completed but the top `run_dogme` / `analyze_results` cards could remain stuck in `RUNNING` / `PENDING`. Implemented via `_repair_terminal_job_and_workflow_state_from_status()` in `cortex/app.py`.
+- **Fixed "dive deeper" follow-up suggestions appearing in saved analysis reports:** Interactive suggestion text appended to auto-analysis responses is now stripped before writing to disk, so `<workflowN>_analysis.md` files contain only the actual analysis content.
+- **Fixed history query ordering to keep newest rows instead of oldest:** History query now fetches rows with `seq.desc()` and reverses the list for chronological order. Previously `seq.asc()` kept the oldest 60 rows, losing recent conversation context.
+- **Added missing block types to history filter:** `WORKFLOW_PLAN` and `PENDING_ACTION` block types are now included in the history query filter alongside `DATAFRAME`, ensuring workflow plans and pending actions appear in chat history.
+- **Fixed UI error messages disappearing immediately after chat failures:** `handle_active_chat()` in `ui/appui_chat_runtime.py` now uses a `should_rerun` guard that only triggers `st.rerun()` on successful responses, not on failures. 500 errors and other chat failures now remain visible for the user to read.
+- **Fixed Remote Profiles Test Connection failing with 401 Not authenticated:** The connection test action dispatched its HTTP request through a background thread, which lost Streamlit session context and sent an unauthenticated request to Cortex. Auth kwargs are now captured on the main thread before dispatching, matching the unlock/sync path. Added regression tests in `tests/ui/test_auth_helpers.py`.
+- **Fixed compressed filename loss during ENCODE downloads:** `tool_dispatch.py` now prefers actual filenames from download URLs/hrefs over synthesized ones, preserving `.fastq.gz` extensions in approval gates and on disk.
+- **Fixed truncation of .fastq.gz paths in Dogme approval gates:** Updated relative path extraction regex in `job_parameters.py` to recognize `.fastq.gz` and `.fq.gz`, preventing them from being stripped to `.fastq`.
+
+### Tests
+
+- **Added unit tests for edgePythonMCP module:** Coverage for MCP tool schemas, parameter extraction, and server initialization in `tests/edgepython_mcp/`.
+- **Added 328 regression tests across 11 cortex modules:** Pure-function coverage (`test_plot_routing`, `test_remote_stage_status`, `test_path_helpers`, `test_edgepython_plot_params`, `test_chat_context`, `test_plan_templates`) and regex/string-parsing coverage (`test_dataframe_transforms`, `test_analysis_helpers`, `test_plan_classifier`, `test_plan_params`, `test_tag_parser`), bringing cortex test coverage to 5% overall.
+- **Added regression tests for history stage optimization in `tests/cortex/test_history_stage.py`:** Tests verify that `payload_json` is preserved as original JSON string for dataframe blocks, the 60-row window keeps newest rows (not oldest), and `_HistoryRow` includes `id`/`status` fields required by `conversation_state.py`.
+- **Added regression test for UI error visibility in `tests/ui/test_app_source_helpers.py`:** Verifies that `handle_active_chat()` does not trigger immediate rerun on chat failure, keeping error messages visible.
+
+### Performance
+
+- **History query optimization (continued from 3.7.2):** History rows now select only required columns (`id`, `type`, `status`, `payload_json`, `seq`) instead of all block columns, reducing database I/O and memory usage per chat turn.
+
+## [3.7.3] - 2026-06-14
+
+### Features
+
+- **Local-first Streamlit UI with remote Cortex support:** The UI can now run on a user's local machine and talk to a remote Cortex server. Login uses a browser-initiated OAuth flow that returns an auth code to the local Streamlit page, which exchanges it for a bearer session. Hosted Streamlit continues to use the existing cookie-based login flow.
+- **Cortex accepts bearer-token sessions alongside cookies:** `AuthMiddleware` in `cortex/middleware.py` now resolves authentication from either the existing `session` cookie or an `Authorization: Bearer ...` header, attaching both the user and transport type to `request.state`.
+- **Local-client auth exchange endpoint:** Cortex exposes `/auth/login?client_mode=local&return_to=...` for local Streamlit clients and `/auth/exchange` to convert a short-lived browser redirect code into a bearer session. Return targets are validated against loopback hosts or an allowlist (`LOCAL_UI_ALLOWED_ORIGINS`).
+- **Cortex proxies remote profile management:** New endpoints under `/remote-profiles/*` proxy SSH profile CRUD, connection testing, and local auth-session operations through to Launchpad. The UI no longer needs direct Launchpad REST access for these flows.
+- **Streamlit auth helpers are transport-neutral:** `ui/auth.py` now bootstraps bearer tokens from the auth-code callback, builds generic request kwargs (`build_auth_request_kwargs`), and merges them into all authenticated requests including chat, file upload, and share operations.
+- **Workflow analysis auto-generation now includes key result-file parsing:** When the LLM emits only a `get_analysis_summary` call for workflow-analysis skills (Dogme DNA/RNA/cDNA, haplotype, DE, etc.), Cortex now also auto-generates `find_file` + `parse_csv_file` calls for `final_stats` and `qc_summary`, so users get parsed metrics instead of file-count summaries.
+- **Override detection stage promotes LLM-only summary tags:** When the LLM emits only `get_analysis_summary` without concrete file-parsing calls, `_promote_llm_workflow_summary_tags()` in `overrides.py` converts it into a full auto-generated call set including `find_file` + `parse_csv_file` for key result files.
+- **New `/analyze [workflow]` slash command:** Alias for `/reanalyze`, matching the natural-language "analyze workflowN" path that was already supported. Updated in help catalog, topic guides, and skill help overrides.
+
+### Bug Fixes
+
+- **Prevented startup diagnostics from printing multiple times in the UI by tracking state in `st.session_state`.**
+- **Removed direct Launchpad REST dependency from the Streamlit UI:** The remote profiles page (`ui/pages/remote_profiles.py`) and shared SSH-profile loader (`ui/appui_services.py`, `ui/appUI.py`) now route through Cortex instead of calling `LAUNCHPAD_REST_URL` directly. End-user environments no longer need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET`.
+- **Chat/upload/share runtime uses generic auth kwargs:** Direct request calls in `ui/appui_chat_runtime.py` that previously built `cookies={"session": ...}` manually now consume the transport-neutral auth helper, preventing broken requests when running local Streamlit against remote Cortex.
+- **Increased default memory for `doradoTask` from 9 GB to 32 GB in Nextflow configuration, preventing out-of-memory failures during dorado basecalling.**
+- **Fixed transient `DetachedInstanceError` flashes in the UI by disabling attribute expiration on commit for sync database sessions, ensuring ORM blocks remain readable after being committed and closed.**
+- **Dogme DNA/RNA/cDNA skills now instruct the LLM to produce detailed first-pass analysis rather than stopping at file-count summaries:** All three Dogme skill docs updated with anti-pattern guards ("DON'T stop after reporting file counts"), explicit section requirements (Overall Assessment, Key Metrics, QC Concerns, Recommended Next Steps), and evidence-based interpretation guidance.
+
+### Tests
+
+- **Added bearer-token and exchange flow coverage in `tests/cortex/test_auth.py`:** New tests for `/auth/me` with bearer headers, logout via bearer token, heartbeat via bearer token, login return-target validation, flow-cookie presence, auth-code exchange, and single-use enforcement.
+- **Added focused remote-profile proxy tests in `tests/cortex/test_remote_profile_proxy.py`:** Tests verify that Cortex proxies list, create, and auth-session endpoints to Launchpad with the authenticated user's identity injected server-side.
+- **Extended UI auth helper tests in `tests/ui/test_auth_helpers.py`:** New coverage for bearer-token usage in `get_current_user_state`, local-browser login link generation, auth-code bootstrap storing a bearer token, and `make_authenticated_request` attaching bearer headers.
+- **Added regression coverage for workflow-analysis auto-generation of `find_file` + `parse_csv_file` follow-ups in `tests/cortex/test_auto_generate_data.py`.**
+- **Added regression coverage for override-detection promotion of LLM-only summary tags, generic workflow analysis intent detection, and `/analyze` slash command parsing in `tests/cortex/test_chat_data_calls.py`, `tests/cortex/test_skill_manifest.py`, and `tests/cortex/test_workflow_commands.py`.**
+- **Added regression test for sync-session attribute retention after commit/close in `tests/test_common_database.py`.**
+
+### Documentation
+
+- **Updated README.md to document hosted versus local Streamlit topologies:** Added setup instructions for running the UI against a remote Cortex server, described the local-client auth flow, and noted that remote profile management is proxied through Cortex.
+- **Updated CONFIGURATION.md with UI/auth topology variables:** Documented `AGOUTIC_API_URL`, `FRONTEND_URL`, `GOOGLE_REDIRECT_URI`, `LOCAL_UI_ALLOWED_ORIGINS`, and clarified which variables are server-side only (`LAUNCHPAD_REST_URL`, `INTERNAL_API_SECRET`).
+- **Updated UI agent-response section header from "Summary first, details on demand" to "Analysis summary and details".**
+
+### Infrastructure
+
+- **UI now has its own standalone `VERSION` file (`ui/VERSION`):** The Streamlit UI reads version from its own file instead of the repo root, enabling independent UI-only releases that can diverge from the main Agoutic version.
+
+## [3.7.2] - 2026-06-09
+
+## [3.7.2] - 2026-06-09
+
+### Performance
+
+- **Phase 1 — Prompt template caching:** Prompt templates and skill text are now cached at module level to eliminate repeated disk I/O on every chat turn. Templates are loaded once at import time rather than read from disk per-request.**
+- **Phase 2 — Tool contract caching:** Tool contract formatting is cached alongside schema fetches, avoiding redundant serialization of MCP tool schemas on each tool-call round.**
+- **Phase 3 — History query optimization:** Conversation history queries now select only the columns actually used (`type`, `payload_json`, `seq`) and limit to 60 rows (20 turns × 3 block types) instead of fetching all blocks for every chat turn.**
+- **Phase 4 — Session consolidation:** The setup stage merges three separate database sessions into one, reducing connection acquisitions from three to one per request.**
+- **Phase 5 — Blocking I/O offloading:** Blocking file I/O for image reads in `chat_dataframes` and `plan_executor` is moved to threadpool via `run_in_threadpool`, preventing UI polling stalls.**
+- **Phase 6 — Per-request caching:** Memory context and conversation state computations are cached per-request to avoid redundant DB queries and Python-level iteration on follow-up messages. All caches are either module-level (static data) or per-request (request-scoped), with no global mutable state added beyond what already existed.**
+
+### Features
+
+- **Completed-workflow analysis is now workflow-family aware across Analyzer and Cortex: differential-expression outputs, reconcile outputs, haplotype outputs, wf-pore-c contact-map outputs, and Dogme outputs now generate different first-pass summaries instead of all falling through the Dogme-oriented auto-analysis path.**
+
+### Bug Fixes
+
+- **Automatic post-run analysis now routes `reconcile_bams` and `haplotype_with_vcf` workflows by `workflow_key` instead of incorrectly forcing them through Dogme DNA/RNA/cDNA skill selection; Analyzer also infers those workflow families from their on-disk layouts when older rows still report `dogme`, and `get_analysis_summary(work_dir=...)` now supports planner-owned differential-expression workflow folders that have no Launchpad job row.**
+- **Manual workflow analysis now allows terminal failed jobs to be analyzed if the local workflow directory contains result artifacts, preventing "only available after the workflow finishes" errors for jobs that failed but produced partial outputs.**
+- **Natural-language file listing now recognizes bare workflow targets (e.g., `list files workflow4`) as explicit targets, preventing them from drifting into the currently active workflow context.**
+- **Analyzer MCP tool now exposes the full structured `AnalysisSummary` contract (including `workflow_key`, `parsed_reports`, and `workflow_summary`) to Cortex, ensuring that auto-analysis routing correctly identifies non-Dogme workflows even when tracked metadata is stale.**
+- **Updated LLM models.**
+
+### Documentation
+
+- **Updated the analyze-job-results skill and help surfaces to describe workflow-family-aware result analysis, including differential-expression workflow folders, rather than treating completed-workflow analysis as Dogme-only.**
+
+## [3.7.1] - 2026-06-01
+
+### Features
+
+- **Added deterministic workflow cleanup commands for both local and remote results: `/clean workflowN`, `/clean remote workflowN`, multi-workflow refs, and `clean workflows` now preserve each workflow root, gzip each loose `bedMethyl/*.bed` file individually, and remove only immediate-child `work/` plus `dor*` directories.**
+
+### Bug Fixes
+
+- **`/list files` now prefers tracked local workflow directories from Launchpad rows over stale remote `work_dir` context, so remote-run workflows that have local outputs no longer fail with remote-path-only analyzer lookups after commands such as `clean remote workflowN`.**
+
+- **`clean remote workflows` now expands only to tracked workflows, preventing project-wide remote cleanup from drifting into untracked local workflow folders that cannot be cleaned over SSH.**
+
+- **Both local and remote workflow cleanup now run asynchronously in Launchpad, so large `bedMethyl` gzip operations and remote SSH cleanup do not block the chat request or end in a spurious timeout error; job status/help surfaces now call out `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, and `CLEAN_FAILED`. Both local and remote workflow cleanup can now run in parallel.**
+
+### Documentation
+
+- **Updated the UI help panels, slash-command surfaces, quick reference, and README/version markers for the 3.7.1 release and the new workflow cleanup command family.**
+
+### Tests
+
+- **Added focused regression coverage for tracked-local-versus-remote `/list files` resolution and for `clean remote workflows` project-wide expansion.**
+
+### Features
+
+- **Dogme approval, submission, and staging now support single-file cDNA FASTQ intake via `fastqCDNA`: chat extraction recognizes FASTQ requests, approval gates default to FASTQ-backed cDNA when project `data/` contains a lone FASTQ, local and remote staging alias the approved sample name under `fastqs/`, and unsupported FASTQ+RNA/DNA requests now stop behind an explicit blocking choice instead of silently drifting into an invalid mode.**
+
+- **`haplotype_with_vcf` now auto-prepares VCF inputs during preflight and execution: plain `.vcf` inputs are compressed to `.vcf.gz`, missing `.tbi` or `.csi` indexes are built automatically, and the shipped environment now includes `htslib` (`bgzip`, `tabix`) plus `bcftools` so operators have standard VCF tooling available across haplotyping workflows.**
+
+- **`haplotype_with_vcf` now supports mouse founder-panel haplotyping with canonical founder alias normalization, pairwise founder restriction through repeated or comma-separated `--vcf-sample` flags, F1 shorthand such as `B6CastF1` or `B6 Cast F1`, free-text founder phrases such as `between B6 and CAST` or `B6 vs CAST`, multiallelic founder-aware assignment, per-founder split BAMs with canonical labels, and default mm39 founder VCF resolution beside the configured mm39 reference when mouse founder requests omit the VCF path.**
+
+- **`haplotype_with_vcf` now accepts cross-project workflow references such as `otherproject:workflow7`, resolving the source BAMs from that project while keeping the default output workflow in the active project unless the destination is explicitly overridden.**
+
+- **Added `scripts/cortex/maintenance_status.py` so operators can check recent user activity, running jobs, and active chats before any maintenance action. Read-only, supports plain text and JSON output, includes `--active-job-max-age` stale-row filtering for orphaned RUNNING/PENDING job records, and approximates activity from chat and job records since AGOUTIC does not track presence.**
+
+- **Added an admin-only Activity tab in the admin page showing recently active users, currently running jobs, and active chat sessions in real time, with a color-coded SAFE TO RESTART / WAIT banner. Reuses the same data collection and recommendation logic as `scripts/cortex/maintenance_status.py`. Auto-refreshes every 30 seconds with configurable interval and thresholds.**
+
+- **Added maintenance mode. Admins can toggle it ON or OFF from the Admin Activity tab, putting AGOUTIC into a state where new chat submissions, workflow/job imports, and transfer or job submissions are blocked for non-admin users while existing in-flight work continues uninterrupted. Blocked submissions return HTTP 503 with a clear error payload, a non-dismissible maintenance banner appears for all users with the configured message and optional countdown, read-only operations remain available during maintenance, the maintenance flag is exposed in `/health` for monitoring, and admins remain exempt so they can manage the maintenance window.**
+
+- **Added persistent Launchpad `STALE` job handling plus `scripts/cortex/mark_stale_jobs.py`, which marks orphaned `PENDING` or `RUNNING` job rows older than one week as `STALE` and marks stale transfer rows older than two weeks as `stale`; Cortex, Launchpad, and the UI now treat both states as terminal instead of active, project stats/UI surfaces show how many stale jobs exist in a project, and stale local-result syncs now surface an explicit retry message instead of polling forever.**
+
+- **`agoutic_servers.sh` now wires the maintenance helpers into normal operations: `start` and `restart` run stale-row cleanup automatically before services launch, and `--status` appends the maintenance readiness report instead of requiring operators to invoke the scripts manually.**
+
+### Bug Fixes
+
+- **Dogme workflow retries now use the valid Nextflow `-resume` flag instead of the non-existent `-rerun` flag when reusing an existing workflow directory, and workflow action buttons now label this operation as `Resume Workflow` in the UI to match actual behavior.**
+
+- **Haplotype founder-mode approvals now render the correct workflow-specific controls and founder subset: the approval gate no longer falls back to generic Dogme fields, and prompts such as `Haplotype mouse RNA sample B6 Cast F1 in project:workflowN` now keep the requested founder pair instead of silently expanding to every founder in the panel.**
+
+- **Haplotype execution now handles real BAM/VCF compatibility and runtime constraints more robustly: contig aliases such as `chr1` versus `1` or `chrM` versus `MT` are normalized during VCF lookup so informative sites are discovered correctly, preflight no longer times out by performing a full founder-VCF variant scan before approval, and approved haplotype runs now carry an explicit extended script timeout instead of inheriting Launchpad's 60-second default.**
+
+- **Haplotype RNA summary outputs now write wide per-feature tables instead of long `feature/label/count` rows: `*.genes.tsv` now emits `gene_id` followed by one column per assignment label plus `ambiguous` and `total`, and `*.transcripts.tsv` now emits only single-gene transcript rows as `transcript_id`, `gene_id`, per-label columns, `ambiguous`, and `total`.**
+
+- **Remote result synchronization now behaves consistently after copy-back reaches a terminal state: manual sync requests update existing workflow cards immediately, completed SLURM jobs stop polling once local-result sync is terminal, stale syncs surface explicit retry guidance, and stale workflows can now be resumed, renamed, rerun, or deleted like other finished workflows.**
+
+- **Remote SLURM submission now preserves the user's approved resource overrides in generated workflow configs: any CPU or GPU account/partition changed in the approval gate now flows into the rendered `nextflow.config`, while the Nextflow controller sbatch job still falls back to the SSH profile's CPU defaults when no override is supplied; live SLURM parsing also no longer mistakes `[100%]`-style Nextflow progress markers for task boundaries, so near-terminal task counts stay accurate.**
+
+- **Prompt and workflow-status UX is more resilient: punctuated capability prompts such as `What can you do?` now hit the quick-exit response path, and `STALE` workflows or sync states render with warning styling plus resume-sync affordances instead of appearing active or silently finished.**
+
+### Documentation
+
+- **Updated the local-sample intake skills to document FASTQ-backed Dogme cDNA submissions, including the supported `fastqCDNA` path, sample-name derivation, FASTQ-only cDNA defaulting, and the explicit redirect away from result-analysis skills for new FASTQ submission requests.**
+
+- **Updated the haplotype skill/help/docs to explain that AGOUTIC now accepts plain `.vcf` or `.vcf.gz` inputs and auto-builds compressed/indexed sidecars when the source directory is writable.**
+
+- **Updated the haplotype help, slash-command catalog, skill markdown, and README to document mouse founder-panel routing, optional omitted-VCF mm39 founder defaults, canonical founder aliases, F1 shorthand, and broader natural-language founder phrasing.**
+
+### Tests
+
+- **Added focused regression coverage for FASTQ detection/prefill extraction, approval-gate FASTQ defaults and blocking clarification behavior, local `fastqCDNA` alias staging, remote FASTQ alias staging, and project-data fallback resolution, while preserving existing pod5/BAM Dogme submission behavior.**
+
+- **Added focused haplotype regression coverage for plain `.vcf` auto-compression/index creation and `.vcf.gz` auto-index creation, alongside help-text assertions that keep the live haplotype guidance aligned with the shipped behavior.**
+
+- **Added focused haplotype regression coverage for founder-panel script execution, optional default-mm39-founder-VCF planner extraction, broader founder free-text parsing, approval-gate founder payloads, and help-surface wording for the updated `/haplotype` behavior.**
+
+- **Added focused haplotype regression coverage for founder-pair approval parsing with `mouse RNA sample ...` phrasing, `chr` versus non-`chr` BAM/VCF contig alias matching, fast preflight behavior that skips execution-scale founder-VCF scans, and timeout propagation from the haplotype plan through approval into Launchpad script submission.**
+
+- **Added focused haplotype regression coverage for the wide RNA `genes.tsv` and `transcripts.tsv` output layout, including transcript-to-gene attribution for single-gene rows, omission of multi-gene transcript buckets, and per-label plus `ambiguous`/`total` columns.**
+
+## [3.7.0] - 2026-05-28
+
+### Features
+
+- **AGOUTIC now supports approval-gated `haplotype_with_vcf` execution for long-read DNA, RNA, and cDNA BAMs using an indexed VCF, including workflow-aware BAM discovery from Dogme and reconcile outputs, tagged/indexed output BAMs, and per-BAM summary TSVs**
+
+- **Chat now supports both `/haplotype` and natural-language requests such as `haplotype RNA workflow7 with file parents.vcf.gz`, with approval gates that show the exact BAM names, selected VCF samples, assignment labels, thresholds, and destination workflow before execution**
+
+- **Launchpad live script monitoring now understands haplotype progress markers, so `haplotype_with_vcf` jobs surface per-BAM and per-chromosome progress in the UI instead of a generic standalone-script status**
+
+### Documentation
+
+- **Updated the main README, quick reference, tutorial, skills guide, and Cortex/UI/Launchpad READMEs to document the new haplotype skill, `/haplotype` slash command, indexed-VCF natural-language prompts, and the 3.7.0 release series**
+
+### Tests
+
+- **Added focused regression coverage for haplotype preflight/execution behavior, approval-gate payload construction, and Launchpad live-status parsing so the new VCF haplotyping flow stays protected end to end**
+
+## [3.6.10] - 2026-05-27
+
+### Features
+
+- **Project owners can now share a project immediately with any existing approved AGOUTIC user by granting viewer or editor access, admins can manage collaborators for any project, and non-owner collaborators can leave a shared project without affecting the owner or other members**
+
+- **Project sharing is now exposed in the product UI: natural-language share requests in chat open a dedicated email-and-role form, the Projects page includes a Collaborators tab plus owned/shared project labels, and viewer-only collaborators now see the chat UI in a read-only mode that blocks uploads, chat submission, chat clearing, and other mutating project actions**
+
+- **Chat now supports deterministic `list users` / `list collaborators` prompts and a sidebar shortcut to display the current project roster with role and recent-activity labels, so all collaborators can see who is in the project at a glance without sending requests through the model**
+
+- **Project pages now show an owner/admin-only collaborator count and compact collaborator list at the top of the detail view, so shared-project membership is visible without scrolling into the Collaborators tab**
+
+- **The project collaborator count and active-user warning now stay pinned at the top of shared owner/admin chat views while the conversation scrolls, so users do not lose awareness of who else is in the project**
+
+- **The pinned shared-project collaborator banner now uses an opaque background and a collapsed-by-default expandable summary, so chat content no longer bleeds through it and the full collaborator roster only expands when needed**
+
+- **Owners and admins can now transfer project ownership to an existing viewer or editor collaborator from the Projects page, and the collaborator surface now groups editors and viewers explicitly so role-based membership is easier to scan**
+
+### Documentation
+
+- **Updated the main README to describe the shipped collaboration model, including owner/editor/viewer behavior, chat-driven sharing, Projects-page collaborator management, and viewer read-only UI gating**
+
+### Bug Fixes
+
+- **Project conversations are now shared at the project level instead of being private to the user who created the thread: authorized project members can reopen shared conversation history and attach follow-up jobs to the same project conversation when their role allows it**
+
+- **Project-scoped collaboration hardening now applies the existing owner/editor/viewer RBAC consistently across shared conversations, project file surfaces, and analyzer/job access: collaborators with project membership can read project conversation history, editor-only mutations stay restricted, shared-project uploads/downloads resolve the project data directory through the canonical project owner while keeping each acting user's central data folder private, and run-level analyzer/job access now checks project membership before falling back to legacy direct job ownership**
+
+- **File-backed SQLite runtime now uses WAL, busy-timeout, and non-shared pooling defaults, and Cortex task projection now skips no-op writes, reducing lock contention and write amplification under concurrent polling, chat traffic, and remote job updates**
+
+- **Job-refresh behavior is now less aggressive across the stack: the UI defaults running-workflow polling to 30 seconds, Cortex cached status polling reuses results for 30 seconds, Launchpad local Nextflow monitor polling defaults to 30 seconds, and active SLURM accounting refreshes are reused for 10 minutes unless terminal-state refresh is required**
+
+- **Failed and cancelled workflows now retain meaningful status details instead of falling back to empty task summaries: local Nextflow terminal states preserve task and workflow-usage data, failed/cancelled SLURM jobs repoll trace/accounting data for recovered progress, and Launchpad now persists missing `completed_at` timestamps when jobs first enter a terminal state**
+
+- **Natural-language `analyze workflowN` requests now route through the same reanalysis path as `/reanalyze workflowN`, so workflow follow-up analysis behaves consistently regardless of whether the user phrases it as a slash command or a plain-language request**
+
+- **Direct RNA modification-summary follow-ups now use filtered `bedMethyl` outputs instead of searching for nonexistent modkit summary files; generic requests like `Show me the modification summary` now run the allowlisted `analyze_job_results/count_bed` utility, surface numeric per-modification totals first, and keep the chromosome-level dataframe available for later plotting**
+
+- **The bundled `count_bed.py` utility and the surrounding Cortex discovery/chaining path now support both `.bed` and `.bed.gz` files, including compressed `*.filtered.bed.gz` modification outputs for automatic RNA summary follow-ups and explicit BED chromosome-count requests**
+
+- **Workflow-specific RNA modification summaries now honor both explicit workflow references like `show me the modifications summary for workflow1` and cached active-workflow selections from `/use workflow1`; plural `modifications summary` phrasing now triggers the same `bedMethyl` counting path, and newer active-workflow state can override the latest completed workflow when follow-up analysis requests are routed**
+
+- **RNA `mod* summary` follow-ups now route through the same `bedMethyl` counting path even from non-workflow skills when workflow context is available: singular `modification summary`, short forms like `mod summary`, and `modkit summary` all auto-list `bedMethyl` outputs and chain into `analyze_job_results/count_bed` without requiring the user to switch skills first**
+
+- **Cortex startup recovery now restarts orphaned running job polls without waiting for the normal first 30-second sleep, so live Nextflow/SLURM progress and persisted job-status caches begin warming immediately after a server restart instead of sitting on stale running snapshots until the first delayed poll window elapses**
+
+- **RNA workflow interpretation now explicitly allows analysis of failed or cancelled workflows when the requested result files are actually present on disk (for example after a later sync), so mode-specific follow-ups no longer assume a different completed workflow is the only valid analysis target**
+
+### Tests
+
+- **Added focused regression coverage for shared-project conversation access, owner-resolved project file paths with actor-owned central storage, and collaborator access to project-scoped run UUID surfaces so the collaboration RBAC foundation stays enforced across chat, files, and analyzer/job routes**
+
+- **Added focused regression coverage for SQLite engine hardening and Cortex task-sync no-op write suppression so remote polling/runtime changes stay protected against future lock-contention regressions**
+
+- **Added focused regression coverage for the revised poll intervals, local failed-workflow task-summary retention, failed-SLURM status backfill, Launchpad `completed_at` persistence, and natural-language `analyze workflowN` reanalysis parity**
+
+- **Added regression coverage for RNA modification-summary routing, count-beds aggregation of per-modification totals, compressed `.bed.gz` support, and formatter output so the second-pass analysis sees numeric modification counts instead of only detected modification names**
+
+- **Added focused regression coverage for plural workflow-specific modification-summary prompts, cached active-workflow context after `/use workflowN`, and chat-path overrides that replace generic `get_analysis_summary` tags with workflow-specific `bedMethyl` counting calls**
+
+- **Added chat-path regression coverage for plural `modifications summary` requests against a failed workflow with synced `bedMethyl` outputs, ensuring the analyzer listing still chains into `count_bed` instead of stopping at raw file listings**
+
+- **Added focused regression coverage for generic-skill `mod summary` and `modkit summary` prompts so shorthand RNA modification-summary requests still auto-route to `bedMethyl` counting, override generic analyzer summaries, and chain into `count_bed`**
+
+- **Added restart-recovery regression coverage for orphaned running EXECUTION_JOB blocks so server restarts keep resuming job polling immediately rather than waiting through an avoidable initial delay before refreshing live status**
+
+## [3.6.9] - 2026-05-24
+
+### Features
+
+- **Chat workflow commands now support `list launchpad workflows` / `/list-launchpad-workflows` to show the non-deleted Launchpad workflow rows tracked for the active project**
+
+- **Chat now supports deterministic `/help` prompt coaching plus natural-language “how do I ask AGOUTIC to…” requests, with curated guidance for slash commands, skills, workflow import, dataframes, differential expression, and remote SLURM stage/run/sync flows; `/help <skill>` now incorporates per-skill manifest facts plus direct `SKILL.md` instruction highlights and routing boundaries**
+
+- **AGOUTIC now supports unified inventory discovery across chat and the UI: deterministic `/list samples`, `/list staged`, `/list imported`, `/list dfs`, `/list workflows`, and `/list files` commands plus matching natural-language requests all route through one shared Cortex inventory layer**
+
+- **Cortex now exposes authenticated `/inventory/samples`, `/inventory/staged`, `/inventory/imported`, `/inventory/workflows`, and `/inventory/files` endpoints so the UI and chat share the same local-sample, remote-stage, imported-workflow, workflow-folder, and file-browsing semantics**
+
+- **The existing My Data page is now a consolidated inventory surface with Local Samples, Staged Samples, Imported Samples, Workflows, and Files tabs, including active-project workflow/file browsing alongside the central shared data-folder management tools**
+
+- **Dogme approval gates now populate Reference Genome(s) from the configured reference catalog, so `mad1` and other installed genomes appear automatically and multi-genome runs can be approved from the UI without another hardcoded option update**
+
+- **The reference-genome config API now returns alias and asset metadata, and Dogme approval gates render alias-aware genome labels from that server payload so future client-side UIs can discover the same catalog without importing backend code**
+
+- **wf-pore-c Phase 3 is now feature-complete behind `WF_PORE_C_ENABLED`, including local preview, local execution, remote SLURM staging/submission, Analyzer recognition, automatic summary generation, and workflow-aware UI approval/run cards**
+
+- **Remote profile connection tests now show the connected user's current SLURM account balances from `sbank balance statement <username>`, with parsed balance columns and full-width rendering in the UI**
+
+- **Remote SLURM workflow status now derives live usage from Nextflow trace data plus `sacct` child-job accounting, persists CPU/GPU/billing summaries on the job row for new runs, and backfills older jobs from a local trace when available or shows `usage statistics not available` instead of erroring**
+
+### Bug Fixes
+
+- **Remote SLURM approval-gate routing now recognizes profile phrases like `run ... on hpc3 using staged sample ...`, so continuing the sentence after the SSH-profile nickname no longer prevents the staged-sample job request from producing the structured approval gate**
+
+- **Reused staged-sample approvals now ignore earlier slash commands like `/list staged` when extracting input paths, so stale `/list` tokens no longer leak into remote Dogme submissions, and the approval summary/editor now label staged source paths, staged remote paths, and direct file inputs explicitly instead of showing a generic `Input Directory`**
+
+- **Bare `help` and similar prompt-coach requests no longer get swallowed by the older capabilities/local-help shortcuts; they now reach the new prompt coach so chat and the sidebar both open the curated `/help` overview instead of a stale generic help panel**
+
+- **Remote SLURM profile/default discovery now rewrites copied example scope IDs such as `user_1234` and `proj_5678` to the real current user/project before Launchpad MCP execution, so requests like `run ... on hpc3 using staged sample ...` no longer miss saved SSH profiles and defaults just because the model echoed literal example params**
+
+- **Launchpad now defaults `NXF_SYNTAX_PARSER=v1` for local Nextflow launches and generated SLURM submit scripts, preserving Dogme compatibility with newer Nextflow releases that enable the stricter parser by default**
+
+- **Workflow quick-delete now removes immediate-child untracked `workflow*` folders from the active project root when no Launchpad job row exists, instead of failing outright for visible but untracked workflow directories**
+
+- **Workflow quick-exit commands now resolve the project directory before context prep runs, so tracked-listing and untracked-folder deletion use the real project root even in the early shortcut path**
+
+- **Remote execution approval building now falls back to a direct Launchpad SSH-profile lookup when the `list_ssh_profiles` data call comes back empty or stale, so runs like `... on hpc3` can still resolve saved profiles and defaults from the live profile store**
+
+- **Dogme intake parsing and context genome extraction now derive recognized genome names from the configured reference catalog, so requests like `use both mm39 and mad1` work reliably and newly added canonical genomes are not mistaken for sample names**
+
+- **Analyzer result summaries can now resolve the owning job from a workflow path when `get_analysis_summary` is called with `work_dir` only, so follow-ups like `analyze results` work for the latest workflow even when the LLM omits the `run_uuid`**
+
+- **Analyzer MCP tool schemas now allow `get_analysis_summary` calls with only `work_dir`, so cached Cortex schema validation no longer drops valid `analyze results` requests before tool execution**
+
+- **Automatic post-run Dogme analysis now asks the LLM for a structured first-pass report instead of a terse completion note, so completed local jobs surface richer metrics, per-reference findings, QC concerns, and next-step guidance immediately in the chat**
+
+- **Completed workflows can now re-run the automatic post-run analysis from chat via `/reanalyze <workflow>` or natural requests like `reanalyze workflow5`, returning the same analysis-card path on demand without waiting for a fresh completion event**
+
+- **Workflow quick commands now accept the active workflow by default and comma-separated workflow batches for `reanalyze`, `rerun`, `delete`, and `sync-workflow`, so chat requests like `reanalyze`, `reanalyze workflow5, workflow6`, or `/delete workflow2, workflow3` execute sequentially without repeating the command**
+
+- **Chat now supports `/commands` to list slash commands by category, and both the welcome card and sidebar help surface point users to that command for the full slash-command catalog**
+
+- **Dogme SLURM config generation no longer forces DNA runs onto the legacy OpenChrom `.sif`; RNA, DNA, and CDNA now all use `ghcr.io/mortazavilab/dogme-pipeline:latest`, matching the current shared container support across modes**
+
+- **Remote SLURM workflow usage now merges the parent Nextflow launcher sbatch job into the same CPU, billing, and memory totals as child task jobs, so the workflow summary includes launcher overhead instead of only trace-native child jobs**
+
+- **wf-pore-c execution cards and approval editors no longer rely on a production AST-test fallback in `ui/appui_block_part2.py`, so missing helper wiring now raises loudly instead of silently degrading to stale Dogme metadata**
+
+- **Legacy Cortex conversation and job state that only stored `mode` is now normalized on both the slow history rebuild path and the fast cached-state restore path, so old Dogme chats still reconstruct with `workflow_key="dogme"` and `analyze_job_results` no longer depends on an implicit Dogme grouping**
+
+- **Launchpad and Cortex persistence now tolerate legacy rows with missing `workflow_key`/`mode` through an Alembic backfill migration plus runtime normalization, preventing pre-migration jobs and conversation state from failing validation during submit/poll/rehydrate paths**
+
+### Tests
+
+- **Added focused regression coverage for the local Nextflow subprocess environment and generated SLURM submit script so the legacy parser override stays in place**
+
+- **Added focused regression coverage for prompt-coach help parsing, per-skill instruction rendering, second-pass prompt fallback hints, and lightweight quick-exit routing so `/help` and natural-language prompt-help requests stay on the deterministic chat path without depending on full app imports in constrained local environments**
+
+- **Added focused regression coverage for `/list` inventory command parsing/rendering and the new Cortex inventory route layer that backs the revised My Data inventory tabs**
+
+- **Added regression coverage for tracked Launchpad workflow listing, untracked workflow-folder deletion, and quick-exit project-directory resolution before context prep**
+
+- **Added regression coverage for Dogme multi-genome extraction with `mm39` plus `mad1`, and for future configured genome names so they are recognized as reference genomes instead of sample names**
+
+- **Added focused wf-pore-c Phase 3 regression coverage for Launchpad workflow preview/submission gating, remote SLURM command/staging/sync behavior, Analyzer summary routing, UI helper rendering, legacy mode-only conversation-state normalization, and workflow-aware job-context injection**
+
+- **Closed the full Phase 3 sweep with `1988 passed, 30 warnings` under `WF_PORE_C_ENABLED=false` and `1988 passed, 29 warnings` under `WF_PORE_C_ENABLED=true` across `tests/cortex tests/launchpad tests/analyzer tests/ui`, confirming identical test counts in both flag states and no Dogme-path regression drift**
+
+- **Added Launchpad migration regression coverage for `workflow_key` backfill and nullable legacy `mode` handling, plus submit-script persistence checks to ensure new jobs store and round-trip workflow identity cleanly**
+
+- **Added SSH-manager regression coverage for `sbank` balance parsing, strict username-only filtering including starred user rows, and raw-output fallback trimming during remote profile connection tests**
+
+- **Added focused regression coverage for remote SLURM workflow usage collection, status-endpoint persistence, old-job local-trace backfill, and explicit unavailable fallbacks when no trace data can be recovered**
+
+### Documentation
+
+- **Updated `README.md` with wf-pore-c Phase 3 status, default-off flag behavior, validation counts, and links to the plan plus local/remote smoke guides**
+
+- **Updated the quick reference, `/commands` catalog, welcome/help surfaces, and local help guidance to document the new prompt-coach `/help` flow, natural-language prompt-help requests, SLURM stage/run/sync prompting examples, and the earlier inventory/My Data additions**
+
+- **Updated `docs/wf_pore_c_plan.md` to mark Phase 3 complete, record the `1988 > 1839` closure gate, and call out the production fallback removal plus dual-path backward-compat normalization**
+
+- **Added `docs/wf_pore_c_remote_smoke_test.md` with the real-cluster SLURM validation path, including remote staging, Apptainer cache verification, sbatch polling, manual `/jobs/{run_uuid}/sync-results` copy-back, and retry guidance**
+
+- **Added `docs/wf_pore_c_smoke_test.md` with the local end-to-end validation checklist for wf-pore-c preview, approval, submission, completion, and analyzer follow-up behavior**
+
+## [3.6.8] - 2026-05-11
+
+### Features
+
+- **AGOUTIC now recognizes `mad1` as a supported reference genome across planner parsing, Launchpad reference configuration, Nextflow config generation, and reconcile BAM reference detection**
+
+- **Reconcile BAM approvals now run as durable Launchpad script jobs instead of the synchronous utility-tool path, preserving a `run_uuid`, persisted logs, and normal background polling for long-running reconcile workflows**
+
+- **Split-reference reconcile approvals now present all detected genomes in one shared approval, show each planned per-genome workflow/output directory up front, and auto-authorize later per-genome reconcile launches from that first approval**
+
+- **Analyzer and Cortex can now read plain text, markdown, and HTML workflow reports through `read_file_content`, natural-language file requests, and the `/read-file` quick command, with readable HTML text as the default render mode and raw HTML available on demand**
+
+### Bug Fixes
+
+- **Configured reference lookup now resolves genome names case-insensitively and only emits `kallistoIndex` / `t2g` when both sidecars are defined together, allowing genomes like `mad1` to run without inheriting mismatched fallback paths**
+
+- **Workflow-specific step-title updates are now scoped to overlap plans with stable step IDs, so reconcile workflows no longer pick up `Sample A` / `Sample B` wording from overlap label propagation**
+
+- **Standalone local script jobs now start in their own process group, and Launchpad timeout and cancel paths terminate the full script tree instead of leaving child reconcile processes running after an early failure or cancellation**
+
+- **Launchpad now persists script completion state and the final output workflow directory atomically, preventing Cortex from polling stale parent directories before reconcile outputs finish publishing**
+
+- **Reconcile WRITE_SUMMARY now reads `reconciled_summary.txt` (and other unstructured report files when present) so the LLM can interpret summary findings alongside parsed tables**
+
+- **Reconcile planning now allocates explicit `workflowN` destinations before submission and passes the exact output directory end-to-end through Cortex, Launchpad, and the reconcile wrapper, avoiding wrapper-side guessing and keeping later per-genome runs in the intended workflow folders**
+
+- **Shared reconcile approvals now stay schema-valid for later auto-approved per-genome approval steps, and older persisted split-reconcile plans are normalized before validation so resumed runs do not fail after the first genome completes**
+
+- **Multi-genome reconcile job completion now resolves the active `RUN_SCRIPT` step instead of the first script step in the plan, allowing the second genome to continue into locate/parse/summary follow-up steps after its workflow finishes**
+
+- **Execution cards and deletion paths now prefer the persisted script output workflow directory instead of the script working directory, preventing delete actions from targeting project roots and keeping workflow labels aligned with the real `workflowN` folder**
+
+- **Live reconcile stderr progress lines are now classified as informational or warnings unless they contain real error markers, so routine reconcile progress no longer appears red in the UI**
+
+### Tests
+
+- **Added regression coverage for `mad1` Nextflow config generation and reconcile reference detection**
+
+- **Added regression coverage for reconcile script-job submission, overlap step-title scoping, standalone script process-group startup, synchronous timeout cleanup, local cancel cleanup, and atomic script completion/work-directory persistence**
+
+- **Added regression coverage for analyzer render modes, reconcile summary ingestion, natural-language markdown file reads, file-content formatting, and the `/read-file` command**
+
+- **Added regression coverage for shared split-reconcile approvals, explicit workflow output directory planning, second-genome reconcile completion routing, safe workflow-folder deletion, large script-stdout output-directory recovery, and live script log classification**
+
+### Documentation
+
+- **README, Analyzer quickstart/docs, Cortex/UI slash-command help, and version surfaces now document `/read-file`, unstructured file reading, and release 3.6.8**
+
+## [3.6.7] - 2026-05-04
+
+### Features
+
+- **Completed Dogme workflows can now be imported into the current project from chat, including remote SLURM workflow paths, `.config` metadata inference, next-`workflowN` allocation, and explicit resume-sync support**
+
+- **Workflow quick commands now include `/import-workflow`, `/sync-workflow`, and `/cancel-sync` for importing finished runs and controlling later copy-back**
+
+- **Remote result copy-back can now be cancelled from chat or the execution UI and resumed later without re-importing the workflow**
+
+- **The main Streamlit browser tab title now shows the active project name alongside the AGOUTIC version**
+
+- **Reconcile BAM requests can now target one specified genome directly, or automatically split mixed-reference inputs into separate per-genome workflows when no genome is specified**
+
+### Documentation
+
+- **README, quick reference, tutorial, and UI docs now describe workflow import chat syntax, the new slash commands, and the project-aware page title**
+
+- **README version stamps and the root architecture banner now align with release 3.6.7**
+
+### Bug Fixes
+
+- **Approval gates now default SLURM CPU memory to 64 GB while still allowing lower explicit overrides**
+
 - **Gate-approved GPU account and partition overrides are now respected in generated `nextflow.config`**
+
+- **The sidebar Brain Model selector now uses the backend-defined LLM alias list and caches it on UI startup, keeping the UI aligned with the current `fast`/`heavy` model choices instead of a stale hard-coded menu**
+
+- **Local Dogme workflows now honor an approval-gate per-task CPU ceiling instead of hard-coding task CPU requests beyond the local host's available cores**
+
+- **Local Dogme workflows now honor an approval-gate per-task RAM ceiling and default local task memory to 64 GB instead of forcing the old 96 GB minimap requirement**
+
+- **Normal `[[PLOT:...]]` chart responses now preserve explicit literal color requests like `in red` instead of falling back to the default blue theme**
 
 - **Nextflow live monitoring no longer freezes completed-task counts when stdout shifts to composite `executor > slurm (...)` summary lines**
 
 - **Transient scheduler poll failures no longer pin execution cards to an old completed count indefinitely**
+
+- **Remote workflow import parsing now separates trailing SSH profile phrases like `on hpc3` from the actual source path before Launchpad validation**
+
+- **Imported and remote workflow result sync now starts asynchronously, avoids overlapping rsync copies for the same workflow, and supports clean cancellation of an active copy-back**
+
+- **Imported remote workflow cards now keep refreshing through `pending_import`, recover stale completed cards without restarting rsync, and no longer let incomplete completed snapshots stop copy-back polling early**
+
+- **Documentation and import-related user-facing messages now standardize the pipeline name capitalization as `Dogme`**
+
+- **Reconcile preflight now always prefers the configured local reference GTF over workflow or manual remote-style paths, and it fails clearly instead of using an external reference path when the matching local genome is not installed**
 
 ## [3.6.6] - 2026-04-22
 

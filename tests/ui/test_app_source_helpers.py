@@ -2,22 +2,29 @@
 
 import ast
 import base64
+import contextlib
 import datetime as dt
 import json
+import os
 import re as _re_module
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import pytest
+from cortex.maintenance_status import build_recommendation, build_snapshot, render_text_report
+from cortex.models import Project, User
+from launchpad.config import JobStatus
+from launchpad.models import DogmeJob
 
 
 UI_APP_PATH = Path(__file__).resolve().parents[2] / "ui" / "appUI.py"
 _UI_DIR = UI_APP_PATH.parent
+_ADMIN_PAGE_PATH = _UI_DIR / "pages" / "admin.py"
 
 # Mapping from the extracted module filename to its path on disk.
 _EXTRACTED_MODULES = {
@@ -76,6 +83,24 @@ def _ast_load_fn_from_file(fn_name: str, src_path: Path, namespace: dict):
     mod = ast.Module(body=[fn_node], type_ignores=[])
     exec(compile(mod, filename=str(src_path), mode="exec"), namespace)
     return namespace[fn_name]
+
+
+def _ast_load_symbols_from_file(symbol_names: set[str], src_path: Path, namespace: dict):
+    """Parse *src_path* and compile selected assignments/functions into *namespace*."""
+    source = src_path.read_text()
+    tree = ast.parse(source, filename=str(src_path))
+    selected_nodes = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in symbol_names:
+            selected_nodes.append(node)
+            continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in symbol_names:
+                    selected_nodes.append(node)
+                    break
+    mod = ast.Module(body=selected_nodes, type_ignores=[])
+    exec(compile(mod, filename=str(src_path), mode="exec"), namespace)
 
 
 # Build the import maps once at module load time.
@@ -153,10 +178,44 @@ def _load_function(name: str, extra_globals: dict | None = None):
     return namespace[name]
 
 
-def _load_block_part2_function(name: str, extra_globals: dict | None = None):
-    namespace: dict = {"datetime": dt}
+def _load_renderers_symbols(symbol_names: set[str], extra_globals: dict | None = None):
+    namespace: dict = {
+        "pd": pd,
+        "px": px,
+        "go": go,
+        "re": _re_module,
+        "Path": Path,
+    }
     if extra_globals:
         namespace.update(extra_globals)
+    _ast_load_symbols_from_file(symbol_names, _EXTRACTED_MODULES["appui_renderers"], namespace)
+    return namespace
+
+
+def _load_block_part2_function(name: str, extra_globals: dict | None = None):
+    namespace: dict = {"datetime": dt, "os": os}
+    if extra_globals:
+        namespace.update(extra_globals)
+    if name == "render_block_part2":
+        _ast_load_symbols_from_file(
+            {
+                "_WF_PORE_C_OUTPUT_FLAG_ORDER",
+                "_WF_PORE_C_OUTPUT_FLAG_LABELS",
+                "_wf_pore_c_ui_enabled",
+                "_workflow_key_from_payload",
+                "_wf_pore_c_output_flag_values",
+                "_workflow_path_label",
+                "_wf_pore_c_output_flag_summary",
+                "_workflow_specific_metadata",
+                "_staging_card_metadata",
+                "_execution_run_metadata",
+                "_looks_like_workflow_path",
+                "_execution_job_workflow_path",
+                "_render_execution_job_actions",
+            },
+            _BLOCK_PART2_PATH,
+            namespace,
+        )
     if name != "_parse_stage_timestamp":
         namespace["_parse_stage_timestamp"] = _ast_load_fn_from_file(
             "_parse_stage_timestamp", _BLOCK_PART2_PATH, namespace
@@ -169,6 +228,19 @@ def _load_projects_page_function(name: str, extra_globals: dict | None = None):
     if extra_globals:
         namespace.update(extra_globals)
     return _ast_load_fn_from_file(name, _PROJECTS_PAGE_PATH, namespace)
+
+
+def _load_admin_page_function(name: str, extra_globals: dict | None = None):
+    namespace: dict = {
+        "pd": pd,
+        "datetime": dt.datetime,
+        "timedelta": dt.timedelta,
+        "timezone": dt.timezone,
+        "DEFAULT_ACTIVE_JOB_MAX_AGE_HOURS": 168,
+    }
+    if extra_globals:
+        namespace.update(extra_globals)
+    return _ast_load_fn_from_file(name, _ADMIN_PAGE_PATH, namespace)
 
 
 class TestCreateProjectServerSide:
@@ -192,20 +264,387 @@ class TestCreateProjectServerSide:
             timeout=10,
         )
 
-    def test_falls_back_to_uuid_when_request_fails(self):
+    def test_returns_error_when_request_fails(self):
         request = MagicMock(side_effect=RuntimeError("network down"))
         fn = _load_function("_create_project_server_side", {"make_authenticated_request": request})
 
-        import uuid
-        original_uuid4 = uuid.uuid4
-        uuid.uuid4 = lambda: "uuid-fallback"
-        try:
-            result = fn("named-project")
-        finally:
-            uuid.uuid4 = original_uuid4
+        result = fn("named-project")
 
         assert isinstance(result, dict)
-        assert result["id"] == "uuid-fallback"
+        assert result["id"] == ""
+        assert result["name"] == "named-project"
+        assert result["error"] == "network down"
+
+
+class TestAdminActivityHelpers:
+    def test_activity_recommendation_matches_shared_module(self):
+        fn = _load_admin_page_function(
+            "_activity_recommendation",
+            {"build_recommendation": build_recommendation},
+        )
+        snapshot = {
+            "jobs": [{"run_uuid": "run-1", "runtime_duration": "20m"}],
+            "chats": [],
+        }
+
+        assert fn(snapshot) == build_recommendation(snapshot)
+
+    def test_activity_report_text_matches_shared_renderer(self):
+        fn = _load_admin_page_function(
+            "_activity_report_text",
+            {"render_text_report": render_text_report},
+        )
+        snapshot = {
+            "generated_at": "2026-05-28T12:00:00+00:00",
+            "users": [],
+            "jobs": [],
+            "stale_jobs": [],
+            "chats": [],
+            "transfers": [],
+            "stale_transfers": [],
+            "recommendation": {"status": "SAFE TO RESTART", "message": "SAFE TO RESTART"},
+        }
+
+        assert fn(
+            snapshot,
+            chat_window_minutes=5,
+            active_job_max_age_hours=168,
+        ) == render_text_report(
+            snapshot,
+            last_active_window_minutes=15,
+            chat_window_minutes=5,
+            active_job_max_age_hours=168,
+        )
+
+    def test_admin_gating_helper_rejects_non_admin(self):
+        fn = _load_admin_page_function("_is_admin_user")
+
+        assert fn({"role": "admin"}) is True
+        assert fn({"role": "user"}) is False
+        assert fn(None) is False
+
+    def test_ui_threshold_selector_can_mark_old_running_job_stale(self, db_session):
+        threshold_fn = _load_admin_page_function("_activity_max_age_hours")
+        now = dt.datetime(2026, 5, 28, 12, 0, tzinfo=dt.timezone.utc)
+
+        user = User(
+            id="admin-activity-user",
+            email="activity@example.com",
+            display_name="Activity User",
+            role="user",
+            is_active=True,
+        )
+        project = Project(
+            id="admin-activity-project",
+            name="Activity Project",
+            owner_id=user.id,
+        )
+        job = DogmeJob(
+            run_uuid="admin-activity-run",
+            project_id=project.id,
+            user_id=user.id,
+            workflow_key="dogme",
+            workflow_display_name="dogme",
+            sample_name="sample-a",
+            input_directory="/tmp/input",
+            status=JobStatus.RUNNING.value,
+            submitted_at=now - dt.timedelta(hours=49),
+            started_at=now - dt.timedelta(hours=48),
+        )
+        db_session.add_all([user, project, job])
+        db_session.commit()
+
+        snapshot = build_snapshot(
+            db_session,
+            chat_window_minutes=5,
+            active_job_max_age_hours=threshold_fn("24h"),
+            now=now,
+        )
+
+        assert snapshot["jobs"] == []
+        assert [row["run_uuid"] for row in snapshot["stale_jobs"]] == [job.run_uuid]
+
+    def test_enable_maintenance_mode_posts_admin_endpoint(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_enable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        result = fn(
+            "http://api.test",
+            message="Drain mode",
+            starts_at="2026-05-28T17:00:00+00:00",
+        )
+
+        assert result is response
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "Drain mode",
+                "starts_at": "2026-05-28T17:00:00+00:00",
+            },
+            timeout=5,
+        )
+
+    def test_enable_maintenance_mode_normalizes_blank_starts_at(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_enable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        fn(
+            "http://api.test",
+            message="",
+            starts_at="   ",
+        )
+
+        request.assert_called_once_with(
+            "POST",
+            "http://api.test/admin/maintenance",
+            json={
+                "mode": True,
+                "message": "",
+                "starts_at": None,
+            },
+            timeout=5,
+        )
+
+    def test_disable_maintenance_mode_calls_delete_endpoint(self):
+        response = SimpleNamespace(status_code=200, text="ok")
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_disable_maintenance_mode",
+            {"make_authenticated_request": request},
+        )
+
+        result = fn("http://api.test")
+
+        assert result is response
+        request.assert_called_once_with(
+            "DELETE",
+            "http://api.test/admin/maintenance",
+            timeout=5,
+        )
+
+    def test_cancellable_transfer_rows_include_only_active_result_downloads(self):
+        fn = _load_admin_page_function(
+            "_cancellable_transfer_rows",
+            {"CANCELLABLE_TRANSFER_STATES": {"pending_import", "downloading_outputs"}},
+        )
+
+        rows = [
+            {"source": "dogme_job", "state": "downloading_outputs", "run_uuid": "download-run"},
+            {"source": "dogme_job", "state": "pending_import", "run_uuid": "import-run"},
+            {"source": "dogme_job", "state": "inputs_uploaded", "run_uuid": "upload-run"},
+            {"source": "staging_task", "state": "running", "run_uuid": "stage-run"},
+            {"source": "dogme_job", "state": "downloading_outputs"},
+        ]
+
+        assert fn(rows) == rows[:2]
+
+    def test_fetch_active_encode_downloads_filters_other_sources(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: [
+                {"download_id": "encode-1", "source": "encode"},
+                {"download_id": "url-1", "source": "url"},
+            ],
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_fetch_active_encode_downloads",
+            {"make_authenticated_request": request},
+        )
+
+        downloads, error = fn("http://api.test")
+
+        assert downloads == [{"download_id": "encode-1", "source": "encode"}]
+        assert error is None
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/admin/downloads/active",
+            timeout=5,
+        )
+
+    def test_fetch_admin_projects_uses_admin_inventory_endpoint(self):
+        response = SimpleNamespace(status_code=200, json=lambda: [{"id": "project-1"}])
+        request = MagicMock(return_value=response)
+        fn = _load_admin_page_function(
+            "_fetch_admin_projects",
+            {"make_authenticated_request": request},
+        )
+
+        projects, error = fn("http://api.test")
+
+        assert projects == [{"id": "project-1"}]
+        assert error is None
+        request.assert_called_once_with("GET", "http://api.test/admin/projects", timeout=5)
+
+
+class TestMaintenanceBannerHelpers:
+    def test_render_maintenance_banner_outputs_markup_when_flag_on(self):
+        calls = []
+        fake_st = SimpleNamespace(markdown=lambda text, unsafe_allow_html=False: calls.append((text, unsafe_allow_html)))
+        fn = _load_function("_render_maintenance_banner", {"st": fake_st})
+
+        fn({"text": "Drain mode is active.", "mode": True})
+
+        assert len(calls) == 1
+        assert "Drain mode is active." in calls[0][0]
+        assert calls[0][1] is True
+
+    def test_render_maintenance_banner_produces_no_output_when_flag_off(self):
+        calls = []
+        fake_st = SimpleNamespace(markdown=lambda text, unsafe_allow_html=False: calls.append((text, unsafe_allow_html)))
+        fn = _load_function("_render_maintenance_banner", {"st": fake_st})
+
+        fn(None)
+
+        assert calls == []
+
+    def test_maintenance_countdown_helper_formats_future_starts_at(self):
+        parse_dt = _load_function("_parse_maintenance_datetime")
+        fn = _load_function("_maintenance_banner_text", {"_parse_maintenance_datetime": parse_dt})
+        now = dt.datetime(2026, 5, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+        text = fn(
+            {
+                "mode": True,
+                "message": "Planned maintenance.",
+                "starts_at": "2026-05-28T13:02:03+00:00",
+            },
+            now=now,
+        )
+
+        assert text == "Planned maintenance. Maintenance starts in 01:02:03."
+
+    def test_maintenance_countdown_helper_falls_back_when_starts_at_is_past(self):
+        parse_dt = _load_function("_parse_maintenance_datetime")
+        fn = _load_function("_maintenance_banner_text", {"_parse_maintenance_datetime": parse_dt})
+        now = dt.datetime(2026, 5, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+        text = fn(
+            {
+                "mode": True,
+                "message": "",
+                "starts_at": "2026-05-28T11:00:00+00:00",
+            },
+            now=now,
+        )
+
+        assert text == "AGOUTIC is currently in maintenance mode."
+
+
+class TestLoadReferenceGenomeCatalog:
+    def test_returns_api_catalog_and_caches(self):
+        fake_st = SimpleNamespace(session_state={})
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "default": "GRCh38",
+                    "genomes": ["GRCh38", "mm39", "mad1"],
+                    "items": [
+                        {
+                            "id": "GRCh38",
+                            "label": "GRCh38 (aliases: hg38, human)",
+                            "aliases": ["hg38", "human"],
+                            "is_default": True,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": True, "kallisto_t2g": True},
+                        },
+                        {
+                            "id": "mm39",
+                            "label": "mm39 (aliases: mm10, mouse)",
+                            "aliases": ["mm10", "mouse"],
+                            "is_default": False,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": True, "kallisto_t2g": True},
+                        },
+                        {
+                            "id": "mad1",
+                            "label": "mad1",
+                            "aliases": [],
+                            "is_default": False,
+                            "assets": {"fasta": True, "gtf": True, "kallisto_index": False, "kallisto_t2g": False},
+                        },
+                    ],
+                    "count": 3,
+                },
+            )
+        )
+        fn = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)},
+        )
+
+        result = fn(api_url="http://api.test", request_fn=request)
+
+        assert result["genomes"] == ["GRCh38", "mm39", "mad1"]
+        assert result["default"] == "GRCh38"
+        items_by_id = {item["id"]: item for item in result["items"]}
+        assert items_by_id["mm39"]["aliases"] == ["mm10", "mouse"]
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/config/reference-genomes",
+            timeout=5,
+        )
+        assert fake_st.session_state["_reference_genome_catalog_cache"]["catalog"]["default"] == "GRCh38"
+        assert fake_st.session_state["_available_reference_genomes_cache"]["genomes"] == ["GRCh38", "mm39", "mad1"]
+
+    def test_falls_back_when_request_fails(self):
+        fake_st = SimpleNamespace(session_state={})
+        request = MagicMock(side_effect=RuntimeError("network down"))
+        fn = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)},
+        )
+
+        result = fn(
+            api_url="http://api.test",
+            request_fn=request,
+            fallback=["mad1", "mm39"],
+        )
+
+        assert result["genomes"] == ["mad1", "mm39"]
+        assert [item["label"] for item in result["items"]] == ["mad1", "mm39"]
+
+
+class TestLoadAvailableReferenceGenomes:
+    def test_returns_genome_ids_from_catalog(self):
+        fake_st = SimpleNamespace(session_state={})
+        namespace = {"st": fake_st, "time": SimpleNamespace(time=lambda: 100.0)}
+        namespace["load_reference_genome_catalog"] = _ast_load_fn_from_file(
+            "load_reference_genome_catalog",
+            _EXTRACTED_MODULES["appui_services"],
+            namespace,
+        )
+        fn = _ast_load_fn_from_file(
+            "load_available_reference_genomes",
+            _EXTRACTED_MODULES["appui_services"],
+            namespace,
+        )
+        request = MagicMock(
+            return_value=SimpleNamespace(
+                status_code=200,
+                json=lambda: {
+                    "default": "GRCh38",
+                    "genomes": ["GRCh38", "mm39", "mad1"],
+                    "items": [],
+                    "count": 3,
+                },
+            )
+        )
+
+        result = fn(api_url="http://api.test", request_fn=request)
+
+        assert result == ["GRCh38", "mm39", "mad1"]
 
 
 class TestJobStatusUpdatedAt:
@@ -260,6 +699,16 @@ class TestPauseAutoRefresh:
         assert fake_st.session_state["_suppress_auto_refresh_until"] == 110.0
 
 class TestProjectSwitchHelpers:
+    def test_live_task_dock_is_not_a_nested_streamlit_fragment(self):
+        tree = ast.parse(UI_APP_PATH.read_text(), filename=str(UI_APP_PATH))
+        live_dock = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_render_live_task_dock"
+        )
+
+        assert live_dock.decorator_list == []
+
     def test_project_scope_mount_key_changes_with_project_id(self):
         fn = _load_function("_project_scope_mount_key")
 
@@ -277,7 +726,63 @@ class TestProjectSwitchHelpers:
             has_running_job=True,
         )
 
-        assert value == dt.timedelta(seconds=2)
+        assert value == dt.timedelta(seconds=5)
+
+    def test_project_refresh_interval_caps_full_refresh_jobs_to_five_seconds(self):
+        fn = _load_function("_project_refresh_interval", {"timedelta": dt.timedelta})
+
+        value = fn(
+            auto_refresh=True,
+            poll_seconds=30,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+            has_running_job=True,
+            has_full_refresh_job=True,
+        )
+
+        assert value == dt.timedelta(seconds=5)
+
+    def test_project_discovery_interval_uses_idle_cadence(self):
+        fn = _load_function(
+            "_project_discovery_interval",
+            {
+                "timedelta": dt.timedelta,
+                "IDLE_DISCOVERY_POLL_SECONDS": 120,
+            },
+        )
+
+        value = fn(
+            auto_refresh=True,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+        )
+
+        assert value == dt.timedelta(seconds=120)
+
+    def test_project_discovery_interval_disables_when_live_stream_off(self):
+        fn = _load_function(
+            "_project_discovery_interval",
+            {
+                "timedelta": dt.timedelta,
+                "IDLE_DISCOVERY_POLL_SECONDS": 120,
+            },
+        )
+
+        value = fn(
+            auto_refresh=False,
+            auto_refresh_suppressed=False,
+            project_switch_loading=False,
+        )
+
+        assert value is None
+
+    def test_task_sections_have_active_items_for_running_or_pending_roots(self):
+        fn = _load_function("_task_sections_have_active_items")
+
+        assert fn({"running": [{"id": "task-1"}]}) is True
+        assert fn({"pending": [{"id": "task-2"}]}) is True
+        assert fn({"running": [{"id": "child-1", "parent_task_id": "task-1"}]}) is False
+        assert fn({"completed": [{"id": "task-3"}]}) is False
 
     def test_bootstrap_suppressed_monitoring_only_when_timer_is_missing(self):
         fn = _load_function("_should_bootstrap_suppressed_monitoring")
@@ -294,6 +799,61 @@ class TestProjectSwitchHelpers:
             refresh_interval=dt.timedelta(seconds=2),
             has_running_job=True,
         ) is False
+
+    def test_incremental_block_fetch_disabled_for_full_refresh_jobs(self):
+        fn = _load_function("_should_use_incremental_block_fetch")
+
+        assert fn(
+            has_existing_blocks=True,
+            project_switch_loading_for=None,
+            active_project_id="proj-1",
+            has_full_refresh_job=True,
+        ) is False
+
+    def test_incremental_block_fetch_enabled_for_stable_project_history(self):
+        fn = _load_function("_should_use_incremental_block_fetch")
+
+        assert fn(
+            has_existing_blocks=True,
+            project_switch_loading_for=None,
+            active_project_id="proj-1",
+            has_full_refresh_job=False,
+        ) is True
+
+    def test_refresh_live_download_block_polls_download_endpoint(self):
+        response = SimpleNamespace(
+            status_code=200,
+            json=lambda: {
+                "status": "RUNNING",
+                "bytes_downloaded": 550 * 1024 * 1024,
+                "current_file": "ENCFF313VYZ.fastq.gz",
+                "current_file_bytes": 550 * 1024 * 1024,
+                "current_file_expected": 1522 * 1024 * 1024,
+            },
+        )
+        request = MagicMock(return_value=response)
+        fn = _load_function("_refresh_live_download_block", {"make_authenticated_request": request})
+
+        result = fn(
+            {
+                "id": "block-1",
+                "type": "DOWNLOAD_TASK",
+                "status": "RUNNING",
+                "payload": {
+                    "download_id": "dl-1",
+                    "bytes_downloaded": 100,
+                },
+            },
+            "proj-1",
+        )
+
+        assert result["payload"]["bytes_downloaded"] == 550 * 1024 * 1024
+        assert result["payload"]["current_file"] == "ENCFF313VYZ.fastq.gz"
+        request.assert_called_once_with(
+            "GET",
+            "http://api.test/projects/proj-1/downloads/dl-1",
+            timeout=10,
+        )
 
     def test_finish_project_switch_loading_clears_flag_and_reruns(self):
         fake_st = SimpleNamespace(
@@ -340,6 +900,53 @@ class TestProjectSwitchHelpers:
         fake_st.rerun.assert_called_once()
 
 
+class TestBrowserPageTitle:
+    def test_uses_cached_page_project_name(self):
+        fake_st = SimpleNamespace(session_state={"_page_project_name": "Tumor Panel"})
+        fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": lambda: "Tumor Panel",
+            },
+        )
+
+        assert fn() == "Tumor Panel | AGOUTIC v3.6.6"
+
+    def test_uses_cached_project_lookup_when_name_not_cached(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "active_project_id": "proj-1",
+                "_cached_projects": [{"id": "proj-1", "name": "Remote Import Demo"}],
+            }
+        )
+        name_fn = _load_function("_resolved_page_project_name", {"st": fake_st})
+        title_fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": name_fn,
+            },
+        )
+
+        assert title_fn() == "Remote Import Demo | AGOUTIC v3.6.6"
+
+    def test_falls_back_to_version_only_when_project_name_unknown(self):
+        fake_st = SimpleNamespace(session_state={})
+        title_fn = _load_function(
+            "_browser_page_title",
+            {
+                "st": fake_st,
+                "AGOUTIC_VERSION": "3.6.6",
+                "_resolved_page_project_name": lambda: "",
+            },
+        )
+
+        assert title_fn() == "AGOUTIC v3.6.6"
+
+
 class TestActiveChatIsolation:
     def test_handle_active_chat_ignores_other_project_request(self):
         fake_st = SimpleNamespace(
@@ -359,6 +966,359 @@ class TestActiveChatIsolation:
         assert fake_st.session_state["_active_chat"]["project_id"] == "project-a"
         fake_st.chat_message.assert_not_called()
         fake_st.rerun.assert_not_called()
+
+    def test_handle_active_chat_keeps_failure_visible_without_immediate_rerun(self):
+        fake_response = SimpleNamespace(status_code=500, text="boom", json=lambda: {"detail": "boom"})
+        fake_thread = SimpleNamespace(is_alive=lambda: False, join=MagicMock())
+        fake_st = SimpleNamespace(
+            session_state={
+                "_active_chat": {
+                    "project_id": "project-a",
+                    "thread": fake_thread,
+                    "request_id": "req-1",
+                    "result_holder": {"response": fake_response, "error": None},
+                    "start_time": 100.0,
+                    "auth_request_kwargs": {},
+                }
+            },
+            chat_message=lambda *_args, **_kwargs: contextlib.nullcontext(),
+            error=MagicMock(),
+            warning=MagicMock(),
+            info=MagicMock(),
+            empty=MagicMock(),
+            caption=MagicMock(),
+            rerun=MagicMock(),
+        )
+        fn = _load_function(
+            "handle_active_chat",
+            {
+                "st": fake_st,
+                "time": SimpleNamespace(time=lambda: 101.0, sleep=lambda *_args, **_kwargs: None),
+            },
+        )
+
+        fn(api_url="http://api.test", active_project_id="project-a")
+
+        fake_thread.join.assert_called_once()
+        assert "_active_chat" not in fake_st.session_state
+        assert fake_st.session_state["_last_prompt_failed"] is True
+        fake_st.error.assert_called_once_with("Chat request failed: 500 - boom")
+        fake_st.rerun.assert_not_called()
+
+
+class TestProjectAccessUiHelpers:
+    def test_current_project_record_prefers_cached_project(self):
+        fake_st = SimpleNamespace(
+            session_state={
+                "_cached_projects": [
+                    {"id": "proj-1", "name": "Shared RNA", "role": "viewer"}
+                ]
+            }
+        )
+        fn = _load_function(
+            "_current_project_record",
+            {"st": fake_st, "_resolved_page_project_name": lambda: ""},
+        )
+
+        result = fn("proj-1")
+
+        assert result["name"] == "Shared RNA"
+        assert result["role"] == "viewer"
+
+    def test_render_file_upload_skips_widgets_when_disabled(self):
+        _nullcontext = contextlib.nullcontext
+        fake_st = SimpleNamespace(
+            expander=lambda *args, **kwargs: _nullcontext(),
+            info=MagicMock(),
+            file_uploader=MagicMock(),
+            button=MagicMock(),
+        )
+        fn = _load_function("render_file_upload", {"st": fake_st})
+
+        fn(
+            api_url="http://api.test",
+            active_id="proj-1",
+            build_auth_request_kwargs_fn=lambda: {},
+            disabled=True,
+            disabled_reason="Viewer access is read-only in this shared project.",
+        )
+
+        fake_st.info.assert_called_once()
+        fake_st.file_uploader.assert_not_called()
+        fake_st.button.assert_not_called()
+
+    def test_share_success_message_includes_project_email_and_role(self):
+        fn = _load_function("_share_success_message")
+
+        message = fn("Shared RNA", "viewer@example.com", "viewer")
+
+        assert "Shared RNA" in message
+        assert "viewer@example.com" in message
+        assert "viewer" in message
+
+    def test_submit_share_request_falls_back_to_role_update_for_existing_collaborator(self):
+        create_resp = SimpleNamespace(
+            status_code=409,
+            text="duplicate",
+            json=lambda: {"detail": "That user already has project access. Use role update instead."},
+        )
+        list_resp = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {
+                "collaborators": [
+                    {"user_id": "user-42", "email": "viewer@example.com", "role": "viewer"}
+                ]
+            },
+        )
+        patch_resp = SimpleNamespace(
+            status_code=200,
+            text="ok",
+            json=lambda: {"status": "updated", "role": "editor"},
+        )
+        fake_requests = SimpleNamespace(
+            Response=object,
+            post=MagicMock(return_value=create_resp),
+            get=MagicMock(return_value=list_resp),
+            patch=MagicMock(return_value=patch_resp),
+        )
+        detail_fn = _load_function("_response_error_detail", {"requests": fake_requests})
+        match_fn = _load_function("_matching_collaborator_user_id")
+        submit_fn = _load_function(
+            "_submit_share_request",
+            {
+                "requests": fake_requests,
+                "_buffer_and_close_response": lambda response: response,
+                "_response_error_detail": detail_fn,
+                "_matching_collaborator_user_id": match_fn,
+            },
+        )
+
+        resp, action = submit_fn(
+            api_url="http://api.test",
+            project_id="proj-1",
+            email="viewer@example.com",
+            role="editor",
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+
+        assert resp is patch_resp
+        assert action == "updated"
+        fake_requests.post.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators",
+            json={"email": "viewer@example.com", "role": "editor"},
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+        fake_requests.get.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators",
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+        fake_requests.patch.assert_called_once_with(
+            "http://api.test/projects/proj-1/collaborators/user-42",
+            json={"role": "editor"},
+            cookies={"session": "abc"},
+            timeout=10,
+        )
+
+    def test_format_project_collaborator_roster_includes_you_role_and_activity(self):
+        fn = _load_function("_format_project_collaborator_roster")
+
+        lines = fn(
+            "glu",
+            [
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner", "last_accessed": "2026-05-27T21:29:00Z"},
+                {"user_id": "me", "email": "editor@example.com", "role": "editor", "last_accessed": "2026-05-27T21:28:00Z"},
+            ],
+            "me",
+            lambda collaborator: ("active", "Active now"),
+        )
+
+        assert lines[0] == "Users in **glu** (2):"
+        assert any("**owner@example.com**" in line and "Owner" in line for line in lines[1:])
+        assert any("**editor@example.com**" in line and "Editor · You" in line and "Active now" in line for line in lines[1:])
+
+    def test_render_project_shared_status_banner_uses_sticky_container_when_visible(self):
+        fake_st = SimpleNamespace(markdown=MagicMock())
+        fn = _load_function("_render_project_shared_status_banner", {"st": fake_st})
+
+        fn(
+            {
+                "summary": "Project collaborators: 3 total · 1 other active now",
+                "lines": [
+                    "owner@example.com · Owner · You · Active now",
+                    "editor@example.com · Editor · Active now",
+                ],
+                "warning": "Ali Mortazavi active in this project right now.",
+            }
+        )
+
+        fake_st.markdown.assert_called_once()
+        markup = fake_st.markdown.call_args.args[0]
+        assert 'project-shared-status-banner-fixed' in markup
+        assert '<details class="project-shared-status-banner-fixed">' in markup
+        assert '<summary class="project-shared-status-banner__summary">' in markup
+        assert 'Project collaborators: 3 total · 1 other active now' in markup
+        assert 'owner@example.com · Owner · You · Active now' in markup
+        assert 'editor@example.com · Editor · Active now' in markup
+        assert 'Ali Mortazavi active in this project right now.' in markup
+        assert fake_st.markdown.call_args.kwargs["unsafe_allow_html"] is True
+
+    def test_render_project_shared_status_banner_skips_sticky_container_when_hidden(self):
+        fake_st = SimpleNamespace(markdown=MagicMock())
+        fn = _load_function("_render_project_shared_status_banner", {"st": fake_st})
+
+        fn(None)
+
+        fake_st.markdown.assert_not_called()
+
+    def test_project_shared_status_banner_payload_hides_for_non_owner_collaborator_view(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=False,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "is_owner": False, "role": "viewer"},
+            ],
+            current_user_id="viewer-1",
+            activity_status_fn=lambda collaborator: ("active", "Active now"),
+            shared_warning="Owner active now",
+        )
+
+        assert result is None
+
+    def test_project_shared_status_banner_payload_hides_for_unshared_project(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=True,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+            ],
+            current_user_id="owner-1",
+            activity_status_fn=lambda collaborator: ("idle", "Active today"),
+            shared_warning=None,
+        )
+
+        assert result is None
+
+    def test_project_shared_status_banner_payload_shows_for_owner_of_shared_project(self):
+        fn = _load_function("_project_shared_status_banner_payload")
+
+        result = fn(
+            can_manage_collaborators=True,
+            collaborators=[
+                {"user_id": "owner-1", "email": "owner@example.com", "is_owner": True, "role": "owner"},
+                {"user_id": "editor-1", "email": "editor@example.com", "is_owner": False, "role": "editor"},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "is_owner": False, "role": "viewer"},
+            ],
+            current_user_id="owner-1",
+            activity_status_fn=lambda collaborator: ("active", "Active now") if collaborator.get("user_id") == "editor-1" else ("idle", "Active today"),
+            shared_warning="Ali Mortazavi active in this project right now.",
+        )
+
+        assert result == {
+            "summary": "Project collaborators: 3 total · 1 other active now",
+            "lines": [
+                "owner@example.com · Owner · You · Active today",
+                "editor@example.com · Editor · Active now",
+                "viewer@example.com · Viewer · Active today",
+            ],
+            "warning": "Ali Mortazavi active in this project right now.",
+        }
+
+    def test_appui_includes_sticky_shared_status_banner_css(self):
+        source = UI_APP_PATH.read_text()
+
+        assert '.project-shared-status-banner-fixed {' in source
+        assert 'position: fixed;' in source
+        assert 'top: 4.15rem;' in source
+        assert 'background: #181a1b;' in source
+        assert '.project-shared-status-banner-fixed[open] .project-shared-status-banner__summary {' in source
+
+
+class TestProjectsPageCollaboratorSummary:
+    def test_owner_sees_count_and_list_when_project_is_shared(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=True,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ],
+        )
+
+        assert result == {
+            "count": 2,
+            "label": "Shared with 2 collaborators",
+            "lines": [
+                "editor@example.com · Editor",
+                "viewer@example.com · Viewer",
+            ],
+        }
+
+    def test_owner_hides_count_when_no_non_owner_collaborators_exist(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=True,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+            ],
+        )
+
+        assert result is None
+
+    def test_non_owner_hides_count_and_list(self):
+        fn = _load_projects_page_function("_project_page_collaborator_summary")
+
+        result = fn(
+            can_manage=False,
+            collaborators=[
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+            ],
+        )
+
+        assert result is None
+
+    def test_groups_editors_and_viewers_for_summary_display(self):
+        fn = _load_projects_page_function("_project_page_collaborator_groups")
+
+        result = fn(
+            [
+                {"email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ]
+        )
+
+        assert result == {
+            "owner": ["owner@example.com · Owner"],
+            "editor": ["editor@example.com · Editor"],
+            "viewer": ["viewer@example.com · Viewer"],
+        }
+
+    def test_ownership_transfer_candidates_include_editors_and_viewers_only(self):
+        fn = _load_projects_page_function("_project_ownership_transfer_candidates")
+
+        result = fn(
+            [
+                {"user_id": "owner-1", "email": "owner@example.com", "role": "owner", "is_owner": True},
+                {"user_id": "editor-1", "email": "editor@example.com", "role": "editor", "is_owner": False},
+                {"user_id": "viewer-1", "email": "viewer@example.com", "role": "viewer", "is_owner": False},
+            ]
+        )
+
+        assert result == [
+            {"label": "editor@example.com · Editor", "user_id": "editor-1", "role": "editor"},
+            {"label": "viewer@example.com · Viewer", "user_id": "viewer-1", "role": "viewer"},
+        ]
 
 
 class TestStagingBlockNeedsRefresh:
@@ -489,6 +1449,18 @@ class TestWorkflowStatusPresentation:
         fn = _load_function("_workflow_status_presentation")
 
         assert fn("DELETED") == ("pending", "Deleted", "🗑️")
+
+    def test_stale_workflow_uses_warning_chip(self):
+        fn = _load_function("_workflow_status_presentation")
+
+        assert fn("STALE") == ("warning", "Stale", "⚠️")
+
+
+class TestProjectsPageHelpers:
+    def test_projects_status_badge_formats_stale(self):
+        fn = _load_projects_page_function("_status_badge")
+
+        assert fn("STALE") == "⚠️ Stale"
 
 
 class TestTaskHelpers:
@@ -816,12 +1788,12 @@ class TestHelpIntent:
     def test_recognizes_grouped_de_help_shortcut(self):
         fn = _load_function("_is_help_intent")
 
-        assert fn("how do i compare reconcile samples") is True
+        assert fn("how do i compare reconcile samples") is False
 
     def test_recognizes_show_slash_commands_help_shortcut(self):
         fn = _load_function("_is_help_intent")
 
-        assert fn("show slash commands") is True
+        assert fn("show slash commands") is False
 
     def test_does_not_treat_actual_de_request_as_help(self):
         fn = _load_function("_is_help_intent")
@@ -1241,6 +2213,8 @@ class TestRenderWorkflowStepDataframes:
                 "progress_stats": progress_stats,
                 "segmented_progress": lambda *args, **kwargs: None,
                 "timeline": lambda *args, **kwargs: None,
+                "_workflow_usage_metrics": lambda workflow_usage: {},
+                "_workflow_usage_message": lambda workflow_usage: "",
             },
         )
 
@@ -1304,6 +2278,88 @@ class TestRenderWorkflowStepDataframes:
             }
         )
 
+    def test_execution_job_renders_workflow_usage_for_completed_jobs(self):
+        fake_st = SimpleNamespace(
+            chat_message=MagicMock(return_value=_ContextManagerStub()),
+            session_state={},
+            caption=MagicMock(),
+            divider=MagicMock(),
+            success=MagicMock(),
+            button=MagicMock(return_value=False),
+            text_input=MagicMock(return_value="workflow12"),
+            columns=MagicMock(side_effect=lambda n: [_ContextManagerStub() for _ in range(n)]),
+        )
+        progress_stats = MagicMock()
+        fn = _load_block_part2_function(
+            "render_block_part2",
+            {
+                "st": fake_st,
+                "section_header": lambda *args, **kwargs: None,
+                "metadata_row": lambda *args, **kwargs: None,
+                "status_chip": lambda *args, **kwargs: None,
+                "info_callout": lambda *args, **kwargs: None,
+                "progress_stats": progress_stats,
+                "segmented_progress": lambda *args, **kwargs: None,
+                "timeline": lambda *args, **kwargs: None,
+                "_workflow_usage_metrics": lambda workflow_usage: {
+                    "CPU Time": "2m 4s",
+                    "Peak RSS": "2.0 GB",
+                } if workflow_usage else {},
+                "_workflow_usage_message": lambda workflow_usage: str((workflow_usage or {}).get("usage_message") or "").strip(),
+            },
+        )
+
+        fn(
+            btype="EXECUTION_JOB",
+            block={"status": "DONE", "created_at": "2026-04-23T06:17:37Z"},
+            content={
+                "run_uuid": "run-124",
+                "sample_name": "igvfr_767-22",
+                "mode": "RNA",
+                "work_directory": "/tmp/workflow12",
+                "job_status": {
+                    "status": "COMPLETED",
+                    "progress_percent": 100,
+                    "message": "Job completed successfully.",
+                    "tasks": {},
+                    "workflow_usage": {
+                        "cpu_seconds": 124.0,
+                        "max_rss_mb": 2048.0,
+                    },
+                },
+            },
+            block_id="block-2",
+            status="COMPLETED",
+            API_URL="http://api.test",
+            active_id="proj-1",
+            LIVE_JOB_STATUS_TIMEOUT_SECONDS=30,
+            make_authenticated_request=MagicMock(),
+            get_cached_job_status=MagicMock(return_value=({}, False)),
+            show_metadata=lambda: None,
+            _workflow_status_presentation=lambda status: ("complete", status, "✅"),
+            _format_plan_timestamp=lambda value: value,
+            _format_duration=lambda *_args, **_kwargs: "",
+            _block_timestamp=lambda: "",
+            _render_workflow_plot_payload=lambda *_args, **_kwargs: None,
+            _render_embedded_dataframes=lambda *_args, **_kwargs: None,
+            _render_step_payload=lambda *_args, **_kwargs: None,
+            _job_status_updated_at=lambda *_args, **_kwargs: None,
+            _run_status_label=lambda status: ("complete", status.title(), "✅"),
+            _format_timestamp=lambda value: value,
+            _workflow_label_from_path=lambda path: "workflow12",
+            _pause_auto_refresh=lambda *_args, **_kwargs: None,
+            get_job_debug_info=lambda *_args, **_kwargs: None,
+            _render_plot_block=lambda *_args, **_kwargs: None,
+        )
+
+        progress_stats.assert_called_once_with(
+            {
+                "CPU Time": "2m 4s",
+                "Peak RSS": "2.0 GB",
+            }
+        )
+        fake_st.caption.assert_any_call("Workflow usage")
+
 
 class TestRenderWorkflowPlotPayload:
     def test_renders_saved_image_artifacts(self, tmp_path):
@@ -1339,7 +2395,7 @@ class TestRenderWorkflowPlotPayload:
         fake_st.image.assert_called_once_with(
             str(image_path),
             caption="Volcano plot · AD vs control",
-            use_container_width=True,
+            width="stretch",
         )
         fake_st.caption.assert_not_called()
 
@@ -1409,7 +2465,7 @@ class TestRenderPlotBlock:
         fake_st.image.assert_called_once_with(
             b"fake-png",
             caption="Volcano plot · AD vs control",
-            use_container_width=True,
+            width="stretch",
         )
         fake_st.caption.assert_not_called()
 
@@ -1664,6 +2720,170 @@ class TestPublicationPlotHelpers:
         assert b"plotly" in payload.lower()
 
 
+class TestProjectMarkdownDownloads:
+    def test_extract_downloadable_project_paths_prefers_project_paths(self):
+        symbols = _load_renderers_symbols(
+            {"_looks_like_downloadable_project_path", "_extract_downloadable_project_paths"}
+        )
+
+        extract_paths = symbols["_extract_downloadable_project_paths"]
+        markdown = (
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`\n\n"
+            "Also see workflow10/report.html and `data/qc/final_stats.tsv`."
+        )
+
+        assert extract_paths(markdown) == [
+            "/tmp/proj/summaries/workflow-summary.md",
+            "data/qc/final_stats.tsv",
+            "workflow10/report.html",
+        ]
+
+    def test_extract_downloadable_project_paths_skips_remote_directory_paths(self):
+        symbols = _load_renderers_symbols(
+            {"_looks_like_downloadable_project_path", "_extract_downloadable_project_paths"}
+        )
+
+        extract_paths = symbols["_extract_downloadable_project_paths"]
+        markdown = (
+            "Sample F121-9r1 is staged on hpc3 at "
+            "`/share/crsp/lab/seyedam/share/agoutic/seyedam/data/2960436ba625d300`."
+        )
+
+        assert extract_paths(markdown) == []
+
+    def test_render_md_with_dataframes_adds_project_download_button(self):
+        fake_st = SimpleNamespace(
+            session_state={},
+            markdown=MagicMock(),
+            dataframe=MagicMock(),
+            link_button=MagicMock(),
+            caption=MagicMock(),
+        )
+        fake_response = SimpleNamespace(
+            status_code=200,
+            content=b"summary-bytes",
+            headers={
+                "content-type": "text/markdown",
+                "content-disposition": 'attachment; filename="workflow-summary.md"',
+            },
+        )
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_download_filename_from_headers",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+        request_fn = MagicMock(return_value=fake_response)
+
+        render_markdown(
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=request_fn,
+        )
+
+        fake_st.markdown.assert_called_once_with("Saved summary: `/tmp/proj/summaries/workflow-summary.md`")
+        request_fn.assert_not_called()
+        fake_st.link_button.assert_called_once_with(
+            label="⬇️ Download workflow-summary.md",
+            url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
+            key="_project_download_block-1_main_0",
+        )
+
+    def test_render_md_with_dataframes_retries_link_button_without_key_for_older_streamlit(self):
+        fake_st = SimpleNamespace(
+            session_state={},
+            markdown=MagicMock(),
+            dataframe=MagicMock(),
+            caption=MagicMock(),
+        )
+        fake_st.link_button = MagicMock(side_effect=[TypeError("unexpected keyword argument 'key'"), None])
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_download_filename_from_headers",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+
+        render_markdown(
+            "Saved summary: `/tmp/proj/summaries/workflow-summary.md`",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=MagicMock(),
+        )
+
+        assert fake_st.link_button.call_args_list == [
+            call(
+                label="⬇️ Download workflow-summary.md",
+                url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
+                key="_project_download_block-1_main_0",
+            ),
+            call(
+                label="⬇️ Download workflow-summary.md",
+                url="http://api.test/projects/proj-1/files/download?path=%2Ftmp%2Fproj%2Fsummaries%2Fworkflow-summary.md",
+            ),
+        ]
+
+    def test_skips_inline_download_control_for_fastq_inputs(self):
+        fake_st = SimpleNamespace(
+            markdown=MagicMock(),
+            link_button=MagicMock(),
+        )
+        symbols = _load_renderers_symbols(
+            {
+                "_looks_like_downloadable_project_path",
+                "_extract_downloadable_project_paths",
+                "_should_render_inline_download_control",
+                "_project_file_download_url",
+                "_render_project_file_download_controls",
+                "_render_md_with_dataframes",
+            },
+            {
+                "st": fake_st,
+            },
+        )
+
+        render_markdown = symbols["_render_md_with_dataframes"]
+        request_fn = MagicMock()
+
+        render_markdown(
+            "Use input file `data/ENCFF874VSI.fastq.gz` on hpc3.",
+            "block-1",
+            "main",
+            api_url="http://api.test",
+            project_id="proj-1",
+            request_fn=request_fn,
+        )
+
+        fake_st.markdown.assert_called_once_with("Use input file `data/ENCFF874VSI.fastq.gz` on hpc3.")
+        request_fn.assert_not_called()
+        fake_st.link_button.assert_not_called()
+
+
 class TestBlockRequiresFullRefresh:
     def test_only_running_execution_and_download_jobs_require_full_refresh(self):
         fn = _load_function("_block_requires_full_refresh")
@@ -1675,6 +2895,104 @@ class TestBlockRequiresFullRefresh:
         assert fn({"type": "WORKFLOW_PLAN", "status": "RUNNING"}) is False
         assert fn({"type": "STAGING_TASK", "status": "RUNNING"}) is False
         assert fn({"type": "EXECUTION_JOB", "status": "DONE"}) is False
+
+    def test_import_pending_sync_still_requires_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "pending_import"}},
+        }) is True
+
+    def test_stale_completed_import_without_transfer_state_still_requires_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {
+                "imported_source_kind": "slurm",
+                "job_status": {"status": "COMPLETED"},
+            },
+        }) is True
+
+    def test_completed_import_with_stale_transfer_does_not_require_full_refresh(self):
+        fn = _load_function("_block_requires_full_refresh")
+
+        assert fn({
+            "type": "EXECUTION_JOB",
+            "status": "DONE",
+            "payload": {
+                "imported_source_kind": "slurm",
+                "job_status": {"status": "COMPLETED", "transfer_state": "stale"},
+            },
+        }) is False
+
+
+class TestBlockShouldRenderInLiveFragment:
+    def test_running_execution_job_uses_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "EXECUTION_JOB", "status": "RUNNING"}) is True
+
+    def test_pending_transfer_execution_job_uses_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn(
+            {
+                "type": "EXECUTION_JOB",
+                "status": "DONE",
+                "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "pending_import"}},
+            }
+        ) is True
+
+    def test_running_staging_and_download_tasks_use_live_fragment(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "STAGING_TASK", "status": "RUNNING"}) is True
+        assert fn({"type": "DOWNLOAD_TASK", "status": "RUNNING"}) is True
+
+    def test_terminal_blocks_stay_in_cold_history(self):
+        fn = _load_function("_block_should_render_in_live_fragment")
+
+        assert fn({"type": "WORKFLOW_PLAN", "status": "RUNNING"}) is False
+        assert fn({"type": "STAGING_TASK", "status": "DONE"}) is False
+        assert fn(
+            {
+                "type": "EXECUTION_JOB",
+                "status": "DONE",
+                "payload": {"job_status": {"status": "COMPLETED", "transfer_state": "outputs_downloaded"}},
+            }
+        ) is False
+
+
+class TestRenderLiveBlockFragment:
+    def test_renders_live_block_without_explicit_container_key(self):
+        container_calls = []
+
+        @contextlib.contextmanager
+        def _container(**kwargs):
+            container_calls.append(kwargs)
+            yield
+
+        fake_st = SimpleNamespace(
+            container=_container,
+            session_state=SimpleNamespace(active_project_id="proj-1"),
+        )
+        render_block = MagicMock()
+        fn = _load_function(
+            "_render_live_block_fragment",
+            {
+                "st": fake_st,
+                "render_block": render_block,
+            },
+        )
+
+        fn({"id": "blk-1", "type": "WORKFLOW_PLAN", "payload": {}}, expected_project_id="proj-1")
+
+        assert container_calls == [{}]
+        render_block.assert_called_once()
 
 
 class TestCachedJobStatus:
@@ -1708,7 +3026,7 @@ class TestCachedJobStatus:
         request.assert_called_once_with(
             "GET",
             "http://api.test/jobs/run-123/status",
-            timeout=5.0,
+            timeout=60.0,
         )
 
     def test_reuses_recent_cached_status_without_refetch(self):

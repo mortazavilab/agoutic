@@ -9,6 +9,245 @@ from components.progress import progress_stats, segmented_progress, stepper, tim
 _STAGING_UI_STALE_SECONDS = float(os.getenv("STAGING_UI_STALE_SECONDS", "90"))
 _STAGING_UI_ACTIVE_REFRESH_SECONDS = float(os.getenv("STAGING_UI_ACTIVE_REFRESH_SECONDS", "8"))
 _STAGING_UI_REFRESH_RETRY_SECONDS = float(os.getenv("STAGING_UI_REFRESH_RETRY_SECONDS", "5"))
+_WF_PORE_C_OUTPUT_FLAG_ORDER = ("pairs", "mcool", "hi_c", "bed", "chromunity", "coverage", "paired_end")
+_WF_PORE_C_OUTPUT_FLAG_LABELS = {
+    "pairs": "Pairs",
+    "mcool": "mcool",
+    "hi_c": "Hi-C",
+    "bed": "BED",
+    "chromunity": "Chromunity",
+    "coverage": "Coverage",
+    "paired_end": "Paired-End",
+}
+
+
+def _wf_pore_c_ui_enabled() -> bool:
+    return str(os.getenv("WF_PORE_C_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _workflow_key_from_payload(*payloads) -> str:
+    for payload in payloads:
+        if isinstance(payload, dict):
+            raw_value = payload.get("workflow_key")
+            normalized = str(raw_value or "").strip().lower()
+            if normalized:
+                if normalized == "wf_pore_c" and _wf_pore_c_ui_enabled():
+                    return "wf_pore_c"
+                if normalized != "wf_pore_c":
+                    return normalized
+    return "dogme"
+
+
+def _wf_pore_c_output_flag_values(raw_flags) -> dict[str, bool]:
+    flags = {
+        "pairs": bool((raw_flags or {}).get("pairs", True)),
+        "mcool": bool((raw_flags or {}).get("mcool", True)),
+        "hi_c": bool((raw_flags or {}).get("hi_c", False)),
+        "bed": bool((raw_flags or {}).get("bed", False)),
+        "chromunity": bool((raw_flags or {}).get("chromunity", False)),
+        "coverage": bool((raw_flags or {}).get("coverage", False)),
+        "paired_end": bool((raw_flags or {}).get("paired_end", False)),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _workflow_path_label(value) -> str:
+    cleaned = str(value or "").strip().rstrip("/")
+    if not cleaned:
+        return ""
+    return os.path.basename(cleaned) or cleaned
+
+
+def _format_usage_duration(seconds) -> str:
+    try:
+        total_seconds = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return ""
+    if total_seconds <= 0:
+        return ""
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _format_usage_memory_mb(megabytes) -> str:
+    try:
+        value = float(megabytes or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    if value >= 1024.0:
+        return f"{value / 1024.0:.1f} GB"
+    return f"{value:.0f} MB"
+
+
+def _workflow_usage_metrics(workflow_usage: dict | None) -> dict[str, str | int | float]:
+    if not isinstance(workflow_usage, dict):
+        return {}
+
+    metrics: dict[str, str | int | float] = {}
+    cpu_queue_time = _format_usage_duration(workflow_usage.get("cpu_queue_seconds"))
+    if cpu_queue_time:
+        metrics["CPU Queue Time"] = cpu_queue_time
+    else:
+        cpu_time = _format_usage_duration(workflow_usage.get("cpu_seconds"))
+        if cpu_time:
+            metrics["CPU Time"] = cpu_time
+
+    gpu_queue_time = _format_usage_duration(workflow_usage.get("gpu_queue_seconds"))
+    if gpu_queue_time:
+        metrics["GPU Queue Time"] = gpu_queue_time
+    else:
+        actual_gpu_seconds = workflow_usage.get("gpu_seconds")
+        gpu_time = _format_usage_duration(actual_gpu_seconds if actual_gpu_seconds not in (None, "") else workflow_usage.get("estimated_gpu_task_seconds"))
+        if gpu_time:
+            metrics["GPU Time" if actual_gpu_seconds not in (None, "") else "GPU Task Time"] = gpu_time
+
+    peak_rss = _format_usage_memory_mb(workflow_usage.get("max_rss_mb"))
+    if peak_rss:
+        metrics["Peak RSS"] = peak_rss
+
+    peak_vmem = _format_usage_memory_mb(workflow_usage.get("max_vmem_mb"))
+    if peak_vmem:
+        metrics["Peak VMEM"] = peak_vmem
+
+    accounted_tasks = workflow_usage.get("accounted_task_count")
+    if accounted_tasks not in (None, "", 0):
+        metrics["Accounted Tasks"] = int(accounted_tasks)
+
+    billing_entries = workflow_usage.get("billing_entries")
+    if isinstance(billing_entries, list) and billing_entries:
+        for entry in billing_entries:
+            if not isinstance(entry, dict):
+                continue
+            billing_hours = entry.get("billing_hours")
+            if billing_hours in (None, ""):
+                continue
+            resource_type = str(entry.get("resource_type") or "").strip().upper()
+            account_name = str(entry.get("account") or "").strip()
+            prefix = "GPU" if resource_type == "GPU" else "CPU" if resource_type == "CPU" else ""
+            label = f"{prefix} Billing Hours".strip() or "Billing Hours"
+            if account_name:
+                label = f"{label} ({account_name})"
+            metrics[label] = billing_hours
+
+    billing_by_account = workflow_usage.get("billing_hours_by_account")
+    if not metrics and isinstance(billing_by_account, dict) and billing_by_account:
+        for account_name, billing_hours in sorted(billing_by_account.items()):
+            if billing_hours in (None, ""):
+                continue
+            label = f"Billing Hours ({str(account_name).strip() or 'unknown'})"
+            metrics[label] = billing_hours
+
+    billing_units = workflow_usage.get("billing_units")
+    has_account_billing = bool(isinstance(billing_entries, list) and billing_entries) or bool(isinstance(billing_by_account, dict) and billing_by_account)
+    if billing_units not in (None, "") and not has_account_billing:
+        label = str(workflow_usage.get("billing_label") or "Billing Units").strip() or "Billing Units"
+        metrics[label] = billing_units
+
+    return metrics
+
+
+def _workflow_usage_message(workflow_usage: dict | None) -> str:
+    if not isinstance(workflow_usage, dict):
+        return ""
+    return str(workflow_usage.get("usage_message") or "").strip()
+
+
+def _wf_pore_c_output_flag_summary(raw_flags) -> str:
+    flags = _wf_pore_c_output_flag_values(raw_flags)
+    enabled = [
+        _WF_PORE_C_OUTPUT_FLAG_LABELS[flag_name]
+        for flag_name in _WF_PORE_C_OUTPUT_FLAG_ORDER
+        if flags.get(flag_name)
+    ]
+    return ", ".join(enabled)
+
+
+def _workflow_specific_metadata(content: dict | None, job_status: dict | None = None) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(job_status, content)
+    if workflow_key != "wf_pore_c":
+        return {}
+
+    payload = job_status if isinstance(job_status, dict) and job_status else content or {}
+    details = {}
+    input_type = str(payload.get("input_type") or "").strip().lower()
+    if input_type:
+        details["Input"] = input_type.upper()
+    reference_fasta = payload.get("reference_fasta") or (content or {}).get("reference_fasta")
+    if reference_fasta:
+        details["Reference"] = _workflow_path_label(reference_fasta)
+    sample_sheet = payload.get("sample_sheet") or (content or {}).get("sample_sheet")
+    if sample_sheet:
+        details["Sample Sheet"] = _workflow_path_label(sample_sheet)
+    cutter = str(payload.get("cutter") or (content or {}).get("cutter") or "").strip()
+    if cutter:
+        details["Cutter"] = cutter
+    outputs = _wf_pore_c_output_flag_summary(payload.get("output_flags") or (content or {}).get("output_flags"))
+    if outputs:
+        details["Outputs"] = outputs
+    return details
+
+
+def _staging_card_metadata(content: dict, *, remote_profile: str, progress: int) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(content)
+    if workflow_key == "wf_pore_c":
+        metadata = {
+            "Workflow": "wf-pore-c",
+            "Target": remote_profile,
+            "Progress": f"{max(min(progress, 100), 0)}%",
+        }
+        input_type = str(content.get("input_type") or "").strip().lower()
+        if input_type:
+            metadata["Input"] = input_type.upper()
+        return metadata
+    return {
+        "Mode": content.get("mode", "Unknown"),
+        "Target": remote_profile,
+        "Progress": f"{max(min(progress, 100), 0)}%",
+    }
+
+
+def _execution_run_metadata(
+    content: dict,
+    job_status: dict,
+    *,
+    run_uuid: str,
+    workflow_label: str,
+    started_label: str,
+    completed_label: str,
+    duration_label: str,
+    is_script_job: bool,
+    script_id: str,
+) -> dict[str, str]:
+    workflow_key = _workflow_key_from_payload(job_status, content)
+    if workflow_key == "wf_pore_c":
+        run_meta = {"Workflow": "wf-pore-c", "Run UUID": run_uuid}
+        if is_script_job and script_id:
+            run_meta["Script"] = script_id
+        if workflow_label:
+            run_meta["Folder"] = workflow_label
+    else:
+        run_meta = {"Mode": content.get("mode", "Unknown"), "Run UUID": run_uuid}
+        if is_script_job and script_id:
+            run_meta["Script"] = script_id
+        if workflow_label:
+            run_meta["Workflow"] = workflow_label
+
+    if started_label:
+        run_meta["Started"] = started_label
+    if completed_label:
+        run_meta["Completed"] = completed_label
+    if duration_label:
+        run_meta["Duration"] = duration_label
+    return run_meta
 
 
 def _parse_stage_timestamp(value):
@@ -152,6 +391,389 @@ def _render_stage_transfer_snapshot(transfer_progress: dict | None):
         st.caption(f"Current file: `{current_file}`")
 
 
+def _looks_like_workflow_path(path_value: str) -> bool:
+    if not path_value:
+        return False
+    try:
+        import pathlib as _pathlib
+
+        name = _pathlib.PurePosixPath(path_value).name
+    except Exception:
+        return False
+    if not name.lower().startswith("workflow"):
+        return False
+    return name[8:].isdigit()
+
+
+def _execution_job_workflow_path(content: dict, job_status: dict | None = None) -> str:
+    input_directory = str(content.get("input_directory") or "").strip()
+    candidates: list[str] = []
+    if isinstance(job_status, dict):
+        candidates.extend([
+            str(job_status.get("output_directory") or "").strip(),
+            str(job_status.get("work_directory") or "").strip(),
+        ])
+    candidates.extend([
+        str(content.get("output_directory") or "").strip(),
+        str(content.get("work_directory") or "").strip(),
+    ])
+
+    seen: set[str] = set()
+    fallback = ""
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if input_directory and candidate == input_directory:
+            continue
+        if _looks_like_workflow_path(candidate):
+            return candidate
+        if not fallback:
+            fallback = candidate
+    return fallback
+
+
+def _render_execution_job_actions(
+    *,
+    status_str: str,
+    run_uuid: str,
+    block_id: str,
+    workflow_label: str,
+    sample_name: str,
+    transfer_state: str,
+    show_resume_sync: bool,
+    resume_sync_in_progress: bool,
+    resume_sync_force: bool,
+    sync_cancel_available: bool,
+    API_URL,
+    make_authenticated_request,
+    _pause_auto_refresh,
+):
+    if not run_uuid:
+        return
+
+    if status_str == "COMPLETED":
+        st.divider()
+        _completed_workflow_name = workflow_label or "workflow"
+        _action_cols = st.columns(3 if show_resume_sync else 2)
+        _delete_col = _action_cols[0]
+        _rerun_col = _action_cols[1]
+        _sync_col = _action_cols[2] if show_resume_sync else None
+        with _delete_col:
+            _confirm_key = f"completed_del_confirm_{block_id}"
+            if st.session_state.get(_confirm_key):
+                st.warning(f"⚠️ This will permanently delete `{_completed_workflow_name}` and all its files.")
+                _yes_col, _no_col = st.columns(2)
+                with _yes_col:
+                    if st.button("Yes, delete", key=f"completed_del_yes_{block_id}", type="primary"):
+                        _pause_auto_refresh(4)
+                        try:
+                            _del_resp = make_authenticated_request(
+                                "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
+                            )
+                            if _del_resp.status_code == 200:
+                                st.success(_del_resp.json().get("message", "Deleted."))
+                                st.session_state.pop(_confirm_key, None)
+                                st.rerun()
+                            else:
+                                st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
+                with _no_col:
+                    if st.button("No, keep it", key=f"completed_del_no_{block_id}"):
+                        st.session_state.pop(_confirm_key, None)
+                        st.rerun()
+            elif workflow_label:
+                if st.button(f"🗑️ Delete {_completed_workflow_name}", key=f"completed_del_btn_{block_id}"):
+                    st.session_state[_confirm_key] = True
+                    _pause_auto_refresh(4)
+                    st.rerun()
+            else:
+                st.caption("Delete unavailable until the workflow folder is known.")
+        with _rerun_col:
+            if st.button("↻ Resume Workflow", key=f"completed_rerun_{block_id}"):
+                try:
+                    _rerun_resp = make_authenticated_request(
+                        "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                    )
+                    if _rerun_resp.status_code == 200:
+                        st.success("Workflow resume submitted.")
+                        st.rerun()
+                    else:
+                        st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                except Exception as _e:
+                    st.error(f"Error: {_e}")
+        if _sync_col is not None:
+            with _sync_col:
+                if resume_sync_in_progress:
+                    st.caption("Sync already in progress for this workflow.")
+                if st.button(
+                    "Resume Sync",
+                    key=f"completed_sync_{block_id}",
+                    disabled=resume_sync_in_progress,
+                    help=(
+                        "Results are still syncing into this workflow."
+                        if resume_sync_in_progress else None
+                    ),
+                ):
+                    try:
+                        _sync_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/jobs/{run_uuid}/sync-results",
+                            params={"force": "true" if resume_sync_force else "false"},
+                            timeout=30,
+                        )
+                        _sync_payload = _sync_resp.json() if _sync_resp.content else {}
+                        if _sync_resp.status_code == 200:
+                            _sync_state = (_sync_payload.get("transfer_state") or "").strip().lower()
+                            if _sync_state:
+                                st.session_state[f"_transfer_state_{run_uuid}"] = _sync_state
+                            _sync_message = _sync_payload.get("message") or "Workflow sync triggered."
+                            if _sync_payload.get("success", True):
+                                st.success(_sync_message)
+                            else:
+                                st.warning(_sync_message)
+                            st.rerun()
+                        else:
+                            st.error(f"Resume sync failed: {_sync_resp.status_code} — {_sync_resp.text[:200]}")
+                    except Exception as _e:
+                        st.error(f"Error: {_e}")
+
+        _rename_default = sample_name or _completed_workflow_name
+        _rename_value = st.text_input(
+            "Rename workflow",
+            value=_rename_default,
+            key=f"completed_rename_input_{block_id}",
+        )
+        if _rename_value.strip() and _rename_value.strip() != _rename_default and st.button("✏️ Rename Workflow", key=f"completed_rename_btn_{block_id}"):
+            try:
+                _rename_resp = make_authenticated_request(
+                    "POST",
+                    f"{API_URL}/jobs/{run_uuid}/rename",
+                    json={"new_name": _rename_value.strip()},
+                    timeout=20,
+                )
+                if _rename_resp.status_code == 200:
+                    st.success(f"Workflow renamed to {_rename_value.strip()}.")
+                    st.rerun()
+                else:
+                    st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+        return
+
+    if status_str == "CANCELLED":
+        st.divider()
+        _work_dir_name = workflow_label
+        _del_col, _rerun_col, _resub_col = st.columns(3)
+        with _del_col:
+            _del_key = f"del_{block_id}"
+            _confirm_key = f"del_confirm_{block_id}"
+            if st.session_state.get(_confirm_key):
+                st.warning(f"⚠️ This will permanently delete `{_work_dir_name or 'workflow folder'}` and all its files.")
+                _yes_col, _no_col = st.columns(2)
+                with _yes_col:
+                    if st.button("Yes, delete", key=f"del_yes_{block_id}", type="primary"):
+                        _pause_auto_refresh(4)
+                        try:
+                            _del_resp = make_authenticated_request(
+                                "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
+                            )
+                            if _del_resp.status_code == 200:
+                                _del_data = _del_resp.json()
+                                st.success(_del_data.get("message", "Deleted."))
+                                st.session_state.pop(_confirm_key, None)
+                                st.rerun()
+                            else:
+                                st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
+                with _no_col:
+                    if st.button("No, keep it", key=f"del_no_{block_id}"):
+                        st.session_state.pop(_confirm_key, None)
+                        st.rerun()
+            elif _work_dir_name:
+                if st.button(f"🗑️ Delete {_work_dir_name}", key=_del_key):
+                    st.session_state[_confirm_key] = True
+                    _pause_auto_refresh(4)
+                    st.rerun()
+            else:
+                st.caption("Delete unavailable until the workflow folder is known.")
+        with _rerun_col:
+            if st.button("↻ Resume Workflow", key=f"cancel_rerun_{block_id}"):
+                try:
+                    _rerun_resp = make_authenticated_request(
+                        "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                    )
+                    if _rerun_resp.status_code == 200:
+                        st.success("Workflow resume submitted.")
+                        st.rerun()
+                    else:
+                        st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                except Exception as _e:
+                    st.error(f"Error: {_e}")
+        with _resub_col:
+            if transfer_state in {"sync_cancelled", "stale"}:
+                if st.button("Resume Sync", key=f"cancelled_sync_resume_{block_id}"):
+                    try:
+                        _sync_resp = make_authenticated_request(
+                            "POST",
+                            f"{API_URL}/jobs/{run_uuid}/sync-results",
+                            params={"force": "false"},
+                            timeout=30,
+                        )
+                        if _sync_resp.status_code == 200:
+                            st.success((_sync_resp.json() or {}).get("message", "Workflow sync triggered."))
+                            st.rerun()
+                        else:
+                            st.error(f"Resume sync failed: {_sync_resp.status_code} — {_sync_resp.text[:200]}")
+                    except Exception as _e:
+                        st.error(f"Error: {_e}")
+            else:
+                if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
+                    try:
+                        _resub_resp = make_authenticated_request(
+                            "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
+                        )
+                        if _resub_resp.status_code == 200:
+                            st.success("Approval gate created — scroll down to review and approve.")
+                            st.rerun()
+                        else:
+                            st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
+                    except Exception as _e:
+                        st.error(f"Error: {_e}")
+
+        _cancelled_rename = st.text_input(
+            "Rename workflow",
+            value=sample_name or _work_dir_name,
+            key=f"cancelled_rename_input_{block_id}",
+        )
+        if _cancelled_rename.strip() and _cancelled_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"cancelled_rename_btn_{block_id}"):
+            try:
+                _rename_resp = make_authenticated_request(
+                    "POST",
+                    f"{API_URL}/jobs/{run_uuid}/rename",
+                    json={"new_name": _cancelled_rename.strip()},
+                    timeout=20,
+                )
+                if _rename_resp.status_code == 200:
+                    st.success(f"Workflow renamed to {_cancelled_rename.strip()}.")
+                    st.rerun()
+                else:
+                    st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+        return
+
+    if status_str == "RUNNING":
+        st.divider()
+        _cancel_label = "🛑 Cancel Sync" if sync_cancel_available else "🛑 Cancel Job"
+        if st.button(_cancel_label, type="primary", key=f"cancel_job_{block_id}"):
+            try:
+                _cancel_resp = make_authenticated_request(
+                    "POST", f"{API_URL}/jobs/{run_uuid}/cancel", timeout=15
+                )
+                if _cancel_resp.status_code == 200:
+                    _cancel_data = _cancel_resp.json()
+                    _cancel_status = str(_cancel_data.get("status") or "").strip().lower()
+                    _cancel_message = _cancel_data.get("message", "Job cancelled successfully.")
+                    if _cancel_status == "sync_cancelled":
+                        st.info(_cancel_message)
+                    else:
+                        st.success(_cancel_message)
+                    st.rerun()
+                elif _cancel_resp.status_code == 400:
+                    st.warning(_cancel_resp.json().get("detail", "Cannot cancel job."))
+                else:
+                    st.error(f"Cancel failed: {_cancel_resp.status_code} — {_cancel_resp.text[:200]}")
+            except Exception as _ce:
+                st.error(f"Error cancelling job: {_ce}")
+        return
+
+    if status_str == "FAILED":
+        st.divider()
+        _work_dir_name = workflow_label
+        _delete_col, _rerun_col, _resubmit_col = st.columns(3)
+        with _delete_col:
+            _confirm_key = f"del_confirm_{block_id}"
+            if st.session_state.get(_confirm_key):
+                st.warning(f"⚠️ This will permanently delete `{_work_dir_name}` and all its files.")
+                _yes_col, _no_col = st.columns(2)
+                with _yes_col:
+                    if st.button("Yes, delete failed run", key=f"failed_del_yes_{block_id}", type="primary"):
+                        _pause_auto_refresh(4)
+                        try:
+                            _del_resp = make_authenticated_request(
+                                "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
+                            )
+                            if _del_resp.status_code == 200:
+                                st.success(_del_resp.json().get("message", "Deleted."))
+                                st.session_state.pop(_confirm_key, None)
+                                st.rerun()
+                            else:
+                                st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
+                        except Exception as _e:
+                            st.error(f"Error: {_e}")
+                with _no_col:
+                    if st.button("No, keep it", key=f"failed_del_no_{block_id}"):
+                        st.session_state.pop(_confirm_key, None)
+                        st.rerun()
+            elif _work_dir_name:
+                if st.button(f"🗑️ Delete {_work_dir_name}", key=f"failed_del_btn_{block_id}"):
+                    st.session_state[_confirm_key] = True
+                    _pause_auto_refresh(4)
+                    st.rerun()
+            else:
+                st.caption("Delete unavailable until the workflow folder is known.")
+        with _rerun_col:
+            if st.button("↻ Resume Workflow", key=f"failed_rerun_{block_id}"):
+                try:
+                    _rerun_resp = make_authenticated_request(
+                        "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
+                    )
+                    if _rerun_resp.status_code == 200:
+                        st.success("Workflow resume submitted.")
+                        st.rerun()
+                    else:
+                        st.error(f"Resume failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
+                except Exception as _e:
+                    st.error(f"Error: {_e}")
+        with _resubmit_col:
+            if st.button("🔄 Resubmit Job", key=f"failed_resub_{block_id}"):
+                try:
+                    _resub_resp = make_authenticated_request(
+                        "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
+                    )
+                    if _resub_resp.status_code == 200:
+                        st.success("Approval gate created — scroll down to review and approve.")
+                        st.rerun()
+                    else:
+                        st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
+                except Exception as _e:
+                    st.error(f"Error: {_e}")
+
+        _failed_rename = st.text_input(
+            "Rename workflow",
+            value=sample_name or _work_dir_name,
+            key=f"failed_rename_input_{block_id}",
+        )
+        if _failed_rename.strip() and _failed_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"failed_rename_btn_{block_id}"):
+            try:
+                _rename_resp = make_authenticated_request(
+                    "POST",
+                    f"{API_URL}/jobs/{run_uuid}/rename",
+                    json={"new_name": _failed_rename.strip()},
+                    timeout=20,
+                )
+                if _rename_resp.status_code == 200:
+                    st.success(f"Workflow renamed to {_failed_rename.strip()}.")
+                    st.rerun()
+                else:
+                    st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
+            except Exception as _e:
+                st.error(f"Error: {_e}")
+
+
 def render_block_part2(
     *,
     btype,
@@ -169,6 +791,7 @@ def render_block_part2(
     _format_plan_timestamp,
     _format_duration,
     _block_timestamp,
+    _render_md_with_dataframes=None,
     _render_workflow_plot_payload,
     _render_embedded_dataframes,
     _render_step_payload,
@@ -179,8 +802,14 @@ def render_block_part2(
     _pause_auto_refresh,
     get_job_debug_info,
     _render_plot_block,
+    live_job_status_map=None,
+    render_scope="main",
 ):
     handled = False
+    if _render_md_with_dataframes is None:
+        def _render_md_with_dataframes(md: str, *_args, **_kwargs):
+            st.markdown(md)
+
     if btype == "WORKFLOW_PLAN":
         handled = True
         with st.chat_message("assistant", avatar="🗺️"):
@@ -293,13 +922,13 @@ def render_block_part2(
                                     _render_workflow_plot_payload(result, block_id, f"step_{idx}")
                                     result_markdown = result.get("markdown")
                                     if isinstance(result_markdown, str) and result_markdown.strip():
-                                        st.markdown(result_markdown)
+                                        _render_md_with_dataframes(result_markdown, f"{block_id}_step_{idx}", "result")
                                     result_dfs = result.get("_dataframes")
                                     if isinstance(result_dfs, dict) and result_dfs:
                                         _render_embedded_dataframes(result_dfs, f"{block_id}_step_{idx}")
                                     post_dataframe_markdown = result.get("post_dataframe_markdown")
                                     if isinstance(post_dataframe_markdown, str) and post_dataframe_markdown.strip():
-                                        st.markdown(post_dataframe_markdown)
+                                        _render_md_with_dataframes(post_dataframe_markdown, f"{block_id}_step_{idx}", "post_dataframe")
                                     rendered_result = {
                                         key: value for key, value in result.items()
                                         if key not in {"markdown", "_dataframes", "post_dataframe_markdown"}
@@ -311,7 +940,7 @@ def render_block_part2(
 
             markdown = content.get("markdown")
             if markdown:
-                st.markdown(markdown)
+                _render_md_with_dataframes(markdown, block_id, "plan")
 
             if isinstance(steps, list) and steps:
                 with st.expander("Plan Payload", expanded=False):
@@ -325,7 +954,6 @@ def render_block_part2(
         handled = True
         with st.chat_message("assistant", avatar="📤"):
             sample_name = content.get("sample_name", "Unknown")
-            mode = content.get("mode", "Unknown")
             message = content.get("message", "Preparing remote staging...")
             progress = int(content.get("progress_percent", 0) or 0)
             remote_profile = content.get("ssh_profile_nickname") or content.get("ssh_profile_id") or "remote profile"
@@ -367,7 +995,10 @@ def render_block_part2(
                 _step_current = 1
 
             section_header(f"Remote Staging · {sample_name}", "Reference and data staging progress", icon="📤")
-            metadata_row({"Mode": mode, "Target": remote_profile, "Progress": f"{max(min(progress, 100), 0)}%"})
+            metadata_row(_staging_card_metadata(content, remote_profile=remote_profile, progress=progress))
+            _workflow_details = _workflow_specific_metadata(content)
+            if _workflow_details:
+                metadata_row(_workflow_details)
             stepper(["References", "Sample Data"], current=_step_current, completed=_step_completed, failed=_step_failed)
 
             def _render_stage_part(label: str, part: dict):
@@ -611,7 +1242,6 @@ def render_block_part2(
         with st.chat_message("assistant", avatar="⚙️"):
             run_uuid = content.get("run_uuid", "")
             sample_name = content.get("sample_name", "Unknown")
-            mode = content.get("mode", "Unknown")
             work_directory = content.get("work_directory", "")
             has_identity = bool(run_uuid) or bool(content.get("sample_name"))
             block_status_str = block.get("status", "")
@@ -628,6 +1258,13 @@ def render_block_part2(
             # Also check session state — the block payload may be stale but a
             # previous poll already saw the transfer become active.
             _cached_transfer = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
+            _active_result_sync_states = {"pending_import", "downloading_outputs"}
+            _terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
+            _imported_source_kind_hint = str(
+                (content.get("job_status", {}) or {}).get("imported_source_kind")
+                or content.get("imported_source_kind")
+                or ""
+            ).strip().lower()
             run_type = str(content.get("run_type") or "").strip().lower()
             script_id = str(content.get("script_id") or "").strip()
             run_stage_hint = str(
@@ -639,11 +1276,21 @@ def render_block_part2(
             is_script_job = run_type == "script" or bool(script_id) or run_stage_hint.startswith("SCRIPT_")
             _needs_live_poll = (
                 block_status_str == "RUNNING"
-                or _persisted_transfer in {"downloading_outputs"}
-                or _cached_transfer in {"downloading_outputs"}
+                or _persisted_transfer in _active_result_sync_states
+                or _cached_transfer in _active_result_sync_states
+                or (
+                    run_uuid
+                    and _imported_source_kind_hint == "slurm"
+                    and block_status_str in {"RUNNING", "DONE"}
+                    and _persisted_transfer not in _terminal_result_sync_states
+                    and _cached_transfer not in _terminal_result_sync_states
+                )
             )
             if run_uuid and _needs_live_poll:
-                if callable(get_cached_job_status):
+                if isinstance(live_job_status_map, dict) and isinstance(live_job_status_map.get(run_uuid), dict):
+                    job_status = live_job_status_map[run_uuid]
+                    live_status_poll_succeeded = True
+                elif callable(get_cached_job_status):
                     live_job_status, live_status_poll_succeeded = get_cached_job_status(run_uuid)
                     if isinstance(live_job_status, dict) and live_job_status:
                         job_status = live_job_status
@@ -667,6 +1314,8 @@ def render_block_part2(
                                 st.session_state[f"_transfer_state_{run_uuid}"] = _live_ts
                     except Exception:
                         pass  # Fall back to block payload
+
+            workflow_directory = _execution_job_workflow_path(content, job_status)
 
             run_stage_hint = str(
                 job_status.get("run_stage")
@@ -696,34 +1345,50 @@ def render_block_part2(
                 submitted_at = job_status.get("submitted_at") or content.get("submitted_at") or block.get("created_at")
                 started_at = job_status.get("started_at") or content.get("started_at")
                 completed_at = job_status.get("completed_at") or content.get("completed_at")
-                workflow_label = _workflow_label_from_path(work_directory)
+                workflow_label = _workflow_label_from_path(workflow_directory)
                 run_stage = (job_status.get("run_stage") or "").strip().lower()
                 current_step = (job_status.get("current_step") or "").strip()
                 current_step_detail = (job_status.get("current_step_detail") or "").strip()
                 transfer_state = (job_status.get("transfer_state") or "").strip().lower()
                 result_destination = (job_status.get("result_destination") or "").strip().lower()
+                imported_source_kind = (job_status.get("imported_source_kind") or "").strip().lower()
+                import_warning = (job_status.get("import_warning_message") or "").strip()
+                sync_cancel_available = bool(run_uuid and transfer_state in {"pending_import", "downloading_outputs"})
+                show_resume_sync = bool(
+                    run_uuid and (
+                        (imported_source_kind and import_warning)
+                        or transfer_state in {"sync_cancelled", "stale"}
+                    )
+                )
+                resume_sync_in_progress = sync_cancel_available
+                resume_sync_force = transfer_state == "outputs_downloaded"
                 try:
                     progress_pct = max(0, min(100, int(progress or 0)))
                 except (TypeError, ValueError):
                     progress_pct = 0
                 _chip, _status_label, _status_icon = _run_status_label(status_str)
                 status_chip(_chip, label=_status_label, icon=_status_icon)
+                if import_warning:
+                    status_chip("warning", label="Partial Import", icon="⚠️")
 
-                run_meta = {"Mode": mode, "Run UUID": run_uuid}
-                if is_script_job and script_id:
-                    run_meta["Script"] = script_id
-                if workflow_label:
-                    run_meta["Workflow"] = workflow_label
                 started_label = _format_timestamp(started_at or submitted_at)
                 completed_label = _format_timestamp(completed_at)
                 duration_label = _format_duration(started_at or submitted_at, completed_at)
-                if started_label:
-                    run_meta["Started"] = started_label
-                if completed_label:
-                    run_meta["Completed"] = completed_label
-                if duration_label:
-                    run_meta["Duration"] = duration_label
+                run_meta = _execution_run_metadata(
+                    content,
+                    job_status,
+                    run_uuid=run_uuid,
+                    workflow_label=workflow_label,
+                    started_label=started_label,
+                    completed_label=completed_label,
+                    duration_label=duration_label,
+                    is_script_job=is_script_job,
+                    script_id=script_id,
+                )
                 metadata_row(run_meta)
+                _workflow_details = _workflow_specific_metadata(content, job_status)
+                if _workflow_details:
+                    metadata_row(_workflow_details)
 
                 if current_step:
                     current_step_message = current_step
@@ -765,11 +1430,11 @@ def render_block_part2(
                     elif run_stage in run_stages:
                         execute_state = "running"
 
-                    if run_stage in {"syncing_results"} or transfer_state in {"downloading_outputs"}:
+                    if run_stage in {"syncing_results"} or transfer_state in _active_result_sync_states:
                         finalize_state = "running"
                     elif run_stage in {"completed"} or transfer_state in {"outputs_downloaded"}:
                         finalize_state = "complete"
-                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed"}:
+                    elif run_stage in {"failed", "cancelled"} or transfer_state in {"transfer_failed", "sync_cancelled", "stale"}:
                         finalize_state = "failed"
 
                 elif is_done:
@@ -798,9 +1463,9 @@ def render_block_part2(
                     run_state = "active" if run_stage in {"queued", "running", "collecting_outputs"} else ("complete" if run_stage in {"syncing_results", "completed"} else ("failed" if run_stage in {"failed", "cancelled"} else "pending"))
                     if transfer_state in {"outputs_downloaded"}:
                         sync_state = "complete"
-                    elif transfer_state in {"downloading_outputs"} or run_stage == "syncing_results":
+                    elif transfer_state in _active_result_sync_states or run_stage == "syncing_results":
                         sync_state = "active"
-                    elif transfer_state in {"transfer_failed"}:
+                    elif transfer_state in {"transfer_failed", "sync_cancelled", "stale"}:
                         sync_state = "failed"
                     elif run_stage in {"completed"} and result_destination in {"remote", ""}:
                         sync_state = "complete"
@@ -831,6 +1496,18 @@ def render_block_part2(
                 # Status indicator
                 if status_str == "COMPLETED":
                     st.success(f"✅ {message}")
+                    if import_warning:
+                        info_callout(import_warning, kind="warning", icon="⚠️")
+
+                    workflow_usage = job_status.get("workflow_usage") if isinstance(job_status, dict) else {}
+                    workflow_usage_metrics = _workflow_usage_metrics(workflow_usage)
+                    workflow_usage_message = _workflow_usage_message(workflow_usage)
+                    if workflow_usage_metrics or workflow_usage_message:
+                        st.caption("Workflow usage")
+                        if workflow_usage_metrics:
+                            progress_stats(workflow_usage_metrics)
+                        if workflow_usage_message:
+                            st.caption(workflow_usage_message)
                     
                     # Show completed tasks summary
                     if tasks and isinstance(tasks, dict):
@@ -867,73 +1544,6 @@ def render_block_part2(
                                     else:
                                         instances_sorted = sorted(instances)
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
-
-                    st.divider()
-                    _completed_workflow_name = workflow_label or "workflow"
-                    _delete_col, _rerun_col = st.columns(2)
-                    with _delete_col:
-                        _confirm_key = f"completed_del_confirm_{block_id}"
-                        if st.session_state.get(_confirm_key):
-                            st.warning(f"⚠️ This will permanently delete `{_completed_workflow_name}` and all its files.")
-                            _yes_col, _no_col = st.columns(2)
-                            with _yes_col:
-                                if st.button("Yes, delete", key=f"completed_del_yes_{block_id}", type="primary"):
-                                    _pause_auto_refresh(4)
-                                    try:
-                                        _del_resp = make_authenticated_request(
-                                            "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
-                                        )
-                                        if _del_resp.status_code == 200:
-                                            st.success(_del_resp.json().get("message", "Deleted."))
-                                            st.session_state.pop(_confirm_key, None)
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
-                                    except Exception as _e:
-                                        st.error(f"Error: {_e}")
-                            with _no_col:
-                                if st.button("No, keep it", key=f"completed_del_no_{block_id}"):
-                                    st.session_state.pop(_confirm_key, None)
-                                    st.rerun()
-                        elif st.button(f"🗑️ Delete {_completed_workflow_name}", key=f"completed_del_btn_{block_id}"):
-                            st.session_state[_confirm_key] = True
-                            _pause_auto_refresh(4)
-                            st.rerun()
-                    with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"completed_rerun_{block_id}"):
-                            try:
-                                _rerun_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
-                                )
-                                if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-
-                    _rename_default = sample_name or _completed_workflow_name
-                    _rename_value = st.text_input(
-                        "Rename workflow",
-                        value=_rename_default,
-                        key=f"completed_rename_input_{block_id}",
-                    )
-                    if _rename_value.strip() and _rename_value.strip() != _rename_default and st.button("✏️ Rename Workflow", key=f"completed_rename_btn_{block_id}"):
-                        try:
-                            _rename_resp = make_authenticated_request(
-                                "POST",
-                                f"{API_URL}/jobs/{run_uuid}/rename",
-                                json={"new_name": _rename_value.strip()},
-                                timeout=20,
-                            )
-                            if _rename_resp.status_code == 200:
-                                st.success(f"Workflow renamed to {_rename_value.strip()}.")
-                                st.rerun()
-                            else:
-                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
-                        except Exception as _e:
-                            st.error(f"Error: {_e}")
                     
                 elif status_str == "FAILED":
                     info_callout(message or "Job failed during execution.", kind="error", icon="❌")
@@ -1031,92 +1641,6 @@ def render_block_part2(
                         if completed_count or total:
                             st.caption(f"Completed {completed_count}/{total} tasks before cancellation.")
 
-                    # Post-cancel actions: Delete folder / Resubmit
-                    st.divider()
-                    _work_dir_name = ""
-                    if work_directory:
-                        import pathlib as _pl
-                        _work_dir_name = _pl.PurePosixPath(work_directory).name
-                    _del_col, _rerun_col, _resub_col = st.columns(3)
-                    with _del_col:
-                        _del_key = f"del_{block_id}"
-                        _confirm_key = f"del_confirm_{block_id}"
-                        if st.session_state.get(_confirm_key):
-                            st.warning(f"⚠️ This will permanently delete `{_work_dir_name or 'workflow folder'}` and all its files.")
-                            _yes_col, _no_col = st.columns(2)
-                            with _yes_col:
-                                if st.button("Yes, delete", key=f"del_yes_{block_id}", type="primary"):
-                                    _pause_auto_refresh(4)
-                                    try:
-                                        _del_resp = make_authenticated_request(
-                                            "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
-                                        )
-                                        if _del_resp.status_code == 200:
-                                            _del_data = _del_resp.json()
-                                            st.success(_del_data.get("message", "Deleted."))
-                                            st.session_state.pop(_confirm_key, None)
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
-                                    except Exception as _e:
-                                        st.error(f"Error: {_e}")
-                            with _no_col:
-                                if st.button("No, keep it", key=f"del_no_{block_id}"):
-                                    st.session_state.pop(_confirm_key, None)
-                                    st.rerun()
-                        else:
-                            if st.button(f"🗑️ Delete {_work_dir_name or 'Workflow Folder'}", key=_del_key):
-                                st.session_state[_confirm_key] = True
-                                _pause_auto_refresh(4)
-                                st.rerun()
-                    with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"cancel_rerun_{block_id}"):
-                            try:
-                                _rerun_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
-                                )
-                                if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-                    with _resub_col:
-                        if st.button("🔄 Resubmit Job", key=f"resub_{block_id}"):
-                            try:
-                                _resub_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
-                                )
-                                if _resub_resp.status_code == 200:
-                                    st.success("Approval gate created — scroll down to review and approve.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-
-                    _cancelled_rename = st.text_input(
-                        "Rename workflow",
-                        value=sample_name or _work_dir_name,
-                        key=f"cancelled_rename_input_{block_id}",
-                    )
-                    if _cancelled_rename.strip() and _cancelled_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"cancelled_rename_btn_{block_id}"):
-                        try:
-                            _rename_resp = make_authenticated_request(
-                                "POST",
-                                f"{API_URL}/jobs/{run_uuid}/rename",
-                                json={"new_name": _cancelled_rename.strip()},
-                                timeout=20,
-                            )
-                            if _rename_resp.status_code == 200:
-                                st.success(f"Workflow renamed to {_cancelled_rename.strip()}.")
-                                st.rerun()
-                            else:
-                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
-                        except Exception as _e:
-                            st.error(f"Error: {_e}")
-
                 elif status_str == "DELETED":
                     st.info(f"🗑️ {message or 'Workflow folder deleted.'}")
                     if work_directory:
@@ -1158,6 +1682,16 @@ def render_block_part2(
                     
                     # Progress bar
                     st.progress(progress / 100.0, text=f"Progress: {progress}%")
+
+                    workflow_usage = job_status.get("workflow_usage") if isinstance(job_status, dict) else {}
+                    workflow_usage_metrics = _workflow_usage_metrics(workflow_usage)
+                    workflow_usage_message = _workflow_usage_message(workflow_usage)
+                    if workflow_usage_metrics or workflow_usage_message:
+                        st.caption("Workflow usage")
+                        if workflow_usage_metrics:
+                            progress_stats(workflow_usage_metrics)
+                        if workflow_usage_message:
+                            st.caption(workflow_usage_message)
                     
                     # Nextflow-style task display
                     if tasks and isinstance(tasks, dict):
@@ -1226,107 +1760,26 @@ def render_block_part2(
                                     else:
                                         instances_sorted = sorted(instances)
                                         st.text(f"✔ {base_name} ({len(instances)}/{max(instances_sorted)})")
-                    # Cancel button
-                    st.divider()
-                    if st.button("🛑 Cancel Job", type="primary", key=f"cancel_job_{block_id}"):
-                        try:
-                            _cancel_resp = make_authenticated_request(
-                                "POST", f"{API_URL}/jobs/{run_uuid}/cancel", timeout=15
-                            )
-                            if _cancel_resp.status_code == 200:
-                                _cancel_data = _cancel_resp.json()
-                                st.success(_cancel_data.get("message", "Job cancelled successfully."))
-                                st.rerun()
-                            elif _cancel_resp.status_code == 400:
-                                st.warning(_cancel_resp.json().get("detail", "Cannot cancel job."))
-                            else:
-                                st.error(f"Cancel failed: {_cancel_resp.status_code} — {_cancel_resp.text[:200]}")
-                        except Exception as _ce:
-                            st.error(f"Error cancelling job: {_ce}")
                 else:
                     st.warning(f"⏳ Status: {status_str}")
                     if message:
                         st.caption(message)
 
-                if status_str == "FAILED" and run_uuid:
-                    st.divider()
-                    _work_dir_name = workflow_label or "workflow folder"
-                    _delete_col, _rerun_col, _resubmit_col = st.columns(3)
-                    with _delete_col:
-                        _confirm_key = f"del_confirm_{block_id}"
-                        if st.session_state.get(_confirm_key):
-                            st.warning(f"⚠️ This will permanently delete `{_work_dir_name}` and all its files.")
-                            _yes_col, _no_col = st.columns(2)
-                            with _yes_col:
-                                if st.button("Yes, delete failed run", key=f"failed_del_yes_{block_id}", type="primary"):
-                                    _pause_auto_refresh(4)
-                                    try:
-                                        _del_resp = make_authenticated_request(
-                                            "DELETE", f"{API_URL}/jobs/{run_uuid}", timeout=30
-                                        )
-                                        if _del_resp.status_code == 200:
-                                            st.success(_del_resp.json().get("message", "Deleted."))
-                                            st.session_state.pop(_confirm_key, None)
-                                            st.rerun()
-                                        else:
-                                            st.error(f"Delete failed: {_del_resp.status_code} — {_del_resp.text[:200]}")
-                                    except Exception as _e:
-                                        st.error(f"Error: {_e}")
-                            with _no_col:
-                                if st.button("No, keep it", key=f"failed_del_no_{block_id}"):
-                                    st.session_state.pop(_confirm_key, None)
-                                    st.rerun()
-                        elif st.button(f"🗑️ Delete {_work_dir_name}", key=f"failed_del_btn_{block_id}"):
-                            st.session_state[_confirm_key] = True
-                            _pause_auto_refresh(4)
-                            st.rerun()
-                    with _rerun_col:
-                        if st.button("↻ Rerun Workflow", key=f"failed_rerun_{block_id}"):
-                            try:
-                                _rerun_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/rerun", timeout=20
-                                )
-                                if _rerun_resp.status_code == 200:
-                                    st.success("Workflow rerun submitted.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Rerun failed: {_rerun_resp.status_code} — {_rerun_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-                    with _resubmit_col:
-                        if st.button("🔄 Resubmit Job", key=f"failed_resub_{block_id}"):
-                            try:
-                                _resub_resp = make_authenticated_request(
-                                    "POST", f"{API_URL}/jobs/{run_uuid}/resubmit", timeout=15
-                                )
-                                if _resub_resp.status_code == 200:
-                                    st.success("Approval gate created — scroll down to review and approve.")
-                                    st.rerun()
-                                else:
-                                    st.error(f"Resubmit failed: {_resub_resp.status_code} — {_resub_resp.text[:200]}")
-                            except Exception as _e:
-                                st.error(f"Error: {_e}")
-
-                    _failed_rename = st.text_input(
-                        "Rename workflow",
-                        value=sample_name or _work_dir_name,
-                        key=f"failed_rename_input_{block_id}",
-                    )
-                    if _failed_rename.strip() and _failed_rename.strip() != (sample_name or _work_dir_name) and st.button("✏️ Rename Workflow", key=f"failed_rename_btn_{block_id}"):
-                        try:
-                            _rename_resp = make_authenticated_request(
-                                "POST",
-                                f"{API_URL}/jobs/{run_uuid}/rename",
-                                json={"new_name": _failed_rename.strip()},
-                                timeout=20,
-                            )
-                            if _rename_resp.status_code == 200:
-                                st.success(f"Workflow renamed to {_failed_rename.strip()}.")
-                                st.rerun()
-                            else:
-                                st.error(f"Rename failed: {_rename_resp.status_code} — {_rename_resp.text[:200]}")
-                        except Exception as _e:
-                            st.error(f"Error: {_e}")
+                _render_execution_job_actions(
+                    status_str=status_str,
+                    run_uuid=run_uuid,
+                    block_id=block_id,
+                    workflow_label=workflow_label,
+                    sample_name=sample_name,
+                    transfer_state=transfer_state,
+                    show_resume_sync=show_resume_sync,
+                    resume_sync_in_progress=resume_sync_in_progress,
+                    resume_sync_force=resume_sync_force,
+                    sync_cancel_available=sync_cancel_available,
+                    API_URL=API_URL,
+                    make_authenticated_request=make_authenticated_request,
+                    _pause_auto_refresh=_pause_auto_refresh,
+                )
             else:
                 # Fallback for initial state
                 init_message = content.get("message", "Job submitted")
@@ -1335,22 +1788,44 @@ def render_block_part2(
             # Show logs toggle for non-failed jobs (failed jobs show logs above)
             if status_str != "FAILED":
                 logs = content.get("logs", [])
-                if logs and st.checkbox("Show Logs", key=f"logs_{block_id}"):
-                    st.write("**Recent Logs:**")
-                    log_container = st.container(height=300)
-                    with log_container:
-                        for log in reversed(logs[-30:]):  # Show last 30 in reverse chronological order
-                            timestamp = _format_timestamp(log.get("timestamp", "")) or log.get("timestamp", "")
-                            level = log.get("level", "INFO")
-                            msg = log.get("message", "")
-                            
-                            # Color-code by level
-                            if level == "ERROR":
-                                st.error(f"[{timestamp}] {msg}")
-                            elif level == "WARN":
-                                st.warning(f"[{timestamp}] {msg}")
-                            else:
-                                st.text(f"[{timestamp}] {msg}")
+                if logs:
+                    # For completed/failed jobs, use lazy expander to avoid rendering logs on every refresh
+                    is_terminal = status_str in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                    if is_terminal:
+                        with st.expander(f"📋 Logs ({len(logs)} entries)", expanded=False):
+                            st.write("**Recent Logs:**")
+                            log_container = st.container(height=300)
+                            with log_container:
+                                for log in reversed(logs[-30:]):  # Show last 30 in reverse chronological order
+                                    timestamp = _format_timestamp(log.get("timestamp", "")) or log.get("timestamp", "")
+                                    level = log.get("level", "INFO")
+                                    msg = log.get("message", "")
+                                    
+                                    # Color-code by level
+                                    if level == "ERROR":
+                                        st.error(f"[{timestamp}] {msg}")
+                                    elif level == "WARN":
+                                        st.warning(f"[{timestamp}] {msg}")
+                                    else:
+                                        st.text(f"[{timestamp}] {msg}")
+                    else:
+                        # For running jobs, keep the checkbox behavior (user may want to monitor)
+                        if st.checkbox("Show Logs", key=f"logs_{block_id}"):
+                            st.write("**Recent Logs:**")
+                            log_container = st.container(height=300)
+                            with log_container:
+                                for log in reversed(logs[-30:]):  # Show last 30 in reverse chronological order
+                                    timestamp = _format_timestamp(log.get("timestamp", "")) or log.get("timestamp", "")
+                                    level = log.get("level", "INFO")
+                                    msg = log.get("message", "")
+                                    
+                                    # Color-code by level
+                                    if level == "ERROR":
+                                        st.error(f"[{timestamp}] {msg}")
+                                    elif level == "WARN":
+                                        st.warning(f"[{timestamp}] {msg}")
+                                    else:
+                                        st.text(f"[{timestamp}] {msg}")
     
     elif btype == "AGENT_PLOT":
         handled = True
@@ -1415,7 +1890,11 @@ def render_block_part2(
                 # Cancel download button
                 _dl_id = content.get("download_id")
                 if _dl_id:
-                    if st.button("🛑 Cancel Download", type="primary", key=f"cancel_dl_{block_id}"):
+                    if st.button(
+                        "🛑 Cancel Download",
+                        type="primary",
+                        key=f"cancel_dl_{block_id}_{render_scope}",
+                    ):
                         try:
                             _cancel_resp = make_authenticated_request(
                                 "DELETE",

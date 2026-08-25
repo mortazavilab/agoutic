@@ -57,6 +57,7 @@ def generate_sbatch_script(
     lines.append("")
 
     lines.append('export PATH="$HOME/bin:$HOME/.local/bin:$PATH"')
+    lines.append('export NXF_SYNTAX_PARSER="${NXF_SYNTAX_PARSER:-v1}"')
     lines.append("")
 
     # Cluster-agnostic runtime bootstrap:

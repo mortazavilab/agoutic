@@ -265,13 +265,15 @@ class TestDirectoryListing:
             is_enabled=True,
         )
 
-        observed = {}
+        observed = {"commands": []}
 
         class FakeConn:
             async def run(self, command: str, check: bool = False, timeout_seconds=None):
-                observed["command"] = command
+                observed["commands"].append(command)
                 observed["timeout_seconds"] = timeout_seconds
-                return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nalice\n", stderr="", exit_status=0)
+                if command == "echo AGOUTIC_SSH_OK && hostname && whoami":
+                    return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nalice\n", stderr="", exit_status=0)
+                return SimpleNamespace(stdout="__AGOUTIC_SBANK_UNAVAILABLE__\n", stderr="", exit_status=0)
 
             async def close(self):
                 return None
@@ -289,8 +291,176 @@ class TestDirectoryListing:
             monkeypatch.undo()
 
         assert result["ok"] is True
-        assert observed["command"] == "echo AGOUTIC_SSH_OK && hostname && whoami"
+        assert observed["commands"][0] == "echo AGOUTIC_SSH_OK && hostname && whoami"
+        assert "sbank balance statement alice" in observed["commands"][1]
         assert observed["timeout_seconds"] == 600.0
+        assert result["slurm_balance_rows"] == []
+
+    @pytest.mark.asyncio
+    async def test_test_connection_includes_filtered_slurm_balance_rows(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        class FakeConn:
+            async def run(self, command: str, check: bool = False, timeout_seconds=None):
+                if command == "echo AGOUTIC_SSH_OK && hostname && whoami":
+                    return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nalice\n", stderr="", exit_status=0)
+                return SimpleNamespace(
+                    stdout=(
+                        "Account  User   Balance  Remaining\n"
+                        "-------  -----  -------  ---------\n"
+                        "lab_a    alice  12.5     8.0\n"
+                        "lab_b    bob    9.0      4.0\n"
+                    ),
+                    stderr="",
+                    exit_status=0,
+                )
+
+            async def close(self):
+                return None
+
+        manager = SSHConnectionManager()
+
+        async def fake_connect(profile_obj, local_password=""):
+            return FakeConn()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(manager, "connect", fake_connect)
+        try:
+            result = await manager.test_connection(profile)
+        finally:
+            monkeypatch.undo()
+
+        assert result["ok"] is True
+        assert result["slurm_balance_rows"] == [
+            {"Account": "lab_a", "User": "alice", "Balance": "12.5", "Remaining": "8.0"}
+        ]
+        assert "slurm_balance_raw" not in result
+
+    @pytest.mark.asyncio
+    async def test_test_connection_parses_pipe_delimited_balance_output(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        class FakeConn:
+            async def run(self, command: str, check: bool = False, timeout_seconds=None):
+                if command == "echo AGOUTIC_SSH_OK && hostname && whoami":
+                    return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nseyedam\n", stderr="", exit_status=0)
+                return SimpleNamespace(
+                    stdout=(
+                        "User Usage | Account Usage | Account Limit Available (SUs)\n"
+                        "---------- ----- + ------------------- + -----------------------------\n"
+                        "seyedam * 910 | BIOD132_CLASS 10,396 | 50,000 39,604\n"
+                        "seyedam * 976 | SEYEDAM 976 | 1,000 24\n"
+                        "achall3 1,272 | SEYEDAM_LAB 487,732 | 876,790 389,058\n"
+                    ),
+                    stderr="",
+                    exit_status=0,
+                )
+
+            async def close(self):
+                return None
+
+        manager = SSHConnectionManager()
+
+        async def fake_connect(profile_obj, local_password=""):
+            return FakeConn()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(manager, "connect", fake_connect)
+        try:
+            result = await manager.test_connection(profile)
+        finally:
+            monkeypatch.undo()
+
+        assert result["ok"] is True
+        assert result["slurm_balance_rows"] == [
+            {
+                "User": "seyedam *",
+                "Usage": "910",
+                "Account": "BIOD132_CLASS",
+                "Account Usage": "10,396",
+                "Account Limit": "50,000",
+                "Available (SUs)": "39,604",
+            },
+            {
+                "User": "seyedam *",
+                "Usage": "976",
+                "Account": "SEYEDAM",
+                "Account Usage": "976",
+                "Account Limit": "1,000",
+                "Available (SUs)": "24",
+            },
+        ]
+        assert "slurm_balance_raw" not in result
+
+    @pytest.mark.asyncio
+    async def test_test_connection_filters_raw_balance_output_to_matching_username_lines(self):
+        profile = SSHProfileData(
+            id="p1",
+            user_id="u1",
+            nickname="test",
+            ssh_host="example.org",
+            ssh_port=22,
+            ssh_username="alice",
+            auth_method="key_file",
+            key_file_path="~/.ssh/id_ed25519",
+            local_username="alice",
+            is_enabled=True,
+        )
+
+        class FakeConn:
+            async def run(self, command: str, check: bool = False, timeout_seconds=None):
+                if command == "echo AGOUTIC_SSH_OK && hostname && whoami":
+                    return SimpleNamespace(stdout="AGOUTIC_SSH_OK\nhost\nalice\n", stderr="", exit_status=0)
+                return SimpleNamespace(
+                    stdout=(
+                        "Statement for cluster balances\n"
+                        "alice used=24 account=biglab\n"
+                        "bob used=12 account=otherlab\n"
+                    ),
+                    stderr="",
+                    exit_status=0,
+                )
+
+            async def close(self):
+                return None
+
+        manager = SSHConnectionManager()
+
+        async def fake_connect(profile_obj, local_password=""):
+            return FakeConn()
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(manager, "connect", fake_connect)
+        try:
+            result = await manager.test_connection(profile)
+        finally:
+            monkeypatch.undo()
+
+        assert result["ok"] is True
+        assert result["slurm_balance_rows"] == []
+        assert result["slurm_balance_raw"] == "alice used=24 account=biglab"
 
     @pytest.mark.asyncio
     async def test_test_connection_surfaces_broker_failure_message(self):

@@ -51,6 +51,13 @@ class ToolExecutionStage:
         )
         calls_by_source = deduplicate_calls(calls_by_source)
         validate_call_schemas(calls_by_source)
+        ctx.inject_debug["dispatched_calls"] = {
+            source_key: [
+                {"tool": call["tool"], "params": call["params"]}
+                for call in calls
+            ]
+            for source_key, calls in calls_by_source.items()
+        }
 
         # ── Execute ───────────────────────────────────────────────────
         _exec_result = await _execute_tool_calls(
@@ -68,6 +75,10 @@ class ToolExecutionStage:
             emit_progress=_emit_progress,
         )
         ctx.all_results = _exec_result.all_results
+        ctx.inject_debug["executed_result_counts"] = {
+            source_key: len(results)
+            for source_key, results in ctx.all_results.items()
+        }
         ctx.pending_download_files = _exec_result.pending_download_files
         if _exec_result.active_skill != ctx.active_skill:
             ctx.active_skill = _exec_result.active_skill

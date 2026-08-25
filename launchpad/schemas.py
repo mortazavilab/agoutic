@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
-from launchpad.config import MAX_GPU_TASKS_LIMIT
+from launchpad.config import MAX_GPU_TASKS_LIMIT, resolve_dogme_accuracy
 
 class SubmitJobRequest(BaseModel):
     """Request to submit a Dogme job."""
@@ -14,10 +14,19 @@ class SubmitJobRequest(BaseModel):
     user_id: Optional[str] = None  # Owner user ID (passed by Cortex)
     username: Optional[str] = None  # Human-readable username (for directory naming)
     project_slug: Optional[str] = None  # Human-readable project slug (for directory naming)
+    workflow_key: str = "dogme"
     sample_name: str = Field(..., min_length=1)
-    mode: str = Field(..., min_length=1)  # DNA, RNA, CDNA
+    mode: Optional[str] = None  # Dogme-only mode (DNA, RNA, CDNA)
     input_type: Literal["pod5", "bam", "fastq"] = "pod5"  # Type of input files
     input_directory: str = Field(default="", min_length=0)
+    reference_fasta: Optional[str] = None
+    vcf: Optional[str] = None
+    sample_sheet: Optional[str] = None
+    cutter: Optional[str] = None
+    workflow_repo: Optional[str] = None
+    workflow_version: Optional[str] = None
+    dogme_revision: Optional[str] = None
+    output_flags: dict[str, bool] = Field(default_factory=dict)
     reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None
     entry_point: Optional[str] = None  # Dogme entry point (e.g., "remap", "basecall")
@@ -28,6 +37,8 @@ class SubmitJobRequest(BaseModel):
 
     # Remote execution (SLURM backend)
     execution_mode: Literal["local", "slurm"] = "local"
+    local_max_task_cpus: Optional[int] = None
+    local_max_task_memory_gb: Optional[int] = None
     ssh_profile_id: Optional[str] = None
     slurm_account: Optional[str] = None
     slurm_partition: Optional[str] = None
@@ -48,7 +59,7 @@ class SubmitJobRequest(BaseModel):
     modkit_filter_threshold: Optional[float] = 0.9  # Modification calling threshold
     min_cov: Optional[int] = None  # Minimum coverage (defaults: 3 reads unless explicitly overridden)
     per_mod: Optional[int] = 5  # Percentage threshold for modifications
-    accuracy: Optional[str] = "sup"  # Basecalling accuracy (sup/hac/fast)
+    accuracy: Optional[str] = None  # Basecalling accuracy (defaults by mode)
     max_gpu_tasks: Optional[int] = None  # None lets Nextflow manage concurrency without maxForks
     custom_dogme_profile: Optional[str] = None
     custom_dogme_bind_paths: list[str] = Field(default_factory=list)
@@ -58,6 +69,7 @@ class SubmitJobRequest(BaseModel):
     script_path: Optional[str] = None
     script_args: list[str] = Field(default_factory=list)
     script_working_directory: Optional[str] = None
+    output_directory: Optional[str] = None
     
     @field_validator("reference_genome")
     @classmethod
@@ -67,6 +79,20 @@ class SubmitJobRequest(BaseModel):
             return [v]
         return v
 
+    @field_validator("workflow_key", mode="before")
+    @classmethod
+    def normalize_workflow_key(cls, value):
+        cleaned = str(value or "dogme").strip().lower()
+        return cleaned or "dogme"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_mode(cls, value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
     @field_validator("max_gpu_tasks")
     @classmethod
     def validate_max_gpu_tasks(cls, value):
@@ -75,6 +101,30 @@ class SubmitJobRequest(BaseModel):
         if value < 1 or value > MAX_GPU_TASKS_LIMIT:
             raise ValueError(f"max_gpu_tasks must be between 1 and {MAX_GPU_TASKS_LIMIT}")
         return value
+
+    @field_validator("local_max_task_cpus")
+    @classmethod
+    def validate_local_max_task_cpus(cls, value):
+        if value is None:
+            return value
+        if value < 1 or value > 256:
+            raise ValueError("local_max_task_cpus must be between 1 and 256")
+        return value
+
+    @field_validator("local_max_task_memory_gb")
+    @classmethod
+    def validate_local_max_task_memory_gb(cls, value):
+        if value is None:
+            return value
+        if value < 1 or value > 2048:
+            raise ValueError("local_max_task_memory_gb must be between 1 and 2048")
+        return value
+
+    @model_validator(mode="after")
+    def apply_dogme_accuracy_default(self):
+        if self.workflow_key == "dogme":
+            self.accuracy = resolve_dogme_accuracy(self.mode, self.accuracy)
+        return self
 
     @field_validator("custom_dogme_bind_paths", mode="before")
     @classmethod
@@ -93,6 +143,9 @@ class SubmitJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_remote_execution(self):
+        if self.workflow_key == "dogme" and not self.mode:
+            raise ValueError("mode is required when workflow_key is 'dogme'")
+
         if self.run_type == "script":
             if self.execution_mode != "local":
                 raise ValueError("run_type 'script' currently supports execution_mode 'local' only")
@@ -129,12 +182,13 @@ class JobDetailsResponse(BaseModel):
     """Full job details."""
     run_uuid: str
     project_id: str
+    workflow_key: str = "dogme"
     workflow_index: Optional[int] = None
     workflow_alias: Optional[str] = None
     workflow_folder_name: Optional[str] = None
     workflow_display_name: Optional[str] = None
     sample_name: str
-    mode: str
+    mode: Optional[str] = None
     status: str
     progress_percent: int
     submitted_at: Optional[str]
@@ -143,6 +197,69 @@ class JobDetailsResponse(BaseModel):
     output_directory: Optional[str]
     error_message: Optional[str]
     report: Optional[Any]
+    imported_source_kind: Optional[str] = None
+    imported_source_path: Optional[str] = None
+    imported_source_run_uuid: Optional[str] = None
+    imported_config_path: Optional[str] = None
+    imported_copy_mode: Optional[str] = None
+    imported_source_complete: Optional[bool] = None
+    workflow_usage: Optional[dict[str, Any]] = None
+    workflow_usage_synced_at: Optional[str] = None
+    import_warning_message: Optional[str] = None
+
+
+class WorkflowPreviewRequest(BaseModel):
+    """Request to build a workflow-family preview without submission."""
+
+    workflow_key: str = "dogme"
+    sample_name: Optional[str] = None
+    mode: Optional[str] = None
+    input_type: Optional[Literal["pod5", "bam", "fastq"]] = None
+    input_path: Optional[str] = None
+    input_directory: Optional[str] = None
+    reference_genome: Optional[Union[str, List[str]]] = None
+    reference_fasta: Optional[str] = None
+    vcf: Optional[str] = None
+    sample_sheet: Optional[str] = None
+    cutter: Optional[str] = None
+    output_directory: Optional[str] = None
+    workflow_repo: Optional[str] = None
+    workflow_version: Optional[str] = None
+    report_filename: Optional[str] = None
+    output_flags: dict[str, bool] = Field(default_factory=dict)
+
+    @field_validator("workflow_key", mode="before")
+    @classmethod
+    def normalize_preview_workflow_key(cls, value):
+        cleaned = str(value or "dogme").strip().lower()
+        return cleaned or "dogme"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def normalize_preview_mode(cls, value):
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("reference_genome")
+    @classmethod
+    def normalize_preview_reference_genome(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        return value
+
+
+class WorkflowPreviewResponse(BaseModel):
+    """Response from workflow preview generation."""
+
+    workflow_key: str
+    supports_submission: bool
+    command: str
+    preview_markdown: str
+    preview_payload: dict[str, Any] = Field(default_factory=dict)
 
 class JobSubmitResponse(BaseModel):
     """Response from job submission."""
@@ -151,6 +268,54 @@ class JobSubmitResponse(BaseModel):
     status: str
     work_directory: str
     cache_actions: Optional[dict] = None
+
+
+class ImportWorkflowRequest(BaseModel):
+    """Request to import an already-run workflow into a project."""
+
+    project_id: str = Field(..., min_length=1)
+    user_id: str = Field(..., min_length=1)
+    username: Optional[str] = None
+    project_slug: Optional[str] = None
+    source_path: str = Field(..., min_length=1)
+    source_kind: Literal["local", "slurm"] = "local"
+    ssh_profile_id: Optional[str] = None
+    full_copy: bool = False
+    sample_name: Optional[str] = None
+    mode: Optional[str] = None
+    reference_genome: Optional[Union[str, List[str]]] = None
+    modifications: Optional[str] = None
+
+    @field_validator("reference_genome")
+    @classmethod
+    def normalize_import_genomes_to_list(cls, value):
+        if value is None:
+            return value
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @model_validator(mode="after")
+    def validate_import_request(self):
+        if self.source_kind == "slurm" and not self.user_id:
+            raise ValueError("user_id is required for remote workflow imports")
+        return self
+
+
+class ImportWorkflowResponse(BaseModel):
+    """Response from importing an existing workflow."""
+
+    run_uuid: str
+    sample_name: str
+    mode: Optional[str] = None
+    status: str
+    work_directory: str
+    execution_mode: str
+    transfer_state: Optional[str] = None
+    imported_source_kind: str
+    imported_source_complete: Optional[bool] = None
+    import_warning_message: Optional[str] = None
+    message: str
 
 
 class WorkflowRenameRequest(BaseModel):
@@ -222,7 +387,7 @@ class StageTaskResumeResponse(BaseModel):
 class StagingTaskStatusResponse(BaseModel):
     """Current state of a background staging task."""
     task_id: str
-    status: str  # queued | running | completed | failed | cancelled
+    status: str  # queued | running | completed | failed | cancelled | stale
     progress: dict[str, Any] = Field(default_factory=dict)
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
@@ -258,6 +423,7 @@ class JobResultSyncResponse(BaseModel):
     remote_work_dir: Optional[str] = None
     local_work_dir: Optional[str] = None
     transfer_state: Optional[str] = None
+    import_warning_message: Optional[str] = None
 
 class HealthCheckResponse(BaseModel):
     """Health check response."""
@@ -265,6 +431,7 @@ class HealthCheckResponse(BaseModel):
     version: str
     running_jobs: int
     database_ok: bool
+    maintenance_mode: bool
 
 
 # ==================== SSH Profile Schemas ====================
@@ -274,6 +441,7 @@ class SSHProfileCreate(BaseModel):
     user_id: str = Field(..., min_length=1)
     nickname: Optional[str] = None
     ssh_host: str = Field(..., min_length=1)
+    transfer_host: Optional[str] = None
     ssh_port: int = 22
     ssh_username: str = Field(..., min_length=1)
     auth_method: Literal["key_file", "ssh_agent"] = "key_file"
@@ -296,6 +464,7 @@ class SSHProfileUpdate(BaseModel):
     """Request to update an SSH profile."""
     nickname: Optional[str] = None
     ssh_host: Optional[str] = None
+    transfer_host: Optional[str] = None
     ssh_port: Optional[int] = None
     ssh_username: Optional[str] = None
     auth_method: Optional[Literal["key_file", "ssh_agent"]] = None
@@ -315,6 +484,7 @@ class SSHProfileOut(BaseModel):
     user_id: str
     nickname: Optional[str] = None
     ssh_host: str
+    transfer_host: Optional[str] = None
     ssh_port: int
     ssh_username: str
     auth_method: str
@@ -337,6 +507,9 @@ class SSHProfileTestResult(BaseModel):
     message: str
     hostname: Optional[str] = None
     remote_user: Optional[str] = None
+    slurm_balance_rows: List[dict[str, str]] = Field(default_factory=list)
+    slurm_balance_raw: Optional[str] = None
+    slurm_balance_error: Optional[str] = None
     session_started: bool = False
     session_expires_at: Optional[str] = None
 
@@ -367,7 +540,15 @@ class JobStatusExtendedResponse(JobStatusResponse):
     result_destination: Optional[str] = None
     ssh_profile_nickname: Optional[str] = None
     work_directory: Optional[str] = None
+    workflow_usage: Optional[dict[str, Any]] = None
+    workflow_usage_synced_at: Optional[str] = None
     submitted_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
     duration_seconds: Optional[int] = None
+    imported_source_kind: Optional[str] = None
+    imported_source_path: Optional[str] = None
+    imported_source_run_uuid: Optional[str] = None
+    imported_copy_mode: Optional[str] = None
+    imported_source_complete: Optional[bool] = None
+    import_warning_message: Optional[str] = None

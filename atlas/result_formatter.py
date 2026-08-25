@@ -128,6 +128,11 @@ def _format_data(
         return result
 
     elif isinstance(data, dict):
+        if data.get("script_id") == "analyze_job_results/count_bed":
+            formatted_script = _format_bed_counter_script_result(data)
+            if formatted_script:
+                return formatted_script
+
         # Launchpad remote directory listing results
         if "entries" in data and isinstance(data["entries"], list) and "path" in data:
             entries = data["entries"]
@@ -232,6 +237,39 @@ def _format_data(
                     result += f"| {f} | | |\n"
             return result
 
+        if "content" in data and "file_path" in data:
+            file_path = data.get("file_path", "")
+            render_mode = str(data.get("render_mode") or "plain")
+            source_extension = str(data.get("source_extension") or "")
+            line_count = data.get("line_count")
+            file_size = data.get("file_size_bytes", data.get("file_size"))
+            details: list[str] = []
+            if line_count is not None:
+                details.append(f"{line_count} lines")
+            if isinstance(file_size, (int, float)):
+                details.append(_human_size(int(file_size)))
+            details.append(f"rendered as {render_mode}")
+
+            if render_mode == "html_raw":
+                fence = "html"
+            elif render_mode == "markdown" or source_extension in {".md", ".markdown"}:
+                fence = "markdown"
+            else:
+                fence = "text"
+
+            result = f"**File: {file_path}**"
+            if details:
+                result += f" ({', '.join(details)})"
+            result += "\n\n"
+            content = str(data.get("content") or "")
+            if content:
+                result += f"```{fence}\n{content.rstrip()}\n```\n"
+            else:
+                result += "*File is empty.*\n"
+            if data.get("is_truncated"):
+                result += "\n*Preview truncated.*\n"
+            return result
+
         # Generic dict — show as compact JSON (strip deeply nested objects)
         # For analysis/parsing results (Analyzer), allow deeper nesting so row data is visible
         is_analysis_data = "records" in data or "preview_rows" in data
@@ -242,6 +280,44 @@ def _format_data(
 
     else:
         return f"{str(data)}\n"
+
+
+def _format_bed_counter_script_result(data: dict) -> str | None:
+    """Format count_bed results so second-pass LLM sees totals before details."""
+    dataframe = data.get("dataframe")
+    if not isinstance(dataframe, dict):
+        return None
+
+    lines: list[str] = []
+    exit_code = data.get("exit_code")
+    header = "**BED count script result**"
+    if isinstance(exit_code, int):
+        header += f" (exit_code={exit_code})"
+    lines.append(header)
+    lines.append("")
+
+    totals_markdown = str(data.get("modification_totals_markdown") or "").strip()
+    if totals_markdown:
+        lines.append(totals_markdown)
+        lines.append("")
+
+    metadata = dataframe.get("metadata") or {}
+    label = metadata.get("label") or "BED chromosome counts"
+    row_count = dataframe.get("row_count", len(dataframe.get("data") or []))
+    col_count = len(dataframe.get("columns") or [])
+    lines.append(f"Detailed dataframe: **{label}** ({row_count} rows x {col_count} columns).")
+
+    input_files = metadata.get("input_files")
+    if isinstance(input_files, list) and input_files:
+        lines.append(f"Input files counted: {len(input_files)}.")
+
+    stderr = str(data.get("stderr") or "").strip()
+    if stderr:
+        lines.append("")
+        lines.append("stderr:")
+        lines.append(f"```text\n{stderr}\n```")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _format_files_by_type(data: dict) -> str:

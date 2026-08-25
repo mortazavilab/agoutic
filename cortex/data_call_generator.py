@@ -120,8 +120,24 @@ _MODIFICATION_COUNT_INTENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INVALID_MOD_SUMMARY_TERMS = frozenset({
+    'mode', 'modes', 'model', 'models', 'module', 'modules',
+})
+
+_MODIFICATION_SUMMARY_INTENT_RE = re.compile(
+    r'\bshow\s+me\s+(?:the\s+)?(?P<term1>mod[a-z0-9_+\-]*)\s+summary\b'
+    r'|\b(?P<term2>mod[a-z0-9_+\-]*)\s+summary\b'
+    r'|\bsummary\s+of\s+(?:the\s+)?(?P<term3>mod[a-z0-9_+\-]*)\b',
+    re.IGNORECASE,
+)
+
 _BAM_DETAILS_INTENT_RE = re.compile(
     r'\b(?:bam\s*(?:details?|info|information|stats|statistics|summary)|alignment\s+summary|mapped\s*/\s*unmapped)\b',
+    re.IGNORECASE,
+)
+
+_GENERIC_WORKFLOW_ANALYSIS_INTENT_RE = re.compile(
+    r'\b(?:analy[sz]e|analysis|summari[sz]e|summary|qc\s+report|report)\b',
     re.IGNORECASE,
 )
 
@@ -131,6 +147,39 @@ def _extract_modification_name(user_message: str) -> str | None:
     if not match:
         return None
     return (match.group("mod") or match.group("mod2") or "").lower() or None
+
+
+def _looks_like_mod_summary_term(term: str | None) -> bool:
+    if not term:
+        return False
+    normalized = term.lower()
+    return normalized.startswith("mod") and normalized not in _INVALID_MOD_SUMMARY_TERMS
+
+
+def _is_modification_summary_intent(user_message: str) -> bool:
+    if _extract_modification_name(user_message):
+        return False
+    match = _MODIFICATION_SUMMARY_INTENT_RE.search(user_message)
+    if not match:
+        return False
+    return _looks_like_mod_summary_term(
+        match.group("term1") or match.group("term2") or match.group("term3")
+    )
+
+
+def _wants_generic_workflow_analysis(user_message: str) -> bool:
+    msg = user_message or ""
+    if not _GENERIC_WORKFLOW_ANALYSIS_INTENT_RE.search(msg):
+        return False
+    if re.search(r'\b(?:parse|read|open|display|view|get)\b\s+(?:the\s+)?(?:file\s+)?\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown)\b', msg, re.IGNORECASE):
+        return False
+    if _BAM_DETAILS_INTENT_RE.search(msg):
+        return False
+    if _BED_COUNT_INTENT_RE.search(msg):
+        return False
+    if _extract_modification_name(msg) or _is_modification_summary_intent(msg):
+        return False
+    return bool(re.search(r'\b(?:workflow\d+|results?|job|run|qc)\b', msg, re.IGNORECASE))
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +490,50 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
         # handler in the results pipeline will show helpful suggestions.
         return calls
 
+    _modification_name = _extract_modification_name(user_message)
+    _modification_summary_intent = _is_modification_summary_intent(user_message)
+    _has_workflow_context = bool(work_dir or run_uuid or workflows or _project_dir)
+    if not calls and _has_workflow_context and (_modification_name or _modification_summary_intent):
+        _requested_workflow_match = re.search(r'\b(workflow\d+)\b', user_message, re.IGNORECASE)
+        _requested_workflow = _requested_workflow_match.group(1) if _requested_workflow_match else ""
+        _target_work_dir = ""
+        if _requested_workflow:
+            _workflow_base = _project_dir or work_dir
+            if not _workflow_base and workflows:
+                _workflow_base = workflows[-1].get("work_dir", "")
+                if _workflow_base and re.search(r'/workflow\d+/?$', _workflow_base):
+                    _workflow_base = _workflow_base.rstrip("/").rsplit("/", 1)[0]
+            if _workflow_base:
+                _target_work_dir = _resolve_workflow_path(
+                    f"{_requested_workflow}/bedMethyl",
+                    _workflow_base,
+                    workflows,
+                )
+        elif work_dir:
+            _target_work_dir = _resolve_workflow_path("bedMethyl", work_dir, workflows)
+
+        _params: dict = {
+            "extensions": ".bed,.bed.gz",
+            "max_depth": 1,
+        }
+        if _target_work_dir:
+            _params["work_dir"] = _target_work_dir
+        elif run_uuid:
+            _params["run_uuid"] = run_uuid
+        calls.append({
+            "source_type": "service", "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": _params,
+        })
+        logger.warning(
+            "Auto-generated list_job_files for workflow modification BED summary",
+            work_dir=_params.get("work_dir"),
+            run_uuid=run_uuid,
+            modification=_modification_name,
+            skill_key=skill_key,
+        )
+        return calls
+
     # Organism lookup for KNOWN biosamples.  This is NOT exhaustive — it
     # exists only so we can add an organism= hint when we recognise the term.
     # Unknown terms still get sent to the API (see catch-all at the bottom).
@@ -524,7 +617,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                     if acc_upper.startswith("ENCSR") and acc_upper not in accessions:
                         accessions.append(acc_upper)
 
-    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead"):
+    if accessions and skill_key in ("ENCODE_Search", "ENCODE_LongRead", "download_files"):
         # Determine which tool based on what the user is asking
         file_keywords = ["bam", "fastq", "file", "files", "pod5", "tar", "bigwig",
                          "download", "available", "accessions", "alignments"]
@@ -699,12 +792,12 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                     "params": {"direction": direction},
                 })
 
-    # --- Dogme / Analyzer file-parsing patterns ---
-    # When in a Dogme analysis skill and user asks to parse/show a file,
+    # --- Workflow-result file-parsing patterns ---
+    # When in a workflow analysis skill and user asks to parse/show a file,
     # auto-generate find_file + parse/read calls so the LLM gets real data.
-    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-                    "analyze_job_results"}
-    if not calls and skill_key in dogme_skills:
+    workflow_analysis_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
+                                "analyze_job_results"}
+    if not calls and skill_key in workflow_analysis_skills:
         # job_context, work_dir, run_uuid, workflows already extracted above
         # (browsing block at the top of this function).
 
@@ -723,13 +816,13 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
             file_pattern = (
                 r'(?:parse|show\s+me|read|open|display|view|get)'
                 r'\s+(?:the\s+)?(?:file\s+)?'
-                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown))'
             )
             # Secondary pattern: "parse FILE in/from workflowN"
             _workflow_suffix_pattern = (
                 r'(?:parse|show\s+me|read|open|display|view|get)'
                 r'\s+(?:the\s+)?(?:file\s+)?'
-                r'(\S+\.(?:csv|tsv|bed|txt|log|html))'
+                r'(\S+\.(?:csv|tsv|bed|txt|log|html|htm|md|markdown))'
                 r'\s+(?:in|from|under)\s+(workflow\d+)'
             )
             file_match = re.search(file_pattern, msg_lower)
@@ -775,10 +868,10 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                         "_chain": _pick_file_tool(_resolved_file),
                     })
 
-        # --- Catch-all for analyze_job_results: if the LLM narrated steps
-        # instead of emitting a DATA_CALL, auto-generate get_analysis_summary
-        # so the analysis actually executes. ---
-        if not calls and skill_key == "analyze_job_results" and (work_dir or run_uuid):
+        # --- Catch-all for workflow analysis skills: if the LLM narrated steps
+        # instead of emitting concrete DATA_CALLs, auto-generate summary plus
+        # high-value result-file parsing so the analysis actually executes. ---
+        if not calls and skill_key in workflow_analysis_skills and (work_dir or run_uuid):
             _bed_count_intent = bool(_BED_COUNT_INTENT_RE.search(msg_lower))
             _modification_name = _extract_modification_name(user_message)
             _bam_details_intent = bool(_BAM_DETAILS_INTENT_RE.search(user_message)) or \
@@ -890,7 +983,7 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
 
             if _modification_name:
                 _params: dict = {
-                    "extensions": ".bed",
+                    "extensions": ".bed,.bed.gz",
                     "max_depth": 1,
                 }
                 if work_dir:
@@ -920,8 +1013,36 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
                 "tool": "get_analysis_summary",
                 "params": _summary_params,
             })
-            logger.warning("Auto-generated get_analysis_summary for analyze_job_results skill",
-                          work_dir=work_dir, run_uuid=run_uuid)
+
+            if _wants_generic_workflow_analysis(user_message):
+                _file_lookup_params: dict = {}
+                if work_dir:
+                    _file_lookup_params["work_dir"] = work_dir
+                elif run_uuid:
+                    _file_lookup_params["run_uuid"] = run_uuid
+
+                for _file_hint in ("final_stats", "qc_summary"):
+                    calls.append({
+                        "source_type": "service", "source_key": "analyzer",
+                        "tool": "find_file",
+                        "params": {**_file_lookup_params, "file_name": _file_hint},
+                        "_chain": "parse_csv_file",
+                    })
+
+                logger.warning(
+                    "Auto-generated workflow analysis follow-up calls",
+                    skill_key=skill_key,
+                    work_dir=work_dir,
+                    run_uuid=run_uuid,
+                    followups=["final_stats", "qc_summary"],
+                )
+            else:
+                logger.warning(
+                    "Auto-generated get_analysis_summary for workflow analysis skill",
+                    skill_key=skill_key,
+                    work_dir=work_dir,
+                    run_uuid=run_uuid,
+                )
 
     return calls
 
@@ -962,7 +1083,7 @@ def _validate_analyzer_params(
     _KNOWN_PARAMS: dict[str, set[str]] = {
         "list_job_files": {"work_dir", "run_uuid", "extensions", "compact", "max_depth"},
         "find_file": {"file_name", "work_dir", "run_uuid"},
-        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines"},
+        "read_file_content": {"file_path", "work_dir", "run_uuid", "preview_lines", "render_mode"},
         "parse_csv_file": {"file_path", "work_dir", "run_uuid", "max_rows"},
         "parse_bed_file": {"file_path", "work_dir", "run_uuid", "max_records"},
         "compare_bed_region_overlaps": {

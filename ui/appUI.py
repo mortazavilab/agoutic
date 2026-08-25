@@ -9,18 +9,25 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from auth import require_auth, logout_button, make_authenticated_request, get_session_cookie
+from auth import require_auth, logout_button, make_authenticated_request, build_auth_request_kwargs
 from theme import inject_global_css, get_plotly_template
 from components.cards import section_header, status_chip, metadata_row, stat_tile, info_callout
 from components.progress import stepper, segmented_progress, timeline, progress_stats
 from components.forms import review_panel, grouped_section
 from appui_state import (
     _auto_refresh_is_suppressed,
+    _collaborator_activity_status,
     _is_help_intent,
+    _is_list_users_intent,
+    _is_share_intent,
     _job_status_updated_at,
     _pause_auto_refresh,
+    _project_can_manage_collaborators,
+    _project_can_mutate,
+    _project_membership_label,
     _render_local_help_response,
     _render_profile_path_template,
+    _shared_project_activity_warning,
     _slugify_project_name,
 )
 from appui_tasks import (
@@ -48,26 +55,82 @@ from appui_services import (
     get_cached_job_status as _get_cached_job_status_impl,
     get_job_debug_info as _get_job_debug_info_impl,
     load_user_ssh_profiles as _load_user_ssh_profiles_impl,
-    launchpad_headers as _launchpad_headers_impl,
 )
 from appui_sidebar import render_sidebar
-from appui_chat_runtime import handle_active_chat, launch_chat_request, render_file_upload
+from appui_chat_runtime import handle_active_chat, launch_chat_request, render_file_upload, render_project_collaborator_list, render_project_share_form
 from appui_block_part1 import render_block_part1
 from appui_block_part2 import render_block_part2
 
-# --- VERSION (single source of truth: VERSION file at repo root) ---
-_VERSION_FILE = _Path(__file__).resolve().parent.parent / "VERSION"
+# --- VERSION (standalone for UI-only releases) ---
+_VERSION_FILE = _Path(__file__).resolve().parent / "VERSION"
 _version_raw = _VERSION_FILE.read_text().strip() if _VERSION_FILE.exists() else "0.0.0"
 AGOUTIC_VERSION = _version_raw[1:] if _version_raw.lower().startswith("v") else _version_raw
+
+# --- Startup diagnostics (Streamlit runs the script twice on startup, so this prints twice — harmless) ---
+_api_url = os.getenv("AGOUTIC_API_URL", "(not set)")
+_frontend_url = os.getenv("FRONTEND_URL", "(not set)")
+_local_origins = os.getenv("LOCAL_UI_ALLOWED_ORIGINS", "(not set)")
+
+from urllib.parse import urlparse
+import socket
+
+_parsed = urlparse(_api_url)
+_is_loopback = _parsed.hostname in {"127.0.0.1", "localhost", "0.0.0.0"}
+
+# Also check if the hostname resolves to a local IP (hosted mode on same machine)
+_is_local_host = False
+if not _is_loopback and _parsed.hostname:
+    try:
+        addrinfo = socket.getaddrinfo(_parsed.hostname, None)
+        for family, _, _, _, sockaddr in addrinfo:
+            ip = sockaddr[0]
+            if ip.startswith("127.") or ip == "::1":
+                _is_local_host = True
+                break
+    except (socket.gaierror, OSError):
+        pass
+
+_mode = "local" if _is_loopback or _is_local_host else "server"
+
+if "startup_diagnostics_printed" not in st.session_state:
+    print(f"\n{'='*60}", flush=True)
+    print(f"[AGOUTIC] v{AGOUTIC_VERSION}  mode={_mode}", flush=True)
+    print(f"[AGOUTIC] AGOUTIC_API_URL={_api_url}", flush=True)
+    if _frontend_url != "(not set)":
+        print(f"[AGOUTIC] FRONTEND_URL={_frontend_url}", flush=True)
+    if _local_origins != "(not set)":
+        print(f"[AGOUTIC] LOCAL_UI_ALLOWED_ORIGINS={_local_origins}", flush=True)
+    print(f"{'='*60}\n", flush=True)
+    st.session_state["startup_diagnostics_printed"] = True
+
+def _resolved_page_project_name() -> str:
+    cached_name = str(st.session_state.get("_page_project_name") or "").strip()
+    if cached_name:
+        return cached_name
+
+    active_id = str(st.session_state.get("active_project_id") or "").strip()
+    if not active_id:
+        return ""
+
+    for project in st.session_state.get("_cached_projects", []):
+        if project.get("id") == active_id:
+            return str(project.get("name") or "").strip()
+    return ""
+
+
+def _browser_page_title(project_name: str | None = None) -> str:
+    resolved_name = str(project_name if project_name is not None else _resolved_page_project_name()).strip()
+    if resolved_name:
+        return f"{resolved_name} | AGOUTIC v{AGOUTIC_VERSION}"
+    return f"AGOUTIC v{AGOUTIC_VERSION}"
 
 # --- CONFIG ---
 # Use environment variable or default to localhost
 API_URL = os.getenv("AGOUTIC_API_URL", "http://127.0.0.1:8000")
-LAUNCHPAD_URL = os.getenv("LAUNCHPAD_REST_URL", "http://localhost:8003")
-INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
 LIVE_JOB_STATUS_TIMEOUT_SECONDS = float(os.getenv("LIVE_JOB_STATUS_TIMEOUT_SECONDS", "60"))
+IDLE_DISCOVERY_POLL_SECONDS = max(int(os.getenv("IDLE_DISCOVERY_POLL_SECONDS", "120") or 120), 5)
 
-st.set_page_config(page_title=f"AGOUTIC v{AGOUTIC_VERSION}", layout="wide")
+st.set_page_config(page_title=_browser_page_title(), layout="wide")
 inject_global_css()
 PLOTLY_TEMPLATE = get_plotly_template()
 
@@ -82,26 +145,162 @@ TASK_DOCK_HEIGHT_PX = 320
 st.markdown(
     """
     <style>
-    .st-key-task_dock [data-testid="stVerticalBlockBorderWrapper"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stVerticalBlockBorderWrapper"] {
         background: color-mix(in srgb, var(--background-color) 90%, var(--secondary-background-color) 10%);
         border-radius: 0.9rem;
         box-shadow: 0 18px 40px rgba(15, 23, 42, 0.16);
         overflow: hidden;
     }
 
-    .st-key-task_dock [data-testid="stMetric"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stMetric"] {
         background: color-mix(in srgb, var(--secondary-background-color) 82%, transparent);
         border-radius: 0.65rem;
         padding: 0.35rem 0.5rem;
     }
 
-    .st-key-task_dock [data-testid="stExpander"] {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stExpander"] {
         border-radius: 0.65rem;
         overflow: hidden;
     }
 
-    .st-key-task_dock [data-testid="stVerticalBlock"] > div {
+    [class*="st-key-task_dock_scope_project_scope_"] [data-testid="stVerticalBlock"] > div {
         gap: 0.6rem;
+    }
+
+    .maintenance-banner-fixed {
+        position: fixed;
+        top: 4.15rem;
+        left: 20rem;
+        right: 1.5rem;
+        z-index: 70;
+        background: #f0b44d;
+        background-color: #f0b44d;
+        color: #2f2413;
+        opacity: 1;
+        isolation: isolate;
+        border: 1px solid #c78e2e;
+        border-radius: 0.85rem;
+        box-shadow: 0 14px 32px rgba(15, 23, 42, 0.22);
+        font-size: 0.9rem;
+        line-height: 1.35;
+        font-weight: 700;
+        padding: 0.8rem 1rem;
+    }
+
+    .maintenance-banner-spacer {
+        width: 100%;
+    }
+
+    .project-shared-status-banner-fixed {
+        position: fixed;
+        top: 4.15rem;
+        left: 20rem;
+        right: 1.5rem;
+        max-width: 52rem;
+        z-index: 60;
+        background: #181a1b;
+        background-color: #181a1b;
+        opacity: 1;
+        isolation: isolate;
+        border: 1px solid #2e3336;
+        border-radius: 0.85rem;
+        box-shadow: 0 14px 32px rgba(15, 23, 42, 0.28);
+        overflow: hidden;
+    }
+
+    .project-shared-status-banner-fixed--with-maintenance {
+        top: 8.35rem;
+    }
+
+    .project-shared-status-banner__summary {
+        font-size: 0.82rem;
+        line-height: 1.3;
+        color: color-mix(in srgb, var(--text-color) 88%, transparent);
+        font-weight: 600;
+        list-style: none;
+        cursor: pointer;
+        padding: 0.55rem 0.8rem 0.65rem;
+    }
+
+    .project-shared-status-banner__summary::-webkit-details-marker {
+        display: none;
+    }
+
+    .project-shared-status-banner__summary::after {
+        content: "Show collaborators";
+        float: right;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: color-mix(in srgb, var(--text-color) 62%, transparent);
+    }
+
+    .project-shared-status-banner-fixed[open] .project-shared-status-banner__summary {
+        border-bottom: 1px solid #2e3336;
+        margin-bottom: 0;
+    }
+
+    .project-shared-status-banner-fixed[open] .project-shared-status-banner__summary::after {
+        content: "Hide collaborators";
+    }
+
+    .project-shared-status-banner__body {
+        padding: 0.45rem 0.8rem 0.7rem;
+    }
+
+    .project-shared-status-banner__line {
+        font-size: 0.78rem;
+        line-height: 1.25;
+        color: color-mix(in srgb, var(--text-color) 82%, transparent);
+        margin-top: 0.12rem;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .project-shared-status-banner__warning {
+        margin-top: 0.45rem;
+        font-size: 0.76rem;
+        line-height: 1.3;
+        color: #f4d7a1;
+        border-top: 1px solid color-mix(in srgb, var(--secondary-background-color) 75%, transparent);
+        padding-top: 0.4rem;
+    }
+
+    .project-shared-status-banner-spacer {
+        width: 100%;
+    }
+
+    @media (max-width: 768px) {
+        .maintenance-banner-fixed {
+            top: 3.7rem;
+            left: 0.85rem;
+            right: 0.85rem;
+        }
+
+        .project-shared-status-banner-fixed {
+            top: 3.7rem;
+            left: 0.85rem;
+            right: 0.85rem;
+            max-width: none;
+        }
+
+        .project-shared-status-banner-fixed--with-maintenance {
+            top: 7.5rem;
+        }
+
+        .project-shared-status-banner__summary {
+            font-size: 0.76rem;
+            padding: 0.42rem 0.6rem 0.5rem;
+        }
+
+        .project-shared-status-banner__body {
+            padding: 0.35rem 0.6rem 0.55rem;
+        }
+
+        .project-shared-status-banner__line,
+        .project-shared-status-banner__warning {
+            font-size: 0.72rem;
+        }
     }
     </style>
     """,
@@ -154,16 +353,11 @@ def _create_project_server_side(name: str = None) -> dict:
     return _create_project_server_side_impl(name, API_URL, make_authenticated_request)
 
 
-def _launchpad_headers() -> dict:
-    return _launchpad_headers_impl(INTERNAL_API_SECRET)
-
-
 def _load_user_ssh_profiles(user_id: str) -> list[dict]:
     return _load_user_ssh_profiles_impl(
         user_id,
-        launchpad_url=LAUNCHPAD_URL,
+        api_url=API_URL,
         request_fn=make_authenticated_request,
-        internal_api_secret=INTERNAL_API_SECRET,
     )
 
 
@@ -176,8 +370,14 @@ def _active_project_slug() -> str:
     return _slugify_project_name(active_id)
 
 
-def get_sanitized_blocks(target_project_id: str):
-    return _get_sanitized_blocks(target_project_id, api_url=API_URL, request_fn=make_authenticated_request)
+def get_sanitized_blocks(target_project_id: str, *, before_seq: int = 0, limit: int = 500):
+    return _get_sanitized_blocks(
+        target_project_id,
+        api_url=API_URL,
+        request_fn=make_authenticated_request,
+        before_seq=before_seq,
+        limit=limit,
+    )
 
 
 def get_project_tasks(project_id: str):
@@ -222,6 +422,51 @@ def _project_scope_mount_key(scope_name: str, project_id: str) -> str:
     return f"{scope_token}_project_scope_{project_token}"
 
 
+def _task_dock_cache_keys(project_id: str) -> tuple[str, str]:
+    project_token = (project_id or "none").strip() or "none"
+    return (
+        f"_cached_task_sections_{project_token}",
+        f"_last_task_check_{project_token}",
+    )
+
+
+def _task_sections_have_active_items(sections: dict) -> bool:
+    if not isinstance(sections, dict):
+        return False
+
+    for section_name in ("running", "pending"):
+        tasks = sections.get(section_name, [])
+        if any(isinstance(task, dict) and not task.get("parent_task_id") for task in tasks):
+            return True
+    return False
+
+
+def _render_task_dock_sections(project_id: str, sections: dict) -> None:
+    sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
+    total_tasks = _count_project_tasks(sections)
+    st.session_state["_show_task_dock"] = total_tasks > 0
+    if total_tasks == 0:
+        return
+
+    with st.container(border=True, height=TASK_DOCK_HEIGHT_PX):
+        if hidden_stale:
+            st.caption(
+                f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
+            )
+        render_project_tasks(project_id, sections=sections, docked=True)
+
+
+def _current_project_record(project_id: str) -> dict:
+    for project in st.session_state.get("_cached_projects", []):
+        if project.get("id") == project_id:
+            return project
+    return {
+        "id": project_id,
+        "name": _resolved_page_project_name() or project_id,
+        "role": "viewer",
+    }
+
+
 def _finish_project_switch_loading(active_project_id: str) -> None:
     if st.session_state.get("_project_switch_loading_for") == active_project_id:
         st.session_state.pop("_project_switch_loading_for", None)
@@ -235,16 +480,221 @@ def _project_refresh_interval(
     auto_refresh_suppressed: bool,
     project_switch_loading: bool,
     has_running_job: bool,
+    has_full_refresh_job: bool = False,
 ):
     if project_switch_loading:
         return timedelta(milliseconds=100)
 
-    refresh_seconds = min(max(int(poll_seconds or 2), 1), 2) if has_running_job else max(int(poll_seconds or 2), 1)
+    refresh_seconds = max(int(poll_seconds or 30), 1)
+    if has_full_refresh_job:
+        refresh_seconds = min(refresh_seconds, 5)
     if has_running_job and auto_refresh_suppressed:
         return timedelta(seconds=refresh_seconds)
     if not (auto_refresh or has_running_job) or auto_refresh_suppressed:
         return None
+
     return timedelta(seconds=refresh_seconds)
+
+
+def _project_discovery_interval(
+    *,
+    auto_refresh: bool,
+    auto_refresh_suppressed: bool,
+    project_switch_loading: bool,
+):
+    if project_switch_loading:
+        return timedelta(milliseconds=100)
+
+    if auto_refresh_suppressed or not auto_refresh:
+        return None
+
+    return timedelta(seconds=IDLE_DISCOVERY_POLL_SECONDS)
+
+
+def _block_should_render_in_live_fragment(block: dict) -> bool:
+    btype = block.get("type")
+    bstatus = str(block.get("status") or "").upper()
+    content = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+
+    if btype in {"DOWNLOAD_TASK", "STAGING_TASK"}:
+        return bstatus == "RUNNING"
+
+    if btype != "EXECUTION_JOB":
+        return False
+
+    job_status = content.get("job_status", {}) if isinstance(content.get("job_status"), dict) else {}
+    status = str(job_status.get("status") or "").upper()
+    transfer_state = str(
+        job_status.get("transfer_state")
+        or content.get("transfer_state")
+        or ""
+    ).strip().lower()
+    imported_source_kind = str(
+        job_status.get("imported_source_kind")
+        or content.get("imported_source_kind")
+        or ""
+    ).strip().lower()
+
+    if bstatus == "RUNNING" or status in {"RUNNING", "PENDING"}:
+        return True
+    if transfer_state in {"pending_import", "downloading_outputs"}:
+        return True
+    if (
+        imported_source_kind == "slurm"
+        and bstatus in {"RUNNING", "DONE"}
+        and transfer_state not in {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
+    ):
+        return True
+    return False
+
+
+def _project_shared_status_banner_payload(
+    *,
+    can_manage_collaborators: bool,
+    collaborators: list[dict] | None,
+    current_user_id: str | None,
+    activity_status_fn,
+    shared_warning: str | None,
+) -> dict | None:
+    if not can_manage_collaborators:
+        return None
+
+    roster = collaborators or []
+    non_owner_count = sum(1 for collaborator in roster if not collaborator.get("is_owner"))
+    if non_owner_count <= 0:
+        return None
+
+    active_now = sum(
+        1
+        for collaborator in roster
+        if str(collaborator.get("user_id") or "").strip() != str(current_user_id or "").strip()
+        and activity_status_fn(collaborator)[0] == "active"
+    )
+
+    summary = f"Project collaborators: {len(roster)} total"
+    if active_now:
+        summary += f" · {active_now} other active now"
+
+    lines = []
+    current_user_token = str(current_user_id or "").strip()
+    for collaborator in roster:
+        label = str(
+            collaborator.get("display_name")
+            or collaborator.get("username")
+            or collaborator.get("email")
+            or collaborator.get("user_id")
+            or "Unknown user"
+        ).strip()
+        role_label = "Owner" if collaborator.get("is_owner") else str(collaborator.get("role") or "viewer").title()
+        if str(collaborator.get("user_id") or "").strip() == current_user_token:
+            role_label = f"{role_label} · You"
+        _activity_state, activity_label = activity_status_fn(collaborator)
+        lines.append(f"{label} · {role_label} · {activity_label}")
+
+    return {
+        "summary": summary,
+        "lines": lines,
+        "warning": shared_warning,
+    }
+
+
+def _render_project_shared_status_banner(banner_payload: dict | None) -> None:
+    if not banner_payload:
+        return
+
+    import html as _html
+
+    summary_text = _html.escape(str(banner_payload.get("summary") or "").strip())
+    line_markup = "".join(
+        f'<div class="project-shared-status-banner__line">{_html.escape(str(line))}</div>'
+        for line in (banner_payload.get("lines") or [])
+        if str(line or "").strip()
+    )
+    warning_text = str(banner_payload.get("warning") or "").strip()
+    warning_markup = ""
+    if warning_text:
+        warning_markup = (
+            f'<div class="project-shared-status-banner__warning">{_html.escape(warning_text)}</div>'
+        )
+
+    spacer_rem = 3.55
+    banner_class = "project-shared-status-banner-fixed"
+    if banner_payload.get("maintenance_visible"):
+        banner_class = f"{banner_class} project-shared-status-banner-fixed--with-maintenance"
+    st.markdown(
+        (
+            f'<div class="project-shared-status-banner-spacer" aria-hidden="true" '
+            f'style="height: {spacer_rem:.2f}rem;"></div>'
+            f'<details class="{banner_class}">'
+            f'<summary class="project-shared-status-banner__summary">{summary_text}</summary>'
+            f'<div class="project-shared-status-banner__body">'
+            f'{line_markup}'
+            f'{warning_markup}'
+            f'</div>'
+            f'</details>'
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def _parse_maintenance_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _maintenance_banner_text(state: dict | None, *, now=None) -> str:
+    data = state or {}
+    if not data.get("mode"):
+        return ""
+    message = str(data.get("message") or "").strip() or "AGOUTIC is currently in maintenance mode."
+    reference_now = now or datetime.datetime.now(datetime.timezone.utc)
+    starts_at = _parse_maintenance_datetime(data.get("starts_at"))
+    if starts_at is not None and starts_at > reference_now:
+        remaining = max(int((starts_at - reference_now).total_seconds()), 0)
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{message} Maintenance starts in {hours:02d}:{minutes:02d}:{seconds:02d}."
+    return message
+
+
+def _maintenance_banner_payload(api_url: str, *, now=None) -> dict | None:
+    try:
+        response = make_authenticated_request("GET", f"{api_url}/admin/maintenance", timeout=3)
+    except Exception:
+        return None
+    if getattr(response, "status_code", 0) != 200:
+        return None
+    payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(payload, dict) or not payload.get("mode"):
+        return None
+    return {
+        "text": _maintenance_banner_text(payload, now=now),
+        "mode": True,
+    }
+
+
+def _render_maintenance_banner(banner_payload: dict | None) -> None:
+    if not banner_payload:
+        return
+
+    import html as _html
+
+    text = _html.escape(str(banner_payload.get("text") or "").strip())
+    spacer_rem = 4.15
+    st.markdown(
+        (
+            f'<div class="maintenance-banner-spacer" aria-hidden="true" style="height: {spacer_rem:.2f}rem;"></div>'
+            f'<div class="maintenance-banner-fixed" role="status" aria-live="polite">{text}</div>'
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def _should_bootstrap_suppressed_monitoring(
@@ -261,6 +711,53 @@ def _should_bootstrap_suppressed_monitoring(
         and has_running_job
     )
 
+
+def _should_use_incremental_block_fetch(
+    *,
+    has_existing_blocks: bool,
+    project_switch_loading_for: str | None,
+    active_project_id: str,
+    has_full_refresh_job: bool,
+) -> bool:
+    if not has_existing_blocks:
+        return False
+    if project_switch_loading_for == active_project_id:
+        return False
+    if has_full_refresh_job:
+        return False
+    return True
+
+
+def _refresh_live_download_block(block: dict, project_id: str) -> dict:
+    refreshed_block = dict(block or {})
+    content = refreshed_block.get("payload", {}) if isinstance(refreshed_block.get("payload"), dict) else {}
+    download_id = str(content.get("download_id") or "").strip()
+    if not download_id or not project_id:
+        return refreshed_block
+
+    try:
+        response = make_authenticated_request(
+            "GET",
+            f"{API_URL}/projects/{project_id}/downloads/{download_id}",
+            timeout=10,
+        )
+    except Exception:
+        return refreshed_block
+
+    if getattr(response, "status_code", 0) != 200:
+        return refreshed_block
+
+    live_payload = response.json() if callable(getattr(response, "json", None)) else None
+    if not isinstance(live_payload, dict):
+        return refreshed_block
+
+    merged_payload = dict(content)
+    merged_payload.update(live_payload)
+    refreshed_block["payload"] = merged_payload
+    if live_payload.get("status") is not None:
+        refreshed_block["status"] = str(live_payload.get("status") or refreshed_block.get("status") or "")
+    return refreshed_block
+
 # Check if we're creating a new project (flag set by New Project button)
 if st.session_state.get("_create_new_project", False):
     # Create project via server-side endpoint (server generates UUID)
@@ -269,25 +766,32 @@ if st.session_state.get("_create_new_project", False):
     _new_proj = _create_project_server_side(name=_pending_name)
     new_id = _new_proj["id"] if isinstance(_new_proj, dict) else _new_proj
     _new_slug = _new_proj.get("slug", "") if isinstance(_new_proj, dict) else ""
-    st.session_state.active_project_id = new_id
-    st.session_state.blocks = []
-    # Clear project-related data
-    for key in ['loaded_conversation', 'selected_job', 'chat_history', 
-                'skill_content', 'selected_skill', 'job_status', 'messages',
-                '_max_visible_blocks', '_welcome_sent_for']:
-        if key in st.session_state:
-            del st.session_state[key]
-    # Clear any widget keys left over from old block rendering
-    # (form keys, checkbox keys, rejection state, etc.)
-    stale_prefixes = ('params_form_', 'logs_', 'rejecting_', 'rejection_reason_',
-                      'submit_reject_', 'cancel_reject_')
-    for key in list(st.session_state.keys()):
-        if any(key.startswith(p) for p in stale_prefixes):
-            del st.session_state[key]
-    # Reset the project ID text input widget so it doesn't hold the old value
-    st.session_state["_project_id_input"] = new_id
-    if _new_slug and _new_slug != _slugify_project_name(_pending_name or ""):
-        st.toast(f"Created project — folder: {_new_slug}")
+    _new_name = _new_proj.get("name", "") if isinstance(_new_proj, dict) else ""
+    _creation_error = _new_proj.get("error", "") if isinstance(_new_proj, dict) else ""
+    if new_id:
+        st.session_state.pop("_project_creation_error", None)
+        st.session_state.active_project_id = new_id
+        st.session_state["_page_project_name"] = _new_name or (_pending_name or "")
+        st.session_state.blocks = []
+        # Clear project-related data
+        for key in ['loaded_conversation', 'selected_job', 'chat_history', 
+                    'skill_content', 'selected_skill', 'job_status', 'messages',
+                    '_max_visible_blocks', '_welcome_sent_for']:
+            if key in st.session_state:
+                del st.session_state[key]
+        # Clear any widget keys left over from old block rendering
+        # (form keys, checkbox keys, rejection state, etc.)
+        stale_prefixes = ('params_form_', 'logs_', 'rejecting_', 'rejection_reason_',
+                          'submit_reject_', 'cancel_reject_')
+        for key in list(st.session_state.keys()):
+            if any(key.startswith(p) for p in stale_prefixes):
+                del st.session_state[key]
+        # Reset the project ID text input widget so it doesn't hold the old value
+        st.session_state["_project_id_input"] = new_id
+        if _new_slug and _new_slug != _slugify_project_name(_pending_name or ""):
+            st.toast(f"Created project — folder: {_new_slug}")
+    elif _creation_error:
+        st.session_state["_project_creation_error"] = f"Could not create project: {_creation_error}"
     # Clear the flag
     del st.session_state["_create_new_project"]
 
@@ -320,6 +824,18 @@ if st.session_state.get("_last_rendered_project") != st.session_state.active_pro
     st.session_state.blocks = []
     st.session_state._last_rendered_project = st.session_state.active_project_id
     st.session_state.pop("_welcome_sent_for", None)
+    st.session_state.pop("_max_visible_blocks", None)
+    st.session_state.pop("_hidden_block_count", None)
+    # Clear project-scoped caches (active-state index, dataframe index, rehydrated DFs)
+    try:
+        from appui_active_state import clear_active_state, clear_df_index, clear_rehydrated_df_cache
+        old_project = st.session_state.get("_last_rendered_project")
+        if old_project:
+            clear_active_state(old_project)
+            clear_df_index(old_project)
+            clear_rehydrated_df_cache(old_project)
+    except (ImportError, ModuleNotFoundError):
+        pass
     # Suppress auto-refresh for a few cycles after switching to avoid
     # Streamlit DOM-reuse artefacts (old messages blinking).
     _pause_auto_refresh(3)
@@ -359,7 +875,14 @@ def get_cached_job_status(run_uuid: str):
 
 
 def _render_md_with_dataframes(md: str, block_id: str, section: str):
-    return _render_md_with_dataframes_impl(md, block_id, section)
+    return _render_md_with_dataframes_impl(
+        md,
+        block_id,
+        section,
+        api_url=API_URL,
+        project_id=str(st.session_state.get("active_project_id") or "").strip(),
+        request_fn=make_authenticated_request,
+    )
 
 
 def _render_embedded_dataframes(dfs: dict, block_id: str, *, only_visible: bool = True):
@@ -398,7 +921,12 @@ def _render_workflow_plot_payload(payload: dict, block_id: str, step_suffix: str
     return _render_workflow_plot_payload_impl(payload, block_id, step_suffix, PLOTLY_TEMPLATE)
 
 
-def render_block(block, expected_project_id: str = ""):
+def render_block(
+    block,
+    expected_project_id: str = "",
+    live_job_status_map: dict | None = None,
+    render_scope: str = "main",
+):
     """Render a single block.
 
     If expected_project_id is provided, silently skip blocks that belong
@@ -493,6 +1021,7 @@ def render_block(block, expected_project_id: str = ""):
             "FAILED": ("failed", "Failed", "❌"),
             "RUNNING": ("running", "Running", "🔄"),
             "PENDING": ("pending", "Pending", "⏳"),
+            "STALE": ("warning", "Stale", "⚠️"),
             "CANCELLED": ("warning", "Cancelled", "🛑"),
             "DELETED": ("pending", "Deleted", "🗑️"),
         }
@@ -504,6 +1033,8 @@ def render_block(block, expected_project_id: str = ""):
             return "complete", raw_status.replace("_", " ").title(), "✅"
         if normalized == "deleted":
             return "pending", raw_status.replace("_", " ").title(), "🗑️"
+        if normalized == "stale":
+            return "warning", raw_status.replace("_", " ").title(), "⚠️"
         if normalized in {"failed", "rejected", "cancelled"}:
             return "failed", raw_status.replace("_", " ").title(), "❌"
         if normalized in {"running", "active"}:
@@ -563,15 +1094,18 @@ def render_block(block, expected_project_id: str = ""):
         _format_duration=_format_duration,
         _block_timestamp=_block_timestamp,
         _render_workflow_plot_payload=_render_workflow_plot_payload,
+        _render_md_with_dataframes=_render_md_with_dataframes,
         _render_embedded_dataframes=_render_embedded_dataframes,
         _render_step_payload=_render_step_payload,
         _job_status_updated_at=_job_status_updated_at,
+        render_scope=render_scope,
         _run_status_label=_run_status_label,
         _format_timestamp=_format_timestamp,
         _workflow_label_from_path=_workflow_label_from_path,
         _pause_auto_refresh=_pause_auto_refresh,
         get_job_debug_info=get_job_debug_info,
         _render_plot_block=_render_plot_block,
+        live_job_status_map=live_job_status_map,
     )
 
     if not handled_part1 and not handled_part2:
@@ -584,11 +1118,14 @@ def render_block(block, expected_project_id: str = ""):
 active_id = st.session_state.active_project_id
 
 # Show project name in title (fall back to truncated UUID)
-_active_project_name = active_id[:12] + "…"
-for _p in st.session_state.get("_cached_projects", []):
-    if _p.get("id") == active_id:
-        _active_project_name = _p.get("name", _active_project_name)
-        break
+_known_project_name = _resolved_page_project_name()
+if _known_project_name:
+    st.session_state["_page_project_name"] = _known_project_name
+_active_project_name = _known_project_name or (active_id[:12] + "…")
+_active_project = _current_project_record(active_id)
+_can_mutate_active_project = _project_can_mutate(_active_project, user)
+_can_manage_active_collaborators = _project_can_manage_collaborators(_active_project, user)
+_active_project_access_label = _project_membership_label(_active_project)
 
 # Determine whether the page is in a transient project-switch state.
 _auto_refresh_suppressed = _auto_refresh_is_suppressed()
@@ -600,13 +1137,65 @@ _refresh_interval = _project_refresh_interval(
     auto_refresh_suppressed=_auto_refresh_suppressed,
     project_switch_loading=_project_switch_loading,
     has_running_job=bool(st.session_state.get("_has_running_job", False)),
+    has_full_refresh_job=bool(st.session_state.get("_has_full_refresh_job", False)),
+)
+_discovery_refresh_interval = _project_discovery_interval(
+    auto_refresh=auto_refresh,
+    auto_refresh_suppressed=_auto_refresh_suppressed,
+    project_switch_loading=_project_switch_loading,
 )
 project_loading_slot = None
 
 
 @st.fragment(run_every=_refresh_interval)
+def _render_live_block_fragment(block: dict, expected_project_id: str = ""):
+    project_id = expected_project_id or st.session_state.active_project_id
+    live_block = block
+    block_id = str(block.get("id") or "")
+    btype = block.get("type")
+    content = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
+    live_job_status_map = None
+
+    if btype == "EXECUTION_JOB":
+        run_uuid = str(content.get("run_uuid") or "").strip()
+        if run_uuid:
+            live_job_status, _ = get_cached_job_status(run_uuid)
+            if isinstance(live_job_status, dict) and live_job_status:
+                live_job_status_map = {run_uuid: live_job_status}
+                try:
+                    from appui_active_state import update_run_status
+
+                    update_run_status(st.session_state.active_project_id, run_uuid, live_job_status)
+                except (ImportError, ModuleNotFoundError):
+                    pass
+    elif btype == "DOWNLOAD_TASK":
+        live_block = _refresh_live_download_block(block, project_id)
+        live_content = live_block.get("payload", {}) if isinstance(live_block.get("payload"), dict) else {}
+        try:
+            from appui_active_state import update_download_status
+
+            update_download_status(project_id, block_id, live_content)
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    with st.container():
+        render_block(
+            live_block,
+            expected_project_id=expected_project_id,
+            live_job_status_map=live_job_status_map,
+            render_scope="live",
+        )
+
+
+@st.fragment(run_every=_discovery_refresh_interval)
 def _render_chat():
-    """Render all chat blocks for the active project."""
+    """Render all chat blocks for the active project.
+
+    Uses incremental block streaming and active-state tracking to avoid
+    refetching and rescanning large project histories on every refresh cycle.
+    Only active jobs/downloads/staging tasks are polled; completed/failed/synced
+    tasks render from cached data until reactivated.
+    """
     _active_id = st.session_state.active_project_id
     with st.container(key=_project_scope_mount_key("chat", _active_id)):
         if st.session_state.get("_project_switch_loading_for") == _active_id:
@@ -618,15 +1207,63 @@ def _render_chat():
         if project_loading_slot is not None:
             project_loading_slot.empty()
 
-        # 1. Fetch & Sanitize
-        fetched_blocks, _fetch_ok = get_sanitized_blocks(_active_id)
+        # Import active-state helpers
+        from appui_active_state import (
+            get_active_runs_to_poll,
+            get_active_downloads_to_poll,
+            has_any_active_items,
+            merge_blocks_incremental,
+            should_block_require_poll,
+            update_run_status,
+            update_download_status,
+            register_active_run,
+            register_active_download,
+            is_job_active,
+            is_download_active,
+        )
+        from appui_cache_ttl import periodic_cache_maintenance
+
+        # Run periodic cache maintenance to evict expired download/export caches
+        periodic_cache_maintenance()
+
+        # 1. Fetch & Sanitize (incremental streaming)
+        # Use incremental fetch on subsequent refreshes to avoid refetching large histories.
+        # On initial load or project switch, fall back to full fetch for correctness.
+        _use_incremental_fetch = _should_use_incremental_block_fetch(
+            has_existing_blocks=bool(st.session_state.get("blocks")),
+            project_switch_loading_for=st.session_state.get("_project_switch_loading_for"),
+            active_project_id=_active_id,
+            has_full_refresh_job=bool(st.session_state.get("_has_full_refresh_job", False)),
+        )
+
+        if not _use_incremental_fetch:
+            # Full fetch on initial load to establish baseline
+            fetched_blocks, _fetch_ok, _pagination = get_sanitized_blocks(_active_id)
+        else:
+            # Incremental fetch for subsequent refreshes (only new blocks since last poll)
+            from appui_tasks import get_sanitized_blocks_incremental
+            fetched_blocks, _fetch_ok = get_sanitized_blocks_incremental(_active_id, API_URL, make_authenticated_request)
+            _pagination = {}
+        
         fetched_blocks = [b for b in fetched_blocks if b.get("project_id") == _active_id]
 
         # Only update session-state blocks when the fetch actually succeeded.
         # A transient server error / timeout should NOT wipe the displayed chat.
         if _fetch_ok:
-            blocks = fetched_blocks
+            existing_blocks = st.session_state.get("blocks", [])
+            blocks, _has_new_blocks = merge_blocks_incremental(
+                _active_id, existing_blocks, fetched_blocks,
+                max_visible=st.session_state.get("_max_visible_blocks", 30),
+            )
             st.session_state.blocks = blocks
+            if blocks:
+                st.session_state[f"_oldest_block_seq_{_active_id}"] = min(
+                    int(block.get("seq") or 0) for block in blocks
+                )
+            if _pagination:
+                st.session_state[f"_has_older_blocks_{_active_id}"] = bool(
+                    _pagination.get("has_older", False)
+                )
         else:
             # Keep whatever was previously in session state so the chat stays visible.
             blocks = st.session_state.get("blocks", [])
@@ -667,42 +1304,72 @@ def _render_chat():
             st.session_state.pop("_hidden_block_count", None)
             visible_blocks = blocks
 
-        # 3. Scan ALL blocks for running jobs
+        # 3. Scan visible blocks for active state updates (lightweight pass)
         _has_running_job = False
         _has_full_refresh_job = False
         _has_pending_submission = False
         _has_finished_job = False
-        for blk in blocks:
+
+        for blk in visible_blocks:
             btype = blk.get("type")
-            bstatus = blk.get("status")
+            bstatus = str(blk.get("status") or "").upper()
+            block_id = blk.get("id", "")
+            content = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
+
+            # Check for full refresh requirements (only for active blocks)
             if _block_requires_full_refresh(blk):
                 _has_full_refresh_job = True
-            if btype == "EXECUTION_JOB" and bstatus == "RUNNING":
-                _has_running_job = True
-            if btype == "EXECUTION_JOB" and bstatus in ("DONE", "FAILED"):
-                _has_finished_job = True
-            # Keep auto-refresh alive while a result transfer is in progress
-            # (manual sync on an already-completed job).
-            if btype == "EXECUTION_JOB" and bstatus == "DONE":
-                _blk_payload = blk.get("payload", {}) if isinstance(blk.get("payload"), dict) else {}
-                _blk_js = _blk_payload.get("job_status", {}) if isinstance(_blk_payload.get("job_status"), dict) else {}
-                _blk_run_uuid = _blk_payload.get("run_uuid", "")
-                _blk_ts = (_blk_js.get("transfer_state") or "").strip().lower()
-                _cached_ts = (st.session_state.get(f"_transfer_state_{_blk_run_uuid}") or "").strip().lower() if _blk_run_uuid else ""
-                if _blk_ts in {"downloading_outputs"} or _cached_ts in {"downloading_outputs"}:
+
+            # EXECUTION_JOB handling with rerun-aware tracking
+            if btype == "EXECUTION_JOB":
+                run_uuid = content.get("run_uuid", "")
+                job_status = content.get("job_status", {})
+
+                # Prefer the latest fragment-populated status cache so the parent
+                # discovery loop doesn't re-activate cards from stale block payloads.
+                if run_uuid:
+                    cached_status = st.session_state.get(f"_job_status_cache_{run_uuid}")
+                    if isinstance(cached_status, dict) and isinstance(cached_status.get("job_status"), dict):
+                        job_status = cached_status["job_status"]
+
+                # Update active-state index for this run
+                if run_uuid:
+                    is_active = update_run_status(_active_id, run_uuid, job_status)
+                    if is_active:
+                        _has_running_job = True
+                elif bstatus == "RUNNING":
                     _has_running_job = True
-            if btype == "STAGING_TASK" and bstatus == "RUNNING":
-                _has_running_job = True
-            if btype == "STAGING_TASK" and bstatus in ("DONE", "FAILED"):
-                _has_finished_job = True
-            if btype == "APPROVAL_GATE" and bstatus == "APPROVED":
+
+                if bstatus in ("DONE", "FAILED"):
+                    _has_finished_job = True
+
+            # DOWNLOAD_TASK handling
+            elif btype == "DOWNLOAD_TASK":
+                if is_download_active(content):
+                    update_download_status(_active_id, block_id, content)
+                    _has_running_job = True
+
+            # STAGING_TASK handling
+            elif btype == "STAGING_TASK":
+                if bstatus == "RUNNING":
+                    _has_running_job = True
+                elif bstatus in ("DONE", "FAILED"):
+                    _has_finished_job = True
+
+            # APPROVAL_GATE handling
+            elif btype == "APPROVAL_GATE" and bstatus == "APPROVED":
                 _has_pending_submission = True
-            if btype == "DOWNLOAD_TASK" and bstatus == "RUNNING":
-                _has_running_job = True
+
+        # Also check for any active items not currently visible (e.g., in hidden history)
+        if has_any_active_items(_active_id):
+            _has_running_job = True
 
         # 4. Render visible blocks
         for blk in visible_blocks:
-            render_block(blk, expected_project_id=_active_id)
+            if _block_should_render_in_live_fragment(blk):
+                _render_live_block_fragment(blk, expected_project_id=_active_id)
+            else:
+                render_block(blk, expected_project_id=_active_id)
 
         # 5. Determine if auto-refresh should stay active
         if _has_pending_submission and not _has_running_job and not _has_finished_job:
@@ -748,7 +1415,47 @@ def _render_chat():
                 )
 
 with st.container(key=_project_scope_mount_key("project_panel", active_id)):
+    st.html(
+        f"<script>window.parent.document.title = {json.dumps(_browser_page_title(_known_project_name))};</script>"
+    )
+    _active_project_collaborators = []
+    try:
+        _collab_resp = make_authenticated_request(
+            "GET", f"{API_URL}/projects/{active_id}/collaborators", timeout=5
+        )
+        if _collab_resp.status_code == 200:
+            _payload = _collab_resp.json() or {}
+            if isinstance(_payload, dict):
+                _active_project_collaborators = _payload.get("collaborators", []) or []
+    except Exception:
+        _active_project_collaborators = []
+
+    _shared_activity_warning = _shared_project_activity_warning(
+        _active_project_collaborators,
+        user.get("id"),
+        _can_mutate_active_project,
+    )
+    _shared_status_banner = _project_shared_status_banner_payload(
+        can_manage_collaborators=_can_manage_active_collaborators,
+        collaborators=_active_project_collaborators,
+        current_user_id=user.get("id"),
+        activity_status_fn=_collaborator_activity_status,
+        shared_warning=_shared_activity_warning,
+    )
+    _maintenance_banner = _maintenance_banner_payload(API_URL)
+    _render_maintenance_banner(_maintenance_banner)
     st.title(f"🧬 {_active_project_name}")
+    status_chip(
+        "info" if (_active_project.get("role") == "owner" or user.get("role") == "admin") else "warning",
+        label=_active_project_access_label,
+        icon="🏠" if _active_project.get("role") == "owner" else "🤝",
+    )
+    if _shared_status_banner:
+        _shared_status_banner = {
+            **_shared_status_banner,
+            "maintenance_visible": bool(_maintenance_banner),
+        }
+    _render_project_shared_status_banner(_shared_status_banner)
     project_loading_slot = st.empty()
     if _project_switch_loading:
         with project_loading_slot.container():
@@ -756,36 +1463,88 @@ with st.container(key=_project_scope_mount_key("project_panel", active_id)):
     _render_chat()
 
 
-@st.fragment(run_every=_refresh_interval)
+def _render_live_task_dock(project_id: str):
+    """Refresh and render active task-dock content within its owning fragment."""
+    if st.session_state.get("_project_switch_loading_for") == project_id:
+        st.session_state["_show_task_dock"] = False
+        return
+
+    cache_key, checked_key = _task_dock_cache_keys(project_id)
+    sections = get_project_tasks(project_id)
+    st.session_state[cache_key] = sections
+    st.session_state[checked_key] = time.time()
+    _render_task_dock_sections(project_id, sections)
+
+
+@st.fragment(run_every=_discovery_refresh_interval)
 def _render_task_dock():
-    """Render an inline task pane only when the project has tasks."""
+    """Render an inline task pane only when the project has tasks.
+
+    Optimized to reduce polling frequency when there are no active tasks,
+    avoiding unnecessary API calls on idle projects.
+    """
     _active_id = st.session_state.active_project_id
     with st.container(key=_project_scope_mount_key("task_dock_scope", _active_id)):
         if st.session_state.get("_project_switch_loading_for") == _active_id:
             st.session_state["_show_task_dock"] = False
             return
 
-        sections = get_project_tasks(_active_id)
-        sections, hidden_stale = prepare_project_task_sections_for_dock(sections)
-        total_tasks = _count_project_tasks(sections)
-        st.session_state["_show_task_dock"] = total_tasks > 0
-        if total_tasks == 0:
+        from appui_active_state import has_any_active_items
+        _has_active = has_any_active_items(_active_id)
+
+        cache_key, checked_key = _task_dock_cache_keys(_active_id)
+        sections = st.session_state.get(cache_key, {})
+        _last_task_check = float(st.session_state.get(checked_key, 0) or 0)
+        if not isinstance(sections, dict) or not sections or (time.time() - _last_task_check) >= IDLE_DISCOVERY_POLL_SECONDS or _has_active:
+            sections = get_project_tasks(_active_id)
+            st.session_state[cache_key] = sections
+            st.session_state[checked_key] = time.time()
+
+        if _has_active or _task_sections_have_active_items(sections):
+            _render_live_task_dock(_active_id)
             return
 
-        with st.container(border=True, height=TASK_DOCK_HEIGHT_PX, key="task_dock"):
-            if hidden_stale:
-                st.caption(
-                    f"Hidden {hidden_stale} stale task(s) older than 48h from this project view."
-                )
-            render_project_tasks(_active_id, sections=sections, docked=True)
+        _render_task_dock_sections(_active_id, sections)
 
 
-    # Pagination button — rendered outside the fragment to avoid duplicate-key
-    # errors when the fragment's timer overlaps with a manual full-page rerun.
+def _render_history_pagination(project_id: str) -> None:
+    """Render chat history pagination independently of task-dock state."""
     _hbc = st.session_state.get("_hidden_block_count", 0)
-    if _hbc > 0:
-        if st.button(f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"):
-            st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+    _has_server_history = st.session_state.get(f"_has_older_blocks_{project_id}", False)
+    if _hbc > 0 or _has_server_history:
+        _load_label = (
+            f"⬆️ Load {min(_hbc, 30)} older messages ({_hbc} hidden)"
+            if _hbc > 0
+            else "⬆️ Load 30 older messages"
+        )
+        if st.button(_load_label):
+            if _hbc > 0:
+                st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+            else:
+                _oldest_seq = int(st.session_state.get(f"_oldest_block_seq_{project_id}", 0) or 0)
+                _older_blocks, _older_fetch_ok, _older_pagination = get_sanitized_blocks(
+                    project_id,
+                    before_seq=_oldest_seq,
+                )
+                if _older_fetch_ok and _older_blocks:
+                    _combined_by_id = {
+                        block.get("id"): block
+                        for block in [*_older_blocks, *st.session_state.get("blocks", [])]
+                    }
+                    st.session_state.blocks = sorted(
+                        _combined_by_id.values(),
+                        key=lambda block: int(block.get("seq") or 0),
+                    )
+                    st.session_state[f"_oldest_block_seq_{project_id}"] = min(
+                        int(block.get("seq") or 0)
+                        for block in st.session_state.blocks
+                    )
+                    st.session_state[f"_has_older_blocks_{project_id}"] = bool(
+                        _older_pagination.get("has_older", False)
+                    )
+                    st.session_state["_max_visible_blocks"] = st.session_state.get("_max_visible_blocks", 30) + 30
+                elif not _older_fetch_ok:
+                    st.warning("Could not load older messages. Please try again.")
             st.rerun()
 
 # --- Capture chat input EARLY ---
@@ -796,11 +1555,13 @@ def _render_task_dock():
 # of those paths — and persist immediately so neither a bootstrap rerun nor
 # an active-chat rerun can lose the user's prompt.
 _queued_help_prompt = st.session_state.pop("_help_prompt", None)
-_captured_prompt = _queued_help_prompt or st.chat_input("Ask Agoutic to do something...")
+_chat_prompt_placeholder = "Ask Agoutic to do something..." if _can_mutate_active_project else "Viewer access is read-only in this shared project."
+_captured_prompt = _queued_help_prompt or st.chat_input(_chat_prompt_placeholder, disabled=not _can_mutate_active_project)
 if _captured_prompt and not st.session_state.get("_pending_prompt"):
     st.session_state["_pending_prompt"] = _captured_prompt
 
 _render_task_dock()
+_render_history_pagination(active_id)
 
 if _should_bootstrap_suppressed_monitoring(
     auto_refresh_suppressed=_auto_refresh_suppressed,
@@ -821,10 +1582,22 @@ _finish_project_switch_loading(active_id)
 st.write("---")
 
 # 2.5 File Upload (expandable)
-render_file_upload(api_url=API_URL, active_id=active_id, get_session_cookie_fn=get_session_cookie)
+render_file_upload(
+    api_url=API_URL,
+    active_id=active_id,
+    build_auth_request_kwargs_fn=build_auth_request_kwargs,
+    disabled=not _can_mutate_active_project,
+    disabled_reason="Viewer access is read-only in this shared project.",
+)
 
 # --- Handle in-flight chat request (non-blocking polling with stop support) ---
 handle_active_chat(api_url=API_URL, active_project_id=active_id)
+render_project_share_form(
+    api_url=API_URL,
+    active_project=_active_project,
+    user=user,
+    build_auth_request_kwargs_fn=build_auth_request_kwargs,
+)
 
 # 3. Chat Input
 # The prompt was captured earlier (before bootstrap/active-chat reruns).
@@ -848,6 +1621,43 @@ if prompt and prompt.strip().lower() in ("try again", "retry"):
 
 if prompt:
 
+    if _is_list_users_intent(prompt):
+        st.session_state.pop("_pending_prompt", None)
+        render_project_collaborator_list(
+            prompt=prompt,
+            active_project=_active_project,
+            collaborators=_active_project_collaborators,
+            current_user_id=user.get("id"),
+            activity_status_fn=_collaborator_activity_status,
+        )
+        st.stop()
+
+    if _is_share_intent(prompt):
+        st.session_state.pop("_pending_prompt", None)
+        st.session_state.pop("_share_form_feedback", None)
+        if _can_manage_active_collaborators:
+            st.session_state["_pending_share_form"] = {
+                "project_id": active_id,
+                "project_name": _active_project_name,
+                "prompt": prompt,
+                "email": "",
+                "role": "viewer",
+                "error": None,
+            }
+        else:
+            st.session_state["_share_form_feedback"] = {
+                "project_id": active_id,
+                "status": "error",
+                "message": "Only the project owner or an admin can manage collaborators for this project.",
+            }
+        st.rerun()
+
+    if not _can_mutate_active_project:
+        st.session_state.pop("_pending_prompt", None)
+        with st.chat_message("assistant"):
+            st.info("Viewer access is read-only in this shared project. Chat submission, uploads, and other mutating actions are disabled.")
+        st.stop()
+
     with st.chat_message("user"):
         st.write(prompt)
 
@@ -862,5 +1672,5 @@ if prompt:
         active_id=active_id,
         prompt=prompt,
         model_choice=model_choice,
-        get_session_cookie_fn=get_session_cookie,
+        build_auth_request_kwargs_fn=build_auth_request_kwargs,
     )

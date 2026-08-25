@@ -1,0 +1,1 @@
+For wf_pore_c reports, prioritize contact-map outputs, requested artifact presence, total pairs, cis/trans ratio, duplicate rate, and other contact-map-specific QC or missing-output notes.

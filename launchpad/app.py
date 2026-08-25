@@ -3,12 +3,15 @@ Launchpad: FastAPI application for Dogme/Nextflow job execution.
 Receives job submissions from Cortex and manages pipeline execution.
 """
 import asyncio
+import gzip
 import json
 import os
 import re
+import signal
+import shutil
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -21,6 +24,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from common.logging_config import setup_logging, get_logger
 from common.logging_middleware import RequestLoggingMiddleware
+from common.maintenance_mode import get_maintenance_state_async, maintenance_block_message
 from launchpad.config import (
     AGOUTIC_DATA,
     LAUNCHPAD_LOGS_DIR,
@@ -35,12 +39,17 @@ from launchpad.db import (
     init_db,
     SessionLocal,
     create_job,
+    find_import_duplicate,
+    find_job_by_workflow_path,
+    get_default_ssh_profile_id,
     get_next_workflow_index,
     get_job,
+    get_ssh_profile,
     infer_workflow_index_from_path,
     get_workflow_identity_for_path,
     resolve_job_by_workflow_label,
     update_job_status,
+    update_job_fields,
     add_log_entry,
     get_job_logs,
     job_to_dict,
@@ -48,10 +57,15 @@ from launchpad.db import (
     get_staging_task_record,
     staging_task_record_to_dict,
 )
+from cortex.models import User
 from launchpad.models import DogmeJob, SSHProfile
-from launchpad.nextflow_executor import NextflowExecutor
+from launchpad.nextflow_executor import NextflowExecutor, _find_nextflow_trace_file
 from launchpad.schemas import (
+    ImportWorkflowRequest,
+    ImportWorkflowResponse,
     SubmitJobRequest,
+    WorkflowPreviewRequest,
+    WorkflowPreviewResponse,
     StageRemoteSampleRequest,
     StageRemoteSampleResponse,
     StageTaskAcceptedResponse,
@@ -76,16 +90,96 @@ from launchpad.schemas import (
 )
 from launchpad.backends import get_backend, SubmitParams
 from launchpad.backends.local_auth_sessions import get_local_auth_session_manager
-from launchpad.backends.ssh_manager import SSHProfileData
+from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
+from launchpad.workflow_accounting import build_unavailable_workflow_usage, summarize_nextflow_trace_file
+from launchpad.workflow_executors import get_workflow_executor
+from launchpad.workflow_executors.base import UnknownWorkflowKeyError
+from launchpad.import_workflows import (
+    copy_local_results_to_workflow,
+    import_warning_message,
+    infer_local_workflow_metadata,
+    infer_remote_workflow_metadata,
+    normalize_local_workflow_source,
+    normalize_remote_workflow_source,
+)
 from launchpad.script_execution import (
     normalize_script_args,
     resolve_allowlisted_script,
+    script_subprocess_session_kwargs,
+    terminate_script_process_tree,
     validate_script_working_directory,
 )
 
 # --- LOGGING ---
 setup_logging("launchpad-rest")
 logger = get_logger(__name__)
+
+_workflow_clean_tasks: dict[tuple[str, bool], asyncio.Task] = {}
+_workflow_clean_status: dict[tuple[str, bool], dict[str, object]] = {}
+_REMOTE_CLEAN_TIMEOUT_SECONDS = float(os.getenv("LAUNCHPAD_REMOTE_CLEAN_TIMEOUT_SECONDS", "86400"))
+
+
+def _set_clean_status(*, run_uuid: str, remote: bool, status: str, run_stage: str, message: str) -> dict[str, object]:
+    payload = {
+        "run_uuid": run_uuid,
+        "remote": remote,
+        "status": status,
+        "run_stage": run_stage,
+        "message": message,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _workflow_clean_status[(run_uuid, remote)] = payload
+    return payload
+
+
+def _clean_status_payload_from_job(job, *, remote: bool) -> dict[str, object] | None:
+    clean_run_stage = str(getattr(job, "run_stage", "") or "").strip().upper()
+    if clean_run_stage not in {"CLEANING_LOCAL", "CLEANING_REMOTE", "CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}:
+        return None
+
+    stage_is_remote = clean_run_stage.endswith("_REMOTE")
+    if clean_run_stage != "CLEAN_FAILED" and stage_is_remote != bool(remote):
+        return None
+
+    clean_running = clean_run_stage.startswith("CLEANING_")
+    clean_failed = clean_run_stage == "CLEAN_FAILED"
+    clean_message = (
+        str(getattr(job, "error_message", "") or "").strip()
+        if clean_failed
+        else (
+            "Cleaning remote workflow artifacts in the background."
+            if clean_running and bool(remote)
+            else "Cleaning local workflow artifacts in the background."
+            if clean_running
+            else "Remote workflow cleanup completed."
+            if bool(remote)
+            else "Local workflow cleanup completed."
+        )
+    ) or "Workflow clean failed."
+
+    updated_at = None
+    for candidate in (
+        getattr(job, "completed_at", None),
+        getattr(job, "started_at", None),
+        getattr(job, "submitted_at", None),
+    ):
+        if candidate is None:
+            continue
+        if hasattr(candidate, "isoformat"):
+            updated_at = candidate.isoformat()
+        else:
+            updated_at = str(candidate)
+        if updated_at:
+            break
+
+    return {
+        "run_uuid": str(getattr(job, "run_uuid", "") or ""),
+        "remote": bool(remote),
+        "status": "FAILED" if clean_failed else ("RUNNING" if clean_running else "COMPLETED"),
+        "run_stage": clean_run_stage,
+        "message": clean_message,
+        "updated_at": updated_at or datetime.now(timezone.utc).isoformat(),
+    }
 
 # --- APP SETUP ---
 app = FastAPI(
@@ -98,6 +192,7 @@ app = FastAPI(
 app.add_middleware(RequestLoggingMiddleware)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
+_WORKFLOW_FOLDER_RE = re.compile(r"^workflow\d+$", re.IGNORECASE)
 
 
 def _sanitize_work_directory(value: str | None) -> str | None:
@@ -109,11 +204,258 @@ def _sanitize_work_directory(value: str | None) -> str | None:
 
 def _effective_job_work_directory(job) -> str | None:
     result_destination = (getattr(job, "result_destination", "") or "").strip().lower()
+    output_directory = _sanitize_work_directory(getattr(job, "output_directory", None))
     local_work_dir = _sanitize_work_directory(getattr(job, "nextflow_work_dir", None))
     remote_work_dir = _sanitize_work_directory(getattr(job, "remote_work_dir", None))
-    if result_destination in {"local", "both"} and local_work_dir:
-        return local_work_dir
+    if result_destination in {"local", "both"}:
+        if output_directory:
+            return output_directory
+        if local_work_dir:
+            return local_work_dir
     return remote_work_dir or local_work_dir
+
+
+def _resolve_deletable_workflow_dir(job) -> Path | None:
+    expected_folder_name = str(getattr(job, "workflow_folder_name", "") or "").strip()
+    candidate_values = [
+        getattr(job, "output_directory", None),
+        _effective_job_work_directory(job),
+        getattr(job, "nextflow_work_dir", None),
+    ]
+    seen: set[str] = set()
+    for raw_value in candidate_values:
+        cleaned = _sanitize_work_directory(raw_value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidate = Path(cleaned).expanduser()
+        candidate_name = candidate.name
+        if expected_folder_name:
+            if candidate_name != expected_folder_name:
+                continue
+        elif not _WORKFLOW_FOLDER_RE.fullmatch(candidate_name):
+            continue
+        return candidate
+    return None
+
+
+def _resolve_cleanable_remote_workflow_dir(job) -> str | None:
+    expected_folder_name = str(getattr(job, "workflow_folder_name", "") or "").strip()
+    candidate_values = [
+        getattr(job, "remote_work_dir", None),
+        getattr(job, "remote_output_dir", None),
+    ]
+    seen: set[str] = set()
+    for raw_value in candidate_values:
+        cleaned = _sanitize_work_directory(raw_value)
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        candidate = str(PurePosixPath(cleaned))
+        if not candidate.startswith("/"):
+            continue
+        candidate_name = PurePosixPath(candidate).name
+        if expected_folder_name:
+            if candidate_name != expected_folder_name:
+                continue
+        elif not _WORKFLOW_FOLDER_RE.fullmatch(candidate_name):
+            continue
+        return candidate
+    return None
+
+
+def _count_local_files(path: Path) -> int:
+    file_count = 0
+    for _root, _dirs, files in os.walk(path):
+        file_count += len(files)
+    return file_count
+
+
+def _gzip_local_bedmethyl_files(workflow_dir: Path) -> int:
+    bedmethyl_dir = workflow_dir / "bedMethyl"
+    if not bedmethyl_dir.exists() or not bedmethyl_dir.is_dir() or bedmethyl_dir.is_symlink():
+        return 0
+
+    gzipped_count = 0
+    for child in sorted(bedmethyl_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_file() or child.suffix.lower() != ".bed":
+            continue
+        gzip_path = child.with_name(f"{child.name}.gz")
+        tmp_gzip_path = child.with_name(f"{child.name}.gz.tmp")
+        with child.open("rb") as src, gzip.open(tmp_gzip_path, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+        tmp_gzip_path.replace(gzip_path)
+        child.unlink()
+        gzipped_count += 1
+    return gzipped_count
+
+
+def _cleanup_local_workflow_contents(workflow_dir: Path) -> dict[str, object]:
+    gzipped_count = _gzip_local_bedmethyl_files(workflow_dir)
+    removed_dirs: list[str] = []
+    removed_file_count = 0
+
+    for child in sorted(workflow_dir.iterdir(), key=lambda item: item.name):
+        if child.is_symlink() or not child.is_dir():
+            continue
+        if child.name != "work" and not child.name.startswith("dor"):
+            continue
+        removed_file_count += _count_local_files(child)
+        shutil.rmtree(child)
+        removed_dirs.append(child.name)
+
+    return {
+        "gzipped_bed_files": gzipped_count,
+        "removed_dirs": removed_dirs,
+        "removed_file_count": removed_file_count,
+    }
+
+
+def _cleanup_message(folder_name: str, *, remote: bool, removed_dirs: list[str], removed_file_count: int, gzipped_bed_files: int) -> str:
+    details: list[str] = []
+    if gzipped_bed_files:
+        noun = "file" if gzipped_bed_files == 1 else "files"
+        details.append(f"gzipped {gzipped_bed_files} `bedMethyl` BED {noun}")
+    if removed_dirs:
+        details.append(f"removed {', '.join(f'`{name}`' for name in removed_dirs)} ({removed_file_count} files)")
+
+    if not details:
+        return f"No cleanup targets were found for `{folder_name}`."
+
+    prefix = "Remotely cleaned" if remote else "Cleaned"
+    return f"{prefix} `{folder_name}`: {'; '.join(details)}."
+
+
+async def _cleanup_remote_workflow_contents(job) -> dict[str, object]:
+    remote_work_dir = _resolve_cleanable_remote_workflow_dir(job)
+    if remote_work_dir is None:
+        raise HTTPException(status_code=409, detail="Could not determine a safe remote workflow directory to clean for this job.")
+
+    ssh_profile_id = getattr(job, "ssh_profile_id", None)
+    user_id = getattr(job, "user_id", None)
+    if not ssh_profile_id or not user_id:
+        raise HTTPException(status_code=400, detail="This workflow does not have remote execution metadata available for remote cleanup.")
+
+    ssh_profile = await get_ssh_profile(ssh_profile_id, user_id)
+    if ssh_profile is None:
+        raise HTTPException(status_code=404, detail="The SSH profile for this workflow could not be loaded.")
+
+    ssh_manager = SSHConnectionManager()
+    conn = await ssh_manager.connect(ssh_profile)
+    try:
+        if not await conn.path_exists(remote_work_dir):
+            raise HTTPException(status_code=409, detail=f"Remote workflow directory not found: {remote_work_dir}")
+        script = (
+            "python3 - <<'PY'\n"
+            "import gzip, json, os, shutil\n"
+            f"workflow_dir = {remote_work_dir!r}\n"
+            "result = {'gzipped_bed_files': 0, 'removed_dirs': [], 'removed_file_count': 0}\n"
+            "bedmethyl_dir = os.path.join(workflow_dir, 'bedMethyl')\n"
+            "if os.path.isdir(bedmethyl_dir) and not os.path.islink(bedmethyl_dir):\n"
+            "    for name in sorted(os.listdir(bedmethyl_dir)):\n"
+            "        path = os.path.join(bedmethyl_dir, name)\n"
+            "        if os.path.isfile(path) and not os.path.islink(path) and name.lower().endswith('.bed'):\n"
+            "            gzip_path = path + '.gz'\n"
+            "            tmp_gzip_path = gzip_path + '.tmp'\n"
+            "            with open(path, 'rb') as src, gzip.open(tmp_gzip_path, 'wb') as dst:\n"
+            "                shutil.copyfileobj(src, dst)\n"
+            "            os.replace(tmp_gzip_path, gzip_path)\n"
+            "            os.remove(path)\n"
+            "            result['gzipped_bed_files'] += 1\n"
+            "if os.path.isdir(workflow_dir) and not os.path.islink(workflow_dir):\n"
+            "    for name in sorted(os.listdir(workflow_dir)):\n"
+            "        path = os.path.join(workflow_dir, name)\n"
+            "        if (name == 'work' or name.startswith('dor')) and os.path.isdir(path) and not os.path.islink(path):\n"
+            "            for _root, _dirs, files in os.walk(path):\n"
+            "                result['removed_file_count'] += len(files)\n"
+            "            shutil.rmtree(path)\n"
+            "            result['removed_dirs'].append(name)\n"
+            "print(json.dumps(result))\n"
+            "PY"
+        )
+        raw_result = await conn.run_checked(script, timeout_seconds=_REMOTE_CLEAN_TIMEOUT_SECONDS)
+        return json.loads(raw_result or "{}")
+    finally:
+        await conn.close()
+
+
+async def _set_job_clean_run_stage(run_uuid: str, *, run_stage: str | None, error_message: str | None = None) -> None:
+    fields: dict[str, object | None] = {"run_stage": run_stage}
+    if error_message is not None:
+        fields["error_message"] = error_message
+    await update_job_fields(run_uuid, fields)
+
+
+async def _run_clean_job_background(*, run_uuid: str, remote: bool) -> None:
+    task_key = (run_uuid, remote)
+    try:
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="RUNNING",
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            message="Cleaning remote workflow artifacts in the background." if remote else "Cleaning local workflow artifacts in the background.",
+        )
+        await _set_job_clean_run_stage(
+            run_uuid,
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            error_message=None,
+        )
+
+        session = SessionLocal()
+        try:
+            job = await get_job(session, run_uuid)
+            if not job:
+                raise RuntimeError(f"Job not found: {run_uuid}")
+
+            if remote:
+                cleanup_result = await _cleanup_remote_workflow_contents(job)
+                folder_name = str(getattr(job, "workflow_folder_name", "") or PurePosixPath(_resolve_cleanable_remote_workflow_dir(job) or "workflow").name)
+            else:
+                workflow_dir = _resolve_deletable_workflow_dir(job)
+                if workflow_dir is None:
+                    raise RuntimeError("Could not determine a safe workflow directory to clean for this job.")
+                cleanup_result = _cleanup_local_workflow_contents(workflow_dir)
+                folder_name = str(getattr(job, "workflow_folder_name", "") or workflow_dir.name)
+
+            message = _cleanup_message(
+                folder_name,
+                remote=remote,
+                removed_dirs=list(cleanup_result.get("removed_dirs") or []),
+                removed_file_count=int(cleanup_result.get("removed_file_count") or 0),
+                gzipped_bed_files=int(cleanup_result.get("gzipped_bed_files") or 0),
+            )
+            await add_log_entry(session, run_uuid, "INFO", message, source="api")
+            _set_clean_status(
+                run_uuid=run_uuid,
+                remote=remote,
+                status="COMPLETED",
+                run_stage="CLEANED_REMOTE" if remote else "CLEANED_LOCAL",
+                message=message,
+            )
+            await _set_job_clean_run_stage(run_uuid, run_stage="CLEANED_REMOTE" if remote else "CLEANED_LOCAL", error_message=None)
+        finally:
+            await session.close()
+    except Exception as exc:
+        logger.error("Workflow clean task failed", run_uuid=run_uuid, remote=remote, error=str(exc))
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="FAILED",
+            run_stage="CLEAN_FAILED",
+            message=str(exc) or "Workflow clean failed.",
+        )
+        await _set_job_clean_run_stage(run_uuid, run_stage="CLEAN_FAILED", error_message=str(exc))
+        try:
+            session = SessionLocal()
+            try:
+                await add_log_entry(session, run_uuid, "ERROR", f"Workflow clean failed: {exc}", source="api")
+            finally:
+                await session.close()
+        except Exception:
+            logger.warning("Failed to persist workflow clean failure log", run_uuid=run_uuid, remote=remote, exc_info=True)
+    finally:
+        _workflow_clean_tasks.pop(task_key, None)
 
 
 def _job_timing_payload(job) -> dict[str, str | int | None]:
@@ -138,6 +480,115 @@ def _job_timing_payload(job) -> dict[str, str | int | None]:
     }
 
 
+def _workflow_usage_payload(job) -> dict[str, object | None]:
+    synced_at = getattr(job, "workflow_usage_synced_at", None)
+    return {
+        "workflow_usage": getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": synced_at.isoformat() if synced_at else None,
+    }
+
+
+def _coerce_workflow_usage_synced_at(raw_value) -> datetime | None:
+    if raw_value in (None, ""):
+        return None
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        cleaned = str(raw_value).strip()
+        if not cleaned:
+            return None
+        try:
+            parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(parsed, datetime):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _slurm_status_poll_failed(status_data) -> bool:
+    message = str(getattr(status_data, "message", "") or "")
+    tasks = getattr(status_data, "tasks", None)
+    return message.startswith("Failed to poll scheduler:") and not tasks
+
+
+async def _submitter_is_admin(session, user_id: str | None) -> bool:
+    if not user_id:
+        return False
+    role = (
+        await session.execute(select(User.role).where(User.id == user_id))
+    ).scalar_one_or_none()
+    return str(role or "").strip().lower() == "admin"
+
+
+async def _slurm_status_payload(session, job, status_data) -> dict[str, object]:
+    workflow_usage = getattr(status_data, "workflow_usage", None)
+    workflow_usage_synced_at = getattr(status_data, "workflow_usage_synced_at", None)
+    if workflow_usage is not None:
+        resolved_synced_at = _coerce_workflow_usage_synced_at(workflow_usage_synced_at) or datetime.utcnow()
+        existing_synced_at = _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+        workflow_usage_changed = getattr(job, "workflow_usage_json", None) != workflow_usage
+        synced_at_changed = existing_synced_at != resolved_synced_at
+        if workflow_usage_changed or synced_at_changed:
+            job.workflow_usage_json = workflow_usage
+            job.workflow_usage_synced_at = resolved_synced_at
+            await session.commit()
+        workflow_usage_synced_at = resolved_synced_at.isoformat()
+    return {
+        "run_uuid": str(getattr(status_data, "run_uuid", None) or getattr(job, "run_uuid", "") or ""),
+        "status": getattr(status_data, "status", None) or job.status,
+        "progress_percent": (
+            getattr(status_data, "progress_percent", None)
+            if getattr(status_data, "progress_percent", None) is not None
+            else (100 if getattr(status_data, "status", None) == JobStatus.COMPLETED else job.progress_percent)
+        ),
+        "message": getattr(status_data, "message", None) or job.error_message or f"Status: {job.status}",
+        "tasks": getattr(status_data, "tasks", None) or {},
+        "execution_mode": getattr(status_data, "execution_mode", None) or "slurm",
+        "run_stage": getattr(status_data, "run_stage", None) or job.run_stage,
+        "slurm_job_id": getattr(status_data, "slurm_job_id", None) or job.slurm_job_id,
+        "slurm_state": getattr(status_data, "slurm_state", None) or job.slurm_state,
+        "transfer_state": getattr(status_data, "transfer_state", None),
+        "transfer_detail": getattr(status_data, "transfer_detail", None),
+        "result_destination": getattr(status_data, "result_destination", None) or job.result_destination,
+        "ssh_profile_nickname": getattr(status_data, "ssh_profile_nickname", None),
+        "work_directory": getattr(status_data, "work_directory", None) or _effective_job_work_directory(job),
+        "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
+        **_import_status_payload(job),
+        **_job_timing_payload(job),
+    }
+
+
+async def _backfill_terminal_slurm_workflow_usage(session, job) -> None:
+    if getattr(job, "workflow_usage_json", None) is not None:
+        return
+
+    workflow_usage = None
+    local_work_dir = getattr(job, "nextflow_work_dir", None)
+    if local_work_dir:
+        try:
+            trace_file = _find_nextflow_trace_file(Path(local_work_dir))
+        except Exception:
+            trace_file = None
+        if trace_file:
+            workflow_usage = summarize_nextflow_trace_file(trace_file, accounting_mode="slurm")
+            if workflow_usage is not None:
+                workflow_usage = {
+                    **workflow_usage,
+                    "usage_status": "partial",
+                    "usage_message": "Using Nextflow trace only; scheduler accounting unavailable.",
+                }
+
+    if workflow_usage is None:
+        workflow_usage = build_unavailable_workflow_usage(accounting_mode="slurm")
+
+    job.workflow_usage_json = workflow_usage
+    job.workflow_usage_synced_at = datetime.utcnow()
+    await session.commit()
+
+
 def _normalize_reference_genome(raw_value: str | list[str] | None) -> list[str]:
     value = raw_value
     if isinstance(value, str) and value.startswith("["):
@@ -150,6 +601,21 @@ def _normalize_reference_genome(raw_value: str | list[str] | None) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value]
     return []
+
+
+def _resolve_rerun_input_mode(source_job) -> tuple[str, str | None]:
+    """Recover the original input mode for legacy job records when possible."""
+    entry_point = getattr(source_job, "entry_point", None)
+    input_type = getattr(source_job, "input_type", None)
+    if input_type:
+        return input_type, entry_point
+
+    input_path = str(getattr(source_job, "input_directory", "") or "").lower()
+    if input_path.endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz")):
+        return "fastq", entry_point or "fastqCDNA"
+    if entry_point == "fastqCDNA":
+        return "fastq", entry_point
+    return "pod5", entry_point
 
 
 def _normalize_workflow_name(raw_value: str) -> str:
@@ -174,6 +640,13 @@ def _replace_path_prefix(path_value: str | None, old_prefix: str | None, new_pre
     return path_value
 
 
+def _get_workflow_executor_or_400(workflow_key: str | None):
+    try:
+        return get_workflow_executor(workflow_key)
+    except UnknownWorkflowKeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _rename_local_workflow_artifacts(work_dir: Path, old_sample_names: list[str], new_sample_name: str) -> None:
     seen: set[str] = set()
     for sample_name in old_sample_names:
@@ -192,6 +665,511 @@ def _rename_local_workflow_artifacts(work_dir: Path, old_sample_names: list[str]
                     detail=f"Cannot rename workflow artifacts because {target_path.name} already exists",
                 )
             source_path.rename(target_path)
+
+
+def _resolve_project_workflow_root(
+    *,
+    user_id: str,
+    project_id: str,
+    username: str | None,
+    project_slug: str | None,
+) -> Path:
+    if username and project_slug:
+        return AGOUTIC_DATA / "users" / username / project_slug
+    return AGOUTIC_DATA / "users" / user_id / project_id
+
+
+def _allocate_import_workflow_directory(project_dir: Path, workflow_index: int) -> tuple[int, Path]:
+    current_index = max(1, int(workflow_index))
+    project_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        candidate = project_dir / f"workflow{current_index}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return current_index, candidate
+        except FileExistsError:
+            current_index += 1
+
+
+def _merge_import_metadata(
+    req: ImportWorkflowRequest,
+    *,
+    workflow_key: str,
+    inferred_metadata,
+    source_job: DogmeJob | None,
+) -> tuple[str | None, str | None, list[str], str | None]:
+    inferred_sample = getattr(inferred_metadata, "sample_name", None)
+    inferred_mode = getattr(inferred_metadata, "mode", None)
+    inferred_reference = list(getattr(inferred_metadata, "reference_genome", []) or [])
+    inferred_modifications = getattr(inferred_metadata, "modifications", None)
+
+    source_job_reference = _normalize_reference_genome(getattr(source_job, "reference_genome", None)) if source_job else []
+
+    sample_name = (req.sample_name or inferred_sample or getattr(source_job, "sample_name", None) or "").strip() or None
+    mode = (req.mode or inferred_mode or getattr(source_job, "mode", None) or "").strip().upper() or None
+    reference_genome = list(req.reference_genome or inferred_reference or source_job_reference)
+
+    modifications = None
+    if "modifications" in req.model_fields_set:
+        modifications = req.modifications
+    elif inferred_modifications is not None:
+        modifications = inferred_modifications
+    elif source_job is not None:
+        modifications = source_job.modifications
+
+    if mode == "CDNA" and modifications is None:
+        modifications = ""
+
+    if workflow_key == "wf_pore_c":
+        mode = None
+        modifications = None
+
+    return sample_name, mode, reference_genome, modifications
+
+
+def _missing_import_fields(
+    *,
+    workflow_key: str,
+    sample_name: str | None,
+    mode: str | None,
+    reference_genome: list[str],
+    modifications: str | None,
+) -> list[str]:
+    missing: list[str] = []
+    if not sample_name:
+        missing.append("sample_name")
+    if workflow_key == "dogme" and not mode:
+        missing.append("mode")
+    if not reference_genome:
+        missing.append("reference_genome")
+    if workflow_key == "dogme" and modifications is None:
+        missing.append("modifications")
+    return missing
+
+
+def _copied_config_path(destination_dir: Path, source_dir: Path, source_config_path: str | None) -> str | None:
+    if not source_config_path:
+        return None
+    source_path = Path(source_config_path)
+    try:
+        relative_path = source_path.relative_to(source_dir)
+    except ValueError:
+        relative_path = Path(source_path.name)
+    candidate = destination_dir / relative_path
+    if candidate.exists():
+        return str(candidate)
+    fallback = destination_dir / source_path.name
+    if fallback.exists():
+        return str(fallback)
+    return None
+
+
+def _import_status_payload(job) -> dict[str, object]:
+    imported_complete = getattr(job, "imported_source_complete", None)
+    return {
+        "imported_source_kind": getattr(job, "imported_source_kind", None),
+        "imported_source_path": getattr(job, "imported_source_path", None),
+        "imported_source_run_uuid": getattr(job, "imported_source_run_uuid", None),
+        "imported_copy_mode": getattr(job, "imported_copy_mode", None),
+        "imported_source_complete": imported_complete,
+        "import_warning_message": import_warning_message(imported_complete),
+    }
+
+
+async def _refresh_imported_source_state(job: DogmeJob) -> None:
+    imported_source_kind = str(getattr(job, "imported_source_kind", "") or "").strip().lower()
+    if imported_source_kind not in {"local", "slurm"}:
+        return
+
+    inferred_metadata = None
+    try:
+        if imported_source_kind == "local":
+            source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+            if not source_path:
+                return
+            inferred_metadata = infer_local_workflow_metadata(Path(source_path))
+        else:
+            source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+            ssh_profile_id = getattr(job, "ssh_profile_id", None)
+            user_id = getattr(job, "user_id", None)
+            if not source_path or not ssh_profile_id or not user_id:
+                return
+            ssh_profile = await get_ssh_profile(ssh_profile_id, user_id)
+            if ssh_profile is None:
+                return
+            ssh_manager = SSHConnectionManager()
+            conn = await ssh_manager.connect(ssh_profile)
+            try:
+                inferred_metadata = await infer_remote_workflow_metadata(conn, source_path)
+            finally:
+                await conn.close()
+    except Exception as exc:
+        logger.warning(
+            "Failed to refresh imported source metadata before sync",
+            run_uuid=getattr(job, "run_uuid", None),
+            error=_describe_exception(exc),
+        )
+        return
+
+    if inferred_metadata is None:
+        return
+
+    new_complete = getattr(inferred_metadata, "source_complete", None)
+    new_config_path = getattr(inferred_metadata, "config_path", None)
+    if (
+        new_complete != getattr(job, "imported_source_complete", None)
+        or (new_config_path and new_config_path != getattr(job, "imported_config_path", None))
+    ):
+        job.imported_source_complete = new_complete
+        if new_config_path:
+            job.imported_config_path = new_config_path
+        await sessionless_commit_job(job)
+
+
+async def _copy_imported_local_results(job: DogmeJob) -> dict[str, object]:
+    source_path = str(getattr(job, "imported_source_path", "") or "").strip()
+    destination_path = str(getattr(job, "nextflow_work_dir", "") or "").strip()
+    if not source_path or not destination_path:
+        raise ValueError("Imported local workflow is missing source or destination paths")
+
+    source_dir = Path(source_path)
+    destination_dir = Path(destination_path)
+    full_copy = str(getattr(job, "imported_copy_mode", "subset") or "subset").strip().lower() == "full"
+
+    job.transfer_state = "downloading_outputs"
+    await sessionless_commit_job(job)
+    copy_local_results_to_workflow(
+        source_dir,
+        destination_dir,
+        full_copy=full_copy,
+        workflow_key=getattr(job, "workflow_key", None),
+    )
+    job.transfer_state = "outputs_downloaded"
+    job.status = JobStatus.COMPLETED
+    job.progress_percent = 100
+    job.completed_at = datetime.utcnow()
+    job.nextflow_config_path = _copied_config_path(destination_dir, source_dir, getattr(job, "imported_config_path", None))
+    await sessionless_commit_job(job)
+    return {
+        "success": True,
+        "status": "outputs_downloaded",
+        "message": "Workflow outputs synchronized into the project workflow directory.",
+        "run_uuid": job.run_uuid,
+        "remote_work_dir": getattr(job, "remote_work_dir", None),
+        "local_work_dir": destination_path,
+        "transfer_state": job.transfer_state,
+        "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+    }
+
+
+async def sessionless_commit_job(job: DogmeJob) -> None:
+    session = SessionLocal()
+    try:
+        current = await get_job(session, job.run_uuid)
+        if current is None:
+            raise ValueError(f"Job not found: {job.run_uuid}")
+        tracked_fields = (
+            "transfer_state",
+            "status",
+            "progress_percent",
+            "completed_at",
+            "error_message",
+            "nextflow_config_path",
+            "run_stage",
+        )
+        for field_name in tracked_fields:
+            setattr(current, field_name, getattr(job, field_name, None))
+        await session.commit()
+    finally:
+        await session.close()
+
+
+def _build_import_response(job: DogmeJob, *, message: str, transfer_state: str | None = None) -> ImportWorkflowResponse:
+    status = job.status.value if isinstance(job.status, JobStatus) else str(job.status)
+    return ImportWorkflowResponse(
+        run_uuid=job.run_uuid,
+        sample_name=job.sample_name,
+        mode=job.mode,
+        status=status,
+        work_directory=str(getattr(job, "nextflow_work_dir", "") or ""),
+        execution_mode=str(getattr(job, "execution_mode", "local") or "local"),
+        transfer_state=transfer_state or getattr(job, "transfer_state", None),
+        imported_source_kind=str(getattr(job, "imported_source_kind", "") or ""),
+        imported_source_complete=getattr(job, "imported_source_complete", None),
+        import_warning_message=import_warning_message(getattr(job, "imported_source_complete", None)),
+        message=message,
+    )
+
+
+async def _sync_imported_or_remote_job(job: DogmeJob, *, force: bool = False) -> dict[str, object]:
+    imported_source_kind = str(getattr(job, "imported_source_kind", "") or "").strip().lower()
+    if imported_source_kind in {"local", "slurm"}:
+        await _refresh_imported_source_state(job)
+
+    if imported_source_kind == "local":
+        try:
+            return await _copy_imported_local_results(job)
+        except Exception as exc:
+            job.transfer_state = "transfer_failed"
+            job.error_message = _describe_exception(exc)
+            await sessionless_commit_job(job)
+            return {
+                "success": False,
+                "status": "transfer_failed",
+                "message": _describe_exception(exc),
+                "run_uuid": job.run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": "transfer_failed",
+                "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+            }
+
+    if imported_source_kind == "slurm" or (getattr(job, "execution_mode", "local") or "local").strip().lower() == "slurm":
+        backend = get_backend("slurm")
+        result = await backend.sync_results_to_local(run_uuid=job.run_uuid, force=force)
+        result.setdefault(
+            "import_warning_message",
+            import_warning_message(getattr(job, "imported_source_complete", None)),
+        )
+        return result
+
+    return {
+        "success": False,
+        "status": "not_applicable",
+        "message": "This job does not have an import source available for explicit sync.",
+        "run_uuid": job.run_uuid,
+        "remote_work_dir": getattr(job, "remote_work_dir", None),
+        "local_work_dir": getattr(job, "nextflow_work_dir", None),
+        "transfer_state": getattr(job, "transfer_state", None),
+        "import_warning_message": import_warning_message(getattr(job, "imported_source_complete", None)),
+    }
+
+
+@app.post("/jobs/import", response_model=ImportWorkflowResponse)
+async def import_existing_workflow(req: ImportWorkflowRequest):
+    session = SessionLocal()
+
+    try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="workflow import"),
+                },
+            )
+
+        source_kind = str(req.source_kind or "local").strip().lower()
+        if source_kind not in {"local", "slurm"}:
+            raise HTTPException(status_code=400, detail="source_kind must be 'local' or 'slurm'")
+
+        if source_kind == "local":
+            normalized_source_path = normalize_local_workflow_source(req.source_path)
+            source_dir = Path(normalized_source_path)
+            if not source_dir.exists() or not source_dir.is_dir():
+                raise HTTPException(status_code=400, detail=f"Local workflow directory not found: {normalized_source_path}")
+        else:
+            normalized_source_path = normalize_remote_workflow_source(req.source_path)
+
+        existing_source_job = await find_job_by_workflow_path(session, normalized_source_path)
+        if existing_source_job is not None and existing_source_job.project_id == req.project_id and str(existing_source_job.status or "").upper() != JobStatus.DELETED.value:
+            workflow_name = getattr(existing_source_job, "workflow_folder_name", None) or getattr(existing_source_job, "workflow_alias", None) or existing_source_job.run_uuid
+            raise HTTPException(
+                status_code=409,
+                detail=f"This workflow is already registered in the current project as {workflow_name}.",
+            )
+
+        duplicate = await find_import_duplicate(
+            session,
+            project_id=req.project_id,
+            source_kind=source_kind,
+            source_path=normalized_source_path,
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"This workflow was already imported into the current project as {duplicate.workflow_folder_name or duplicate.workflow_alias or duplicate.run_uuid}.",
+            )
+
+        ssh_profile = None
+        if source_kind == "local":
+            inferred_metadata = infer_local_workflow_metadata(source_dir)
+        else:
+            ssh_profile_id = req.ssh_profile_id or await get_default_ssh_profile_id(
+                session,
+                user_id=req.user_id,
+                project_id=req.project_id,
+            )
+            if not ssh_profile_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No default SSH profile is configured for this project. Save SLURM defaults or specify a profile first.",
+                )
+            ssh_profile = await get_ssh_profile(ssh_profile_id, req.user_id)
+            if ssh_profile is None:
+                raise HTTPException(status_code=404, detail=f"SSH profile not found: {ssh_profile_id}")
+
+            ssh_manager = SSHConnectionManager()
+            conn = await ssh_manager.connect(ssh_profile)
+            try:
+                if not await conn.path_exists(normalized_source_path):
+                    raise HTTPException(status_code=400, detail=f"Remote workflow directory not found: {normalized_source_path}")
+                inferred_metadata = await infer_remote_workflow_metadata(conn, normalized_source_path)
+            finally:
+                await conn.close()
+
+        workflow_key = str(
+            getattr(existing_source_job, "workflow_key", None)
+            or getattr(inferred_metadata, "workflow_key", None)
+            or "dogme"
+        ).strip().lower() or "dogme"
+        sample_name, mode, reference_genome, modifications = _merge_import_metadata(
+            req,
+            workflow_key=workflow_key,
+            inferred_metadata=inferred_metadata,
+            source_job=existing_source_job,
+        )
+        missing_fields = _missing_import_fields(
+            workflow_key=workflow_key,
+            sample_name=sample_name,
+            mode=mode,
+            reference_genome=reference_genome,
+            modifications=modifications,
+        )
+        if missing_fields:
+            config_hint = getattr(inferred_metadata, "config_path", None)
+            config_suffix = f" Parsed config: {config_hint}." if config_hint else ""
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Import could not infer all required metadata. Missing: "
+                    f"{', '.join(missing_fields)}.{config_suffix}"
+                ),
+            )
+
+        next_workflow_index = await get_next_workflow_index(session, req.project_id)
+        project_dir = _resolve_project_workflow_root(
+            user_id=req.user_id,
+            project_id=req.project_id,
+            username=req.username,
+            project_slug=req.project_slug,
+        )
+        workflow_index, work_dir = _allocate_import_workflow_directory(project_dir, next_workflow_index)
+        workflow_alias = workflow_alias_for_index(workflow_index)
+
+        run_uuid = str(uuid.uuid4())
+        job = await create_job(
+            session,
+            run_uuid=run_uuid,
+            project_id=req.project_id,
+            workflow_index=workflow_index,
+            workflow_alias=workflow_alias,
+            workflow_folder_name=workflow_alias,
+            workflow_display_name=sample_name,
+            workflow_key=workflow_key,
+            sample_name=sample_name,
+            mode=mode,
+            input_directory=getattr(inferred_metadata, "input_directory", None) or normalized_source_path,
+            reference_genome=reference_genome,
+            modifications=modifications,
+            user_id=req.user_id,
+        )
+        job.execution_mode = "slurm" if source_kind == "slurm" else "local"
+        job.nextflow_work_dir = str(work_dir)
+        job.result_destination = "local"
+        job.workflow_display_name = sample_name
+        job.imported_source_kind = source_kind
+        job.imported_source_path = normalized_source_path
+        job.imported_source_run_uuid = existing_source_job.run_uuid if existing_source_job is not None else None
+        job.imported_config_path = getattr(inferred_metadata, "config_path", None)
+        job.imported_copy_mode = "full" if req.full_copy else "subset"
+        job.imported_source_complete = getattr(inferred_metadata, "source_complete", None)
+        job.run_stage = "IMPORTING_RESULTS"
+        job.started_at = datetime.utcnow()
+
+        if source_kind == "slurm":
+            job.status = JobStatus.COMPLETED
+            job.progress_percent = 100
+            job.completed_at = datetime.utcnow()
+            job.remote_work_dir = normalized_source_path
+            job.remote_output_dir = str(PurePosixPath(normalized_source_path) / "output")
+            job.ssh_profile_id = ssh_profile.id if ssh_profile is not None else None
+            job.transfer_state = "pending_import"
+
+        await session.commit()
+
+        await add_log_entry(
+            session,
+            run_uuid,
+            "INFO",
+            f"Import registered from {source_kind} workflow source: {normalized_source_path}",
+            source="import",
+        )
+
+        warning = import_warning_message(getattr(job, "imported_source_complete", None))
+        if source_kind == "local":
+            try:
+                copy_local_results_to_workflow(
+                    source_dir,
+                    work_dir,
+                    full_copy=req.full_copy,
+                    workflow_key=workflow_key,
+                )
+                job.status = JobStatus.COMPLETED
+                job.progress_percent = 100
+                job.transfer_state = "outputs_downloaded"
+                job.completed_at = datetime.utcnow()
+                job.nextflow_config_path = _copied_config_path(work_dir, source_dir, getattr(inferred_metadata, "config_path", None))
+                await session.commit()
+                message = f"Imported workflow into {work_dir.name}."
+                if warning:
+                    message = f"{message} {warning}"
+                return _build_import_response(job, message=message)
+            except Exception as exc:
+                job.status = JobStatus.FAILED
+                job.transfer_state = "transfer_failed"
+                job.error_message = _describe_exception(exc)
+                await session.commit()
+                raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+        try:
+            backend_result = await _sync_imported_or_remote_job(job, force=True)
+        except Exception as exc:
+            job.status = JobStatus.FAILED
+            job.transfer_state = "transfer_failed"
+            job.error_message = _describe_exception(exc)
+            await session.commit()
+            raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+
+        if not backend_result.get("success"):
+            refreshed_job = await get_job(session, run_uuid)
+            if refreshed_job is not None:
+                refreshed_job.status = JobStatus.FAILED
+                refreshed_job.transfer_state = str(backend_result.get("transfer_state") or "transfer_failed")
+                refreshed_job.error_message = str(backend_result.get("message") or "Import sync failed")
+                await session.commit()
+            raise HTTPException(status_code=500, detail=str(backend_result.get("message") or "Import sync failed"))
+
+        message = f"Import started for {work_dir.name}."
+        if warning:
+            message = f"{message} {warning}"
+        return _build_import_response(
+            job,
+            message=message,
+            transfer_state=str(backend_result.get("transfer_state") or getattr(job, "transfer_state", None) or ""),
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=_describe_exception(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    except Exception as exc:
+        logger.exception("Workflow import failed", source_path=req.source_path, source_kind=req.source_kind)
+        raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
+    finally:
+        await session.close()
 
 # Internal API secret validation middleware
 class InternalSecretMiddleware(BaseHTTPMiddleware):
@@ -256,15 +1234,22 @@ def _describe_exception(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc!r}"
 
 
-def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
-    """Read a safe tail snippet from a log file for status/error surfacing."""
+def _read_log_text(path: str) -> str:
     try:
-        text = Path(path).read_text(errors="replace")
+        return Path(path).read_text(errors="replace")
     except Exception:
         return ""
+
+
+def _tail_text(text: str, *, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[-max_chars:]
+
+
+def _read_log_tail(path: str, *, max_chars: int = 4000) -> str:
+    """Read a safe tail snippet from a log file for status/error surfacing."""
+    return _tail_text(_read_log_text(path), max_chars=max_chars)
 
 
 def _tail_log_lines(path: str | None, *, max_lines: int = 40, max_chars: int = 12000) -> list[str]:
@@ -274,6 +1259,33 @@ def _tail_log_lines(path: str | None, *, max_lines: int = 40, max_chars: int = 1
     if not text:
         return []
     return [line for line in text.splitlines() if line.strip()][-max_lines:]
+
+
+def _classify_live_script_log_level(source: str, message: str) -> str:
+    stripped = (message or "").strip()
+    lowered = stripped.lower()
+
+    if source == "script-stdout-live":
+        return "INFO"
+
+    if not stripped:
+        return "INFO"
+
+    if stripped.startswith("[WARN]") or stripped.startswith("WARNING:"):
+        return "WARN"
+
+    error_markers = (
+        "[error]",
+        "error:",
+        "traceback",
+        "exception",
+        "failed",
+        "fatal",
+    )
+    if any(marker in lowered for marker in error_markers):
+        return "ERROR"
+
+    return "INFO"
 
 
 def _parse_job_report(job) -> dict:
@@ -296,6 +1308,17 @@ def _is_reconcile_script_job(job, report: dict | None = None) -> bool:
     if script_path is None:
         return False
     return script_path.name in {"reconcile_bams.py", "reconcileBams.py"}
+
+
+def _is_haplotype_script_job(job, report: dict | None = None) -> bool:
+    report = report or _parse_job_report(job)
+    script_id = (report.get("script_id") or "").strip()
+    script_path = Path(report.get("script_path") or "") if report.get("script_path") else None
+    if script_id == "haplotype_with_vcf/haplotype_with_vcf":
+        return True
+    if script_path is None:
+        return False
+    return script_path.name == "haplotype_with_vcf.py"
 
 
 def _infer_reconcile_progress(stdout_lines: list[str], stderr_lines: list[str]) -> dict[str, str | int | None]:
@@ -349,6 +1372,133 @@ def _infer_reconcile_progress(stdout_lines: list[str], stderr_lines: list[str]) 
     }
 
 
+def _parse_haplotype_progress_line(line: str) -> dict | None:
+    parts = [part.strip() for part in line.strip().split("\t") if part.strip()]
+    if len(parts) < 2 or parts[0] != "HAPLOTYPE_PROGRESS":
+        return None
+    fields: dict[str, str] = {}
+    for token in parts[2:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        fields[key] = value
+    return {
+        "event": parts[1],
+        "fields": fields,
+        "raw": line.strip(),
+    }
+
+
+def _haplotype_progress_from_fields(fields: dict[str, str], *, default: int = 5, event: str = "") -> int:
+    def _as_int(name: str, fallback: int | None = None) -> int | None:
+        raw_value = fields.get(name)
+        if raw_value in (None, ""):
+            return fallback
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            return fallback
+
+    bam_index = _as_int("bam_index")
+    total_bams = _as_int("total_bams")
+    chrom_index = _as_int("chrom_index")
+    total_chroms = _as_int("total_chroms")
+
+    if event == "COMPLETE":
+        return 100
+    if event == "INDEX_END":
+        return 98
+    if event == "INDEX_START":
+        return 94
+
+    if bam_index and total_bams and total_bams > 0:
+        bam_fraction = (bam_index - 1) / total_bams
+        if chrom_index and total_chroms and total_chroms > 0:
+            chrom_fraction = chrom_index / total_chroms
+            return max(default, min(93, int(8 + ((bam_fraction + (chrom_fraction / total_bams)) * 84))))
+        if event == "BAM_END":
+            return max(default, min(97, int(8 + ((bam_index / total_bams) * 88))))
+        return max(default, min(92, int(8 + (bam_fraction * 84))))
+
+    return default
+
+
+def _infer_haplotype_progress(stdout_lines: list[str], stderr_lines: list[str]) -> dict[str, str | int | None]:
+    parsed_lines = []
+    for line in [*stdout_lines, *stderr_lines]:
+        parsed = _parse_haplotype_progress_line(line)
+        if parsed is not None:
+            parsed_lines.append(parsed)
+
+    current_step = None
+    current_detail = None
+    progress_percent = 5
+
+    for parsed in parsed_lines:
+        event = parsed.get("event") or ""
+        fields = parsed.get("fields") or {}
+        raw = parsed.get("raw") or ""
+        if event == "BAM_START":
+            current_step = "Starting BAM haplotyping"
+            current_detail = f"Processing {fields.get('bam') or 'BAM'}"
+        elif event == "CHROM_START":
+            chrom = fields.get("chrom") or "chromosome"
+            current_step = f"Processing {chrom}"
+            variants = fields.get("informative_variants")
+            if variants not in (None, ""):
+                current_detail = f"{fields.get('bam') or 'BAM'}: {chrom} with {variants} informative variants"
+            else:
+                current_detail = raw
+        elif event == "CHROM_PROGRESS":
+            current_step = "Assigning reads"
+            current_detail = (
+                f"{fields.get('bam') or 'BAM'}: {fields.get('chrom') or 'chromosome'} "
+                f"processed {fields.get('reads') or '0'} reads"
+            )
+        elif event == "CHROM_END":
+            current_step = "Finished chromosome"
+            current_detail = (
+                f"{fields.get('bam') or 'BAM'}: {fields.get('chrom') or 'chromosome'} complete"
+            )
+        elif event == "INDEX_START":
+            current_step = "Indexing haplotyped BAMs"
+            current_detail = f"Indexing outputs for {fields.get('bam') or 'BAM'}"
+        elif event == "INDEX_END":
+            current_step = "Indexed haplotyped BAMs"
+            current_detail = f"Finished indexing outputs for {fields.get('bam') or 'BAM'}"
+        elif event == "BAM_END":
+            current_step = "Finished BAM"
+            current_detail = f"Completed haplotyping for {fields.get('bam') or 'BAM'}"
+        elif event == "COMPLETE":
+            current_step = "Haplotype complete"
+            current_detail = f"Finished {fields.get('total_bams') or 'all'} BAMs"
+
+        progress_percent = _haplotype_progress_from_fields(fields, default=progress_percent, event=event)
+
+    if current_step is None:
+        latest_line = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
+        latest_err = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")
+        if latest_line:
+            current_step = "Running haplotype script"
+            current_detail = latest_line
+            progress_percent = 50
+        elif latest_err:
+            current_step = "Running haplotype script"
+            current_detail = latest_err
+            progress_percent = 50
+        else:
+            current_step = "Preparing haplotype workflow"
+            current_detail = "Launching haplotype_with_vcf.py"
+            progress_percent = 5
+
+    return {
+        "current_step": current_step,
+        "current_step_detail": current_detail,
+        "progress_percent": progress_percent,
+        "message": current_detail or current_step,
+    }
+
+
 def _build_live_script_status(job) -> dict[str, str | int | None]:
     stdout_lines = _tail_log_lines(getattr(job, "log_file", None), max_lines=80)
     stderr_lines = _tail_log_lines(getattr(job, "stderr_log", None), max_lines=40)
@@ -356,6 +1506,8 @@ def _build_live_script_status(job) -> dict[str, str | int | None]:
 
     if _is_reconcile_script_job(job, report=report):
         return _infer_reconcile_progress(stdout_lines, stderr_lines)
+    if _is_haplotype_script_job(job, report=report):
+        return _infer_haplotype_progress(stdout_lines, stderr_lines)
 
     latest_stdout = next((line.strip() for line in reversed(stdout_lines) if line.strip()), "")
     latest_stderr = next((line.strip() for line in reversed(stderr_lines) if line.strip()), "")
@@ -371,15 +1523,15 @@ def _build_live_script_status(job) -> dict[str, str | int | None]:
 def _build_live_script_logs(job, *, limit: int) -> list[dict[str, str]]:
     timestamp = datetime.utcnow().isoformat()
     live_logs: list[dict[str, str]] = []
-    for source, level, path in (
-        ("script-stdout-live", "INFO", getattr(job, "log_file", None)),
-        ("script-stderr-live", "ERROR", getattr(job, "stderr_log", None)),
+    for source, path in (
+        ("script-stdout-live", getattr(job, "log_file", None)),
+        ("script-stderr-live", getattr(job, "stderr_log", None)),
     ):
         for line in _tail_log_lines(path, max_lines=max(1, limit)):
             live_logs.append(
                 {
                     "timestamp": timestamp,
-                    "level": level,
+                    "level": _classify_live_script_log_level(source, line),
                     "message": line,
                     "source": source,
                 }
@@ -433,23 +1585,20 @@ async def _monitor_script_job(
     session = SessionLocal()
     try:
         return_code = await process.wait()
-        stdout_tail = _read_log_tail(stdout_log_path)
-        stderr_tail = _read_log_tail(stderr_log_path)
+        stdout_text = _read_log_text(stdout_log_path)
+        stderr_text = _read_log_text(stderr_log_path)
+        stdout_tail = _tail_text(stdout_text)
+        stderr_tail = _tail_text(stderr_text)
 
         final_status = JobStatus.COMPLETED if return_code == 0 else JobStatus.FAILED
         progress = 100 if return_code == 0 else 0
         error_message = None if return_code == 0 else (stderr_tail.strip() or f"Script exited with code {return_code}")
 
-        await update_job_status(
-            session,
-            run_uuid,
-            final_status,
-            progress=progress,
-            error_message=error_message,
-        )
-
         job = await get_job(session, run_uuid)
         if job:
+            job.status = final_status
+            job.progress_percent = progress
+            job.error_message = error_message
             job.completed_at = datetime.utcnow()
             job.run_stage = "SCRIPT_COMPLETED" if return_code == 0 else "SCRIPT_FAILED"
             job.report_json = json.dumps(
@@ -464,7 +1613,7 @@ async def _monitor_script_job(
             # the authoritative work_directory so downstream "list files"
             # calls land in the right place instead of the script cwd.
             if return_code == 0:
-                _script_output_dir = _parse_script_output_directory(stdout_tail)
+                _script_output_dir = _parse_script_output_directory(stdout_text)
                 if _script_output_dir:
                     job.nextflow_work_dir = _script_output_dir
                     inferred_index = infer_workflow_index_from_path(_script_output_dir)
@@ -571,6 +1720,10 @@ async def monitor_job(run_uuid: str, work_dir):
                 job_status = status_info["status"]
                 progress = status_info["progress_percent"]
                 message = status_info["message"]
+                workflow_usage = status_info.get("workflow_usage")
+                workflow_usage_synced_at = _coerce_workflow_usage_synced_at(
+                    status_info.get("workflow_usage_synced_at")
+                )
                 
                 # Update database
                 await update_job_status(
@@ -578,6 +1731,8 @@ async def monitor_job(run_uuid: str, work_dir):
                     run_uuid,
                     job_status,
                     progress=progress,
+                    workflow_usage=workflow_usage,
+                    workflow_usage_synced_at=workflow_usage_synced_at,
                 )
                 
                 # Log the update
@@ -643,28 +1798,31 @@ async def monitor_job(run_uuid: str, work_dir):
 @app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """Health check endpoint."""
-    session = SessionLocal()
-    try:
-        # Count running jobs
-        result = await session.execute(
-            select(DogmeJob).where(DogmeJob.status == JobStatus.RUNNING)
-        )
-        running_jobs = len(result.scalars().all())
-        
-        return {
-            "status": "ok",
-            "version": "0.3.0",
-            "running_jobs": running_jobs,
-            "database_ok": True,
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "version": "0.3.0",
-            "running_jobs": 0,
-            "database_ok": False,
-            "error": str(e)
-        }
+    async with SessionLocal() as session:
+        try:
+            # Count running jobs
+            result = await session.execute(
+                select(DogmeJob).where(DogmeJob.status == JobStatus.RUNNING)
+            )
+            running_jobs = len(result.scalars().all())
+            maintenance_state = await get_maintenance_state_async(session)
+
+            return {
+                "status": "ok",
+                "version": "0.3.0",
+                "running_jobs": running_jobs,
+                "database_ok": True,
+                "maintenance_mode": bool(maintenance_state.get("mode")),
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "version": "0.3.0",
+                "running_jobs": 0,
+                "database_ok": False,
+                "maintenance_mode": False,
+                "error": str(e)
+            }
 
 
 # --- GENOME LIST ENDPOINT ---
@@ -690,14 +1848,26 @@ async def stage_remote_sample(
     Pass ``?sync=true`` to fall back to the legacy synchronous behaviour
     (blocks until the transfer completes or times out).
     """
+    session = SessionLocal()
+    try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="transfer"),
+                },
+            )
+    finally:
+        await session.close()
+
     from launchpad.backends.staging_worker import (
         StagingTaskState,
         get_staging_tasks,
-        active_task_count,
         new_task_id,
         persist_staging_task,
-        start_staging_task,
-        MAX_CONCURRENT_STAGING_TASKS,
+        resume_queued_staging_tasks,
     )
 
     params_dict = {
@@ -734,19 +1904,17 @@ async def stage_remote_sample(
             raise HTTPException(status_code=500, detail=_describe_exception(exc)) from exc
 
     # --- Async background mode (default) ---
-    if active_task_count() >= MAX_CONCURRENT_STAGING_TASKS:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Too many concurrent staging tasks ({MAX_CONCURRENT_STAGING_TASKS}). "
-            "Wait for a running transfer to finish before starting another.",
-        )
-
     task = StagingTaskState(task_id=new_task_id(), params=params_dict)
     await persist_staging_task(task, force=True, raise_on_error=True)
     staging_tasks = get_staging_tasks()
     staging_tasks[task.task_id] = task
-    start_staging_task(task)
-    logger.info("Background staging task created", task_id=task.task_id, sample_name=req.sample_name)
+    await resume_queued_staging_tasks(profile_id=req.ssh_profile_id)
+    logger.info(
+        "Background staging task created",
+        task_id=task.task_id,
+        sample_name=req.sample_name,
+        status=task.status,
+    )
 
     return StageTaskAcceptedResponse(task_id=task.task_id, status=task.status)
 
@@ -851,6 +2019,20 @@ async def list_remote_files(
         path=path,
     )
 
+
+@app.post("/workflows/preview", response_model=WorkflowPreviewResponse)
+async def preview_workflow(req: WorkflowPreviewRequest):
+    """Build a workflow-family preview without submitting a Launchpad job."""
+    workflow_executor = _get_workflow_executor_or_400(req.workflow_key)
+    preview = workflow_executor.build_preview(**req.model_dump())
+    return WorkflowPreviewResponse(
+        workflow_key=preview.workflow_key,
+        supports_submission=preview.supports_submission,
+        command=preview.command,
+        preview_markdown=preview.preview_markdown,
+        preview_payload=preview.preview_payload,
+    )
+
 # --- JOB SUBMISSION ---
 @app.post("/jobs/submit", response_model=JobSubmitResponse)
 async def submit_job(req: SubmitJobRequest):
@@ -861,11 +2043,42 @@ async def submit_job(req: SubmitJobRequest):
     Returns job UUID for tracking.
     """
     session = SessionLocal()
-    
+
     try:
+        maintenance_state = await get_maintenance_state_async(session)
+        if maintenance_state.get("mode") and not await _submitter_is_admin(session, req.user_id):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "maintenance_mode",
+                    "message": maintenance_block_message(maintenance_state, noun="job"),
+                },
+            )
+
         # Generate unique run ID
         run_uuid = str(uuid.uuid4())
         run_type = (req.run_type or "dogme").strip().lower()
+        workflow_key = req.workflow_key or "dogme"
+        workflow_executor = None
+
+        if run_type != "script":
+            workflow_executor = _get_workflow_executor_or_400(workflow_key)
+            if not workflow_executor.supports_submission:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "workflow_key 'wf_pore_c' requires WF_PORE_C_ENABLED=true for local submission"
+                        if workflow_executor.workflow_key == "wf_pore_c"
+                        else (
+                            f"workflow_key '{workflow_executor.workflow_key}' is preview-only in Phase 1 "
+                            "and cannot be submitted yet; use /workflows/preview instead"
+                        )
+                    ),
+                )
+            try:
+                workflow_executor.validate_submission(mode=req.mode)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         workflow_index = None
         workflow_alias = None
@@ -875,7 +2088,7 @@ async def submit_job(req: SubmitJobRequest):
             if "max_gpu_tasks" in req.model_fields_set
             else DEFAULT_MAX_GPU_TASKS
         )
-        if run_type == "dogme":
+        if run_type != "script":
             workflow_index, workflow_alias, workflow_folder_name = await get_workflow_identity_for_path(
                 session,
                 req.project_id,
@@ -894,9 +2107,12 @@ async def submit_job(req: SubmitJobRequest):
             workflow_index=workflow_index,
             workflow_alias=workflow_alias,
             workflow_folder_name=workflow_folder_name,
-            workflow_display_name=req.sample_name if run_type == "dogme" else None,
+            workflow_display_name=req.sample_name if run_type != "script" else None,
+            workflow_key=workflow_key,
             sample_name=req.sample_name,
             mode=req.mode,
+            input_type=req.input_type,
+            entry_point=req.entry_point,
             input_directory=req.input_directory,
             reference_genome=req.reference_genome,
             modifications=req.modifications,
@@ -908,23 +2124,30 @@ async def submit_job(req: SubmitJobRequest):
         job.slurm_account = req.slurm_account
         job.slurm_partition = req.slurm_partition
         job.slurm_cpus = req.slurm_cpus
+        job.local_max_task_cpus = req.local_max_task_cpus
+        job.local_max_task_memory_gb = req.local_max_task_memory_gb
         job.slurm_memory_gb = req.slurm_memory_gb
         job.slurm_walltime = req.slurm_walltime
         job.slurm_gpus = req.slurm_gpus
         job.slurm_gpu_type = req.slurm_gpu_type
         job.result_destination = req.result_destination
         job.cache_preflight_json = req.cache_preflight
+        job.output_directory = req.output_directory
+        if run_type == "script" and req.output_directory:
+            output_name = PurePosixPath(req.output_directory).name
+            if output_name:
+                job.workflow_folder_name = output_name
         await session.commit()
-        
+
         # Log submission
         await add_log_entry(
             session,
             run_uuid,
             "INFO",
-            f"Job submitted: {req.sample_name} ({req.mode} mode, run_type={run_type})",
+            f"Job submitted: {req.sample_name} (workflow_key={workflow_key}, mode={req.mode or 'n/a'}, run_type={run_type})",
             source="api",
         )
-        
+
         # Submit to selected execution backend
         try:
             # Validate and normalize execution_mode
@@ -937,7 +2160,7 @@ async def submit_job(req: SubmitJobRequest):
                     sample_name=req.sample_name,
                 )
                 exec_mode = "local"
-            
+
             if run_type == "script":
                 if exec_mode != "local":
                     raise ValueError("Standalone script execution only supports local execution_mode")
@@ -962,6 +2185,7 @@ async def submit_job(req: SubmitJobRequest):
                         cwd=str(script_cwd),
                         stdout=stdout_handle,
                         stderr=stderr_handle,
+                        **script_subprocess_session_kwargs(),
                     )
 
                 script_processes[run_uuid] = process
@@ -971,6 +2195,8 @@ async def submit_job(req: SubmitJobRequest):
                 job.run_stage = "SCRIPT_RUNNING"
                 job.nextflow_process_id = process.pid
                 job.nextflow_work_dir = str(script_cwd)
+                if req.output_directory:
+                    job.output_directory = req.output_directory
                 job.log_file = str(stdout_log)
                 job.stderr_log = str(stderr_log)
                 job.report_json = json.dumps(
@@ -1024,46 +2250,16 @@ async def submit_job(req: SubmitJobRequest):
                 await session.commit()
 
                 backend = get_backend("slurm")
+                if workflow_executor is None:
+                    raise HTTPException(status_code=500, detail="Workflow executor resolution failed")
+                backend_submit_kwargs = workflow_executor.build_backend_submit_params(
+                    request=req,
+                    workflow_number=workflow_number,
+                    max_gpu_tasks=max_gpu_tasks,
+                )
                 await backend.submit(
                     run_uuid,
-                    SubmitParams(
-                        project_id=req.project_id,
-                        user_id=req.user_id,
-                        username=req.username,
-                        project_slug=req.project_slug,
-                        sample_name=req.sample_name,
-                        mode=req.mode,
-                        input_type=req.input_type,
-                        input_directory=req.input_directory,
-                        reference_genome=req.reference_genome,
-                        modifications=req.modifications,
-                        entry_point=req.entry_point,
-                        modkit_filter_threshold=req.modkit_filter_threshold,
-                        min_cov=req.min_cov,
-                        per_mod=req.per_mod,
-                        accuracy=req.accuracy,
-                        max_gpu_tasks=max_gpu_tasks,
-                        custom_dogme_profile=req.custom_dogme_profile,
-                        custom_dogme_bind_paths=req.custom_dogme_bind_paths,
-                        resume_from_dir=req.resume_from_dir,
-                        parent_block_id=req.parent_block_id,
-                        ssh_profile_id=req.ssh_profile_id,
-                        slurm_account=req.slurm_account,
-                        slurm_partition=req.slurm_partition,
-                        slurm_gpu_account=req.slurm_gpu_account,
-                        slurm_gpu_partition=req.slurm_gpu_partition,
-                        slurm_cpus=req.slurm_cpus,
-                        slurm_memory_gb=req.slurm_memory_gb,
-                        slurm_walltime=req.slurm_walltime,
-                        slurm_gpus=req.slurm_gpus,
-                        slurm_gpu_type=req.slurm_gpu_type,
-                        remote_base_path=req.remote_base_path,
-                        remote_input_path=req.remote_input_path,
-                        workflow_number=workflow_number,
-                        staged_remote_input_path=req.staged_remote_input_path,
-                        cache_preflight=req.cache_preflight,
-                        result_destination=req.result_destination or "local",
-                    ),
+                    SubmitParams(**backend_submit_kwargs),
                 )
                 await session.refresh(job)
                 job.started_at = datetime.utcnow()
@@ -1076,31 +2272,19 @@ async def submit_job(req: SubmitJobRequest):
                 # Local execution
                 logger.info("Using local NextflowExecutor", run_uuid=run_uuid,
                            sample_name=req.sample_name, exec_mode=exec_mode)
-                run_uuid_returned, work_dir = await executor.submit_job(
+                if workflow_executor is None:
+                    raise HTTPException(status_code=500, detail="Workflow executor resolution failed")
+                local_submit_kwargs = workflow_executor.build_local_submit_kwargs(
                     run_uuid=run_uuid,
-                    sample_name=req.sample_name,
-                    mode=req.mode,
-                    input_type=req.input_type,
-                    input_dir=req.input_directory,
-                    reference_genome=req.reference_genome,  # Now normalized to list by validator
-                    modifications=req.modifications,
-                    entry_point=req.entry_point,
-                    modkit_filter_threshold=req.modkit_filter_threshold,
-                    min_cov=req.min_cov,
-                    per_mod=req.per_mod,
-                    accuracy=req.accuracy,
-                    max_gpu_tasks=max_gpu_tasks,
-                    custom_dogme_profile=req.custom_dogme_profile,
+                    request=req,
                     workflow_index=workflow_index,
-                    user_id=req.user_id,
-                    project_id=req.project_id,
-                    username=req.username,
-                    project_slug=req.project_slug,
-                    resume_from_dir=req.resume_from_dir,
+                    max_gpu_tasks=max_gpu_tasks,
                 )
-                
+                run_uuid_returned, work_dir = await executor.submit_job(**local_submit_kwargs)
+
                 # Update job with work directory info
                 job.nextflow_work_dir = str(work_dir)
+                job.output_directory = str(work_dir)
                 job.workflow_folder_name = work_dir.name
                 job.status = JobStatus.RUNNING
                 job.started_at = datetime.utcnow()
@@ -1112,13 +2296,13 @@ async def submit_job(req: SubmitJobRequest):
                     except (ValueError, OSError):
                         pass
                 await session.commit()
-                
+
                 # Start background monitoring task
                 monitor_task = asyncio.create_task(monitor_job(run_uuid, work_dir))
                 job_monitors[run_uuid] = monitor_task
                 work_directory = str(work_dir)
                 response_status = JobStatus.RUNNING
-            
+
             await add_log_entry(
                 session,
                 run_uuid,
@@ -1126,7 +2310,7 @@ async def submit_job(req: SubmitJobRequest):
                 f"{req.execution_mode.upper()} submission completed successfully",
                 source="api",
             )
-            
+
             return {
                 "run_uuid": run_uuid,
                 "sample_name": req.sample_name,
@@ -1140,18 +2324,15 @@ async def submit_job(req: SubmitJobRequest):
                     "cache_preflight": job.cache_preflight_json,
                 },
             }
-        
-        except Exception as e:
-            # Job submission failed
-            import traceback
-            error_trace = traceback.format_exc()
+
+        except ValueError as e:
             error_detail = _describe_exception(e)
-            logger.error("Nextflow submission error", run_uuid=run_uuid, error=error_detail, exc_info=True)
-            
+            logger.warning("Workflow submission validation failed", run_uuid=run_uuid, error=error_detail)
+
             job.status = JobStatus.FAILED
             job.error_message = error_detail
             await session.commit()
-            
+
             await add_log_entry(
                 session,
                 run_uuid,
@@ -1159,12 +2340,33 @@ async def submit_job(req: SubmitJobRequest):
                 f"Failed to submit to Nextflow: {error_detail}",
                 source="api",
             )
-            
+
+            raise HTTPException(status_code=400, detail=error_detail) from e
+
+        except Exception as e:
+            # Job submission failed
+            import traceback
+            error_trace = traceback.format_exc()
+            error_detail = _describe_exception(e)
+            logger.error("Nextflow submission error", run_uuid=run_uuid, error=error_detail, exc_info=True)
+
+            job.status = JobStatus.FAILED
+            job.error_message = error_detail
+            await session.commit()
+
+            await add_log_entry(
+                session,
+                run_uuid,
+                "ERROR",
+                f"Failed to submit to Nextflow: {error_detail}",
+                source="api",
+            )
+
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to submit job: {error_detail}"
             )
-    
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1177,6 +2379,31 @@ async def submit_job(req: SubmitJobRequest):
         await session.close()
 
 # --- JOB STATUS ---
+@app.get("/jobs/by-parent", response_model=JobDetailsResponse)
+async def get_job_by_parent_block(
+    project_id: str = Query(..., min_length=1),
+    parent_block_id: str = Query(..., min_length=1),
+):
+    """Return the job created for an exact Cortex workflow-plan block."""
+    session = SessionLocal()
+    try:
+        result = await session.execute(
+            select(DogmeJob)
+            .where(
+                DogmeJob.project_id == project_id,
+                DogmeJob.parent_block_id == parent_block_id,
+            )
+            .order_by(DogmeJob.submitted_at.desc())
+            .limit(1)
+        )
+        job = result.scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return JobDetailsResponse(**job_to_dict(job))
+    finally:
+        await session.close()
+
+
 @app.get("/jobs/{run_uuid}", response_model=JobDetailsResponse)
 async def get_job_details(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Get detailed status of a specific job."""
@@ -1217,13 +2444,54 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "work_directory": _effective_job_work_directory(job),
                 **_job_timing_payload(job),
             }
+
+        clean_run_stage = str(getattr(job, "run_stage", "") or "").strip().upper()
+        if clean_run_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE", "CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}:
+            clean_remote = clean_run_stage.endswith("_REMOTE")
+            clean_running = clean_run_stage.startswith("CLEANING_")
+            clean_failed = clean_run_stage == "CLEAN_FAILED"
+            clean_message = (
+                str(getattr(job, "error_message", "") or "").strip()
+                if clean_failed
+                else (
+                    "Cleaning remote workflow artifacts in the background."
+                    if clean_running and clean_remote
+                    else "Cleaning local workflow artifacts in the background."
+                    if clean_running
+                    else "Remote workflow cleanup completed."
+                    if clean_remote
+                    else "Local workflow cleanup completed."
+                )
+            ) or "Workflow clean failed."
+            clean_payload = {
+                "run_uuid": run_uuid,
+                "status": "FAILED" if clean_failed else ("RUNNING" if clean_running else "COMPLETED"),
+                "progress_percent": 0 if clean_failed else (95 if clean_running else 100),
+                "message": clean_message,
+                "tasks": {},
+                "execution_mode": getattr(job, "execution_mode", None) or "local",
+                "run_stage": clean_run_stage,
+                "work_directory": _effective_job_work_directory(job),
+                **_import_status_payload(job),
+                **_job_timing_payload(job),
+            }
+            if getattr(job, "execution_mode", None) == "slurm":
+                clean_payload.update(
+                    {
+                        "slurm_job_id": job.slurm_job_id,
+                        "slurm_state": job.slurm_state,
+                        "transfer_state": job.transfer_state,
+                        "result_destination": job.result_destination,
+                    }
+                )
+            return clean_payload
         
-        terminal_statuses = (JobStatus.DELETED, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        terminal_statuses = (JobStatus.DELETED, JobStatus.STALE, JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
         pending_local_result_sync = (
             job.execution_mode == "slurm"
             and job.status == JobStatus.COMPLETED
             and (job.result_destination or "").strip().lower() in {"local", "both"}
-            and (job.transfer_state or "") != "outputs_downloaded"
+            and (job.transfer_state or "").strip().lower() not in {"outputs_downloaded", "stale"}
         )
         if pending_local_result_sync:
             # Fast path: job already COMPLETED on the cluster — skip the
@@ -1237,10 +2505,14 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             transfer_message = transfer_detail or job.error_message
             return {
                 "run_uuid": run_uuid,
-                "status": "FAILED" if transfer_failed else "RUNNING",
-                "progress_percent": 0 if transfer_failed else 99,
-                "message": transfer_message or (
-                    "Remote job completed, but copying results back to the local workflow failed."
+                # A copy-back failure must not overwrite a successful remote
+                # workflow result. transfer_state carries the retryable failure.
+                "status": "COMPLETED" if transfer_failed else "RUNNING",
+                "progress_percent": 100 if transfer_failed else 99,
+                "message": (
+                    f"Remote job completed; result synchronization failed: {transfer_message}"
+                    if transfer_failed and transfer_message
+                    else "Remote job completed, but copying results back to the local workflow failed."
                     if transfer_failed
                     else "Copying results back to the local workflow..."
                 ),
@@ -1253,20 +2525,49 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                 "transfer_detail": transfer_message,
                 "result_destination": job.result_destination,
                 "work_directory": _effective_job_work_directory(job),
+                **_workflow_usage_payload(job),
+                **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
         if job.status in terminal_statuses:
+            warning_message = import_warning_message(getattr(job, "imported_source_complete", None))
             work_directory = _effective_job_work_directory(job)
+            default_message = "Job marked stale." if job.status == JobStatus.STALE else f"Job {job.status.lower()}."
+            stale_transfer_message = None
+            terminal_transfer_state = (job.transfer_state or "").strip().lower()
+            if (
+                job.status == JobStatus.COMPLETED
+                and job.execution_mode == "slurm"
+                and (job.result_destination or "").strip().lower() in {"local", "both"}
+                and terminal_transfer_state == "outputs_downloaded"
+            ):
+                default_message = "Results synchronized to the local workflow directory."
+            elif (
+                job.status == JobStatus.COMPLETED
+                and job.execution_mode == "slurm"
+                and (job.result_destination or "").strip().lower() in {"local", "both"}
+                and terminal_transfer_state == "stale"
+            ):
+                stale_transfer_message = "Result transfer marked stale by maintenance cleanup. Run sync again to retry copy-back."
+                default_message = stale_transfer_message
             base_payload = {
                 "run_uuid": run_uuid,
                 "status": job.status,
                 "progress_percent": 100 if job.status == JobStatus.COMPLETED else 0,
-                "message": job.error_message or f"Job {job.status.lower()}.",
+                "message": job.error_message or warning_message or default_message,
                 "tasks": {},
                 "work_directory": work_directory,
+                **_workflow_usage_payload(job),
+                **_import_status_payload(job),
                 **_job_timing_payload(job),
             }
             if job.execution_mode == "slurm":
+                if job.status in {JobStatus.FAILED, JobStatus.CANCELLED} and terminal_transfer_state not in {"transfer_failed", "sync_cancelled", "stale"}:
+                    backend = get_backend("slurm")
+                    status_data = await backend.check_status(run_uuid)
+                    if not _slurm_status_poll_failed(status_data):
+                        return await _slurm_status_payload(session, job, status_data)
+                await _backfill_terminal_slurm_workflow_usage(session, job)
                 base_payload.update(
                     {
                         "execution_mode": "slurm",
@@ -1274,8 +2575,13 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
                         "slurm_job_id": job.slurm_job_id,
                         "slurm_state": job.slurm_state,
                         "transfer_state": job.transfer_state,
-                        "transfer_detail": job.error_message if (job.transfer_state or "").strip().lower() == "transfer_failed" else None,
+                        "transfer_detail": (
+                            job.error_message
+                            if terminal_transfer_state == "transfer_failed"
+                            else stale_transfer_message
+                        ),
                         "result_destination": job.result_destination,
+                        **_workflow_usage_payload(job),
                     }
                 )
             return base_payload
@@ -1283,23 +2589,7 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         if job.execution_mode == "slurm":
             backend = get_backend("slurm")
             status_data = await backend.check_status(run_uuid)
-            return {
-                "run_uuid": run_uuid,
-                "status": status_data.status,
-                "progress_percent": status_data.progress_percent if status_data.progress_percent is not None else (100 if status_data.status == JobStatus.COMPLETED else job.progress_percent),
-                "message": status_data.message or job.error_message or f"Status: {job.status}",
-                "tasks": status_data.tasks or {},
-                "execution_mode": status_data.execution_mode,
-                "run_stage": status_data.run_stage,
-                "slurm_job_id": status_data.slurm_job_id,
-                "slurm_state": status_data.slurm_state,
-                "transfer_state": status_data.transfer_state,
-                "transfer_detail": status_data.transfer_detail,
-                "result_destination": status_data.result_destination,
-                "ssh_profile_nickname": status_data.ssh_profile_nickname,
-                "work_directory": status_data.work_directory,
-                **_job_timing_payload(job),
-            }
+            return await _slurm_status_payload(session, job, status_data)
 
         # Get detailed status including tasks from check_status
         executor = NextflowExecutor()
@@ -1307,6 +2597,20 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
         effective_work_directory = _effective_job_work_directory(job)
         work_dir = Path(effective_work_directory) if effective_work_directory else executor.work_dir / run_uuid
         status_data = await executor.check_status(run_uuid, work_dir)
+        workflow_usage = status_data.get("workflow_usage")
+        workflow_usage_synced_at = status_data.get("workflow_usage_synced_at")
+        if workflow_usage is not None:
+            resolved_synced_at = (
+                _coerce_workflow_usage_synced_at(workflow_usage_synced_at)
+                or _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+                or datetime.utcnow()
+            )
+            existing_synced_at = _coerce_workflow_usage_synced_at(getattr(job, "workflow_usage_synced_at", None))
+            if getattr(job, "workflow_usage_json", None) != workflow_usage or existing_synced_at != resolved_synced_at:
+                job.workflow_usage_json = workflow_usage
+                job.workflow_usage_synced_at = resolved_synced_at
+                await session.commit()
+            workflow_usage_synced_at = resolved_synced_at.isoformat()
         
         return {
             "run_uuid": run_uuid,
@@ -1316,6 +2620,8 @@ async def get_job_status(run_uuid: str = FastAPIPath(..., min_length=1)):
             "tasks": status_data.get("tasks", {}),
             "execution_mode": "local",
             "work_directory": effective_work_directory,
+            "workflow_usage": workflow_usage if workflow_usage is not None else getattr(job, "workflow_usage_json", None),
+            "workflow_usage_synced_at": workflow_usage_synced_at or (job.workflow_usage_synced_at.isoformat() if getattr(job, "workflow_usage_synced_at", None) else None),
             **_job_timing_payload(job),
         }
     
@@ -1338,20 +2644,7 @@ async def sync_job_results_by_workflow_label(
                 status_code=404,
                 detail=f"No job found for project={project_id}, workflow={workflow_label}",
             )
-        run_uuid = job.run_uuid
-        if (job.execution_mode or "local").strip().lower() != "slurm":
-            return {
-                "success": False,
-                "status": "not_applicable",
-                "message": "Manual result sync is only available for SLURM jobs.",
-                "run_uuid": run_uuid,
-                "remote_work_dir": getattr(job, "remote_work_dir", None),
-                "local_work_dir": getattr(job, "nextflow_work_dir", None),
-                "transfer_state": getattr(job, "transfer_state", None),
-            }
-        backend = get_backend("slurm")
-        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
-        return result
+        return await _sync_imported_or_remote_job(job, force=force)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -1371,27 +2664,13 @@ async def sync_job_results_to_local(
     run_uuid: str = FastAPIPath(..., min_length=1),
     force: bool = Query(False),
 ):
-    """Manually trigger remote->local copy-back for a SLURM run."""
+    """Manually trigger imported or remote result synchronization into the local workflow directory."""
     session = SessionLocal()
     try:
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
-
-        if (job.execution_mode or "local").strip().lower() != "slurm":
-            return {
-                "success": False,
-                "status": "not_applicable",
-                "message": "Manual result sync is only available for SLURM jobs.",
-                "run_uuid": run_uuid,
-                "remote_work_dir": getattr(job, "remote_work_dir", None),
-                "local_work_dir": getattr(job, "nextflow_work_dir", None),
-                "transfer_state": getattr(job, "transfer_state", None),
-            }
-
-        backend = get_backend("slurm")
-        result = await backend.sync_results_to_local(run_uuid=run_uuid, force=force)
-        return result
+        return await _sync_imported_or_remote_job(job, force=force)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -1487,14 +2766,28 @@ async def list_jobs(
 # --- CANCEL JOB ---
 @app.post("/jobs/{run_uuid}/cancel")
 async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
-    """Cancel a running job."""
-    import signal
+    """Cancel a running job or an in-flight remote result sync."""
     session = SessionLocal()
     
     try:
         job = await get_job(session, run_uuid)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
+
+        if job.execution_mode == "slurm":
+            backend = get_backend("slurm")
+            if getattr(backend, "is_result_sync_active", None) and backend.is_result_sync_active(run_uuid):
+                result = await backend.cancel_result_sync(run_uuid=run_uuid)
+                if not result.get("success"):
+                    raise HTTPException(status_code=409, detail=str(result.get("message") or "Cannot cancel result sync"))
+                await add_log_entry(
+                    session,
+                    run_uuid,
+                    "WARNING",
+                    str(result.get("message") or "Result synchronization cancelled."),
+                    source="api",
+                )
+                return result
         
         if job.status not in (JobStatus.PENDING, JobStatus.RUNNING):
             raise HTTPException(
@@ -1528,7 +2821,11 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 task.cancel()
         
         # Kill the Nextflow process (SIGTERM for graceful cleanup)
-        _pid = job.nextflow_process_id
+        report = _parse_job_report(job)
+        is_script_job = report.get("run_type") == "script" or str(getattr(job, "run_stage", "")).startswith("SCRIPT_")
+        script_process = script_processes.get(run_uuid) if is_script_job else None
+
+        _pid = job.nextflow_process_id or getattr(script_process, "pid", None)
         _process_killed = False
         _kill_message = ""
         if not _pid and job.nextflow_work_dir:
@@ -1542,16 +2839,30 @@ async def cancel_job(run_uuid: str = FastAPIPath(..., min_length=1)):
 
         if _pid:
             try:
-                os.kill(_pid, signal.SIGTERM)
-                _process_killed = True
-                _kill_message = f"Job cancelled. Nextflow process (PID {_pid}) terminated."
-                logger.info("Killed Nextflow process", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    terminate_script_process_tree(process=script_process, pid=_pid, sig=signal.SIGTERM)
+                    _process_killed = True
+                    _kill_message = f"Job cancelled. Standalone script process group (PID {_pid}) terminated."
+                    logger.info("Killed standalone script process group", run_uuid=run_uuid, pid=_pid)
+                else:
+                    os.kill(_pid, signal.SIGTERM)
+                    _process_killed = True
+                    _kill_message = f"Job cancelled. Nextflow process (PID {_pid}) terminated."
+                    logger.info("Killed Nextflow process", run_uuid=run_uuid, pid=_pid)
             except ProcessLookupError:
-                _kill_message = "Job cancelled. Nextflow process had already exited."
-                logger.info("Nextflow process already exited", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    _kill_message = "Job cancelled. Standalone script process had already exited."
+                    logger.info("Standalone script process already exited", run_uuid=run_uuid, pid=_pid)
+                else:
+                    _kill_message = "Job cancelled. Nextflow process had already exited."
+                    logger.info("Nextflow process already exited", run_uuid=run_uuid, pid=_pid)
             except PermissionError:
-                _kill_message = f"Job cancelled. Could not terminate process (PID {_pid}): permission denied."
-                logger.warning("Permission denied killing Nextflow process", run_uuid=run_uuid, pid=_pid)
+                if is_script_job:
+                    _kill_message = f"Job cancelled. Could not terminate standalone script process group (PID {_pid}): permission denied."
+                    logger.warning("Permission denied killing standalone script process group", run_uuid=run_uuid, pid=_pid)
+                else:
+                    _kill_message = f"Job cancelled. Could not terminate process (PID {_pid}): permission denied."
+                    logger.warning("Permission denied killing Nextflow process", run_uuid=run_uuid, pid=_pid)
         else:
             _kill_message = "Job cancelled. Could not find process to terminate (monitoring stopped)."
 
@@ -1594,7 +2905,7 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        _terminal = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        _terminal = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if job.status not in _terminal:
             raise HTTPException(
                 status_code=400,
@@ -1602,13 +2913,17 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                        f"Only {', '.join(s.value for s in _terminal)} jobs can be deleted.",
             )
 
-        _work_dir = Path(job.nextflow_work_dir) if job.nextflow_work_dir else None
+        _work_dir = _resolve_deletable_workflow_dir(job)
+        if _work_dir is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not determine a safe workflow directory to delete for this job.",
+            )
         _deleted_path = None
-        _folder_name = None
+        _folder_name = job.workflow_folder_name or _work_dir.name
         _file_count = 0
 
         if _work_dir and _work_dir.exists():
-            _folder_name = _work_dir.name  # e.g. "workflow6"
             # Count files before deleting
             for _root, _dirs, _files in os.walk(_work_dir):
                 _file_count += len(_files)
@@ -1645,6 +2960,102 @@ async def delete_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         await session.close()
 
 
+@app.post("/jobs/{run_uuid}/clean")
+async def clean_job_data(
+    run_uuid: str = FastAPIPath(..., min_length=1),
+    remote: bool = Query(False),
+):
+    """Remove cleanable workflow subdirectories while preserving the workflow root and bedMethyl outputs."""
+    remote = remote if isinstance(remote, bool) else False
+    session = SessionLocal()
+
+    try:
+        job = await get_job(session, run_uuid)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
+        if job.status not in terminal_statuses:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot clean job with status {job.status}. "
+                    f"Only {', '.join(status.value for status in terminal_statuses)} jobs can be cleaned."
+                ),
+            )
+
+        if remote:
+            if _resolve_cleanable_remote_workflow_dir(job) is None:
+                raise HTTPException(status_code=409, detail="Could not determine a safe remote workflow directory to clean for this job.")
+            if not getattr(job, "ssh_profile_id", None) or not getattr(job, "user_id", None):
+                raise HTTPException(status_code=400, detail="This workflow does not have remote execution metadata available for remote cleanup.")
+            folder_name = str(getattr(job, "workflow_folder_name", "") or PurePosixPath(_resolve_cleanable_remote_workflow_dir(job) or "workflow").name)
+        else:
+            workflow_dir = _resolve_deletable_workflow_dir(job)
+            if workflow_dir is None:
+                raise HTTPException(status_code=409, detail="Could not determine a safe workflow directory to clean for this job.")
+            folder_name = str(getattr(job, "workflow_folder_name", "") or workflow_dir.name)
+
+        task_key = (run_uuid, remote)
+        active_task = _workflow_clean_tasks.get(task_key)
+        if active_task is not None and not active_task.done():
+            return {
+                "status": "cleaning",
+                "run_uuid": run_uuid,
+                "remote": remote,
+                "message": f"Workflow clean is already running for `{folder_name}`.",
+            }
+
+        task = asyncio.create_task(_run_clean_job_background(run_uuid=run_uuid, remote=remote))
+        _workflow_clean_tasks[task_key] = task
+        _set_clean_status(
+            run_uuid=run_uuid,
+            remote=remote,
+            status="RUNNING",
+            run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+            message=(
+                "Cleaning remote workflow artifacts in the background."
+                if remote
+                else "Cleaning local workflow artifacts in the background."
+            ),
+        )
+        await _set_job_clean_run_stage(run_uuid, run_stage="CLEANING_REMOTE" if remote else "CLEANING_LOCAL", error_message=None)
+
+        message = (
+            f"Started {'remote ' if remote else ''}clean for `{folder_name}`. "
+            "The workflow clean is running in the background; check job status or logs for completion."
+        )
+        return {
+            "status": "cleaning",
+            "run_uuid": run_uuid,
+            "remote": remote,
+            "message": message,
+            "run_stage": "CLEANING_REMOTE" if remote else "CLEANING_LOCAL",
+        }
+    finally:
+        await session.close()
+
+
+@app.get("/jobs/{run_uuid}/clean-status")
+async def get_job_clean_status(
+    run_uuid: str = FastAPIPath(..., min_length=1),
+    remote: bool = Query(False),
+):
+    payload = _workflow_clean_status.get((run_uuid, bool(remote)))
+    if payload is None:
+        session = SessionLocal()
+        try:
+            job = await get_job(session, run_uuid)
+        finally:
+            await session.close()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        payload = _clean_status_payload_from_job(job, remote=bool(remote))
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Clean status not found")
+    return payload
+
+
 @app.post("/jobs/{run_uuid}/rerun", response_model=JobSubmitResponse)
 async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
     """Create a new job attempt that reruns an existing workflow in the same folder."""
@@ -1655,7 +3066,7 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         if not source_job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        allowed_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        allowed_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if source_job.status not in allowed_statuses:
             raise HTTPException(
                 status_code=400,
@@ -1667,6 +3078,17 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         archive_sample_names = [source_job.sample_name]
         if sample_name != source_job.sample_name:
             archive_sample_names.append(sample_name)
+        input_type, entry_point = _resolve_rerun_input_mode(source_job)
+        workflow_key = getattr(source_job, "workflow_key", None) or "dogme"
+        workflow_executor = _get_workflow_executor_or_400(workflow_key)
+        if not workflow_executor.supports_submission:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"workflow_key '{workflow_executor.workflow_key}' is preview-only in Phase 1 "
+                    "and cannot be rerun yet"
+                ),
+            )
 
         rerun_uuid = str(uuid.uuid4())
         rerun_job = await create_job(
@@ -1677,8 +3099,11 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             workflow_alias=source_job.workflow_alias,
             workflow_folder_name=source_job.workflow_folder_name,
             workflow_display_name=getattr(source_job, "workflow_display_name", None) or sample_name,
+            workflow_key=workflow_key,
             sample_name=sample_name,
             mode=source_job.mode,
+            input_type=input_type,
+            entry_point=entry_point,
             input_directory=source_job.input_directory,
             reference_genome=reference_genome,
             modifications=source_job.modifications,
@@ -1690,6 +3115,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
         rerun_job.slurm_account = source_job.slurm_account
         rerun_job.slurm_partition = source_job.slurm_partition
         rerun_job.slurm_cpus = source_job.slurm_cpus
+        rerun_job.local_max_task_cpus = source_job.local_max_task_cpus
+        rerun_job.local_max_task_memory_gb = source_job.local_max_task_memory_gb
         rerun_job.slurm_memory_gb = source_job.slurm_memory_gb
         rerun_job.slurm_walltime = source_job.slurm_walltime
         rerun_job.slurm_gpus = source_job.slurm_gpus
@@ -1719,12 +3146,14 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             params = SubmitParams(
                 project_id=source_job.project_id,
                 user_id=source_job.user_id,
+                workflow_key=workflow_key,
                 sample_name=sample_name,
                 mode=source_job.mode,
-                input_type="pod5",
+                input_type=input_type,
                 input_directory=source_job.input_directory,
                 reference_genome=reference_genome,
                 modifications=source_job.modifications,
+                entry_point=entry_point,
                 max_gpu_tasks=None,
                 resume_from_dir=source_job.nextflow_work_dir,
                 rerun_in_place=True,
@@ -1732,6 +3161,8 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
                 slurm_account=source_job.slurm_account,
                 slurm_partition=source_job.slurm_partition,
                 slurm_cpus=source_job.slurm_cpus,
+                local_max_task_cpus=source_job.local_max_task_cpus,
+                local_max_task_memory_gb=source_job.local_max_task_memory_gb,
                 slurm_memory_gb=source_job.slurm_memory_gb,
                 slurm_walltime=source_job.slurm_walltime,
                 slurm_gpus=source_job.slurm_gpus,
@@ -1777,11 +3208,14 @@ async def rerun_job(run_uuid: str = FastAPIPath(..., min_length=1)):
             run_uuid=rerun_uuid,
             sample_name=sample_name,
             mode=source_job.mode,
-            input_type="pod5",
+            input_type=input_type,
             input_dir=source_job.input_directory,
             reference_genome=reference_genome,
             modifications=source_job.modifications,
+            entry_point=entry_point,
             max_gpu_tasks=None,
+            local_max_task_cpus=source_job.local_max_task_cpus,
+            local_max_task_memory_gb=source_job.local_max_task_memory_gb,
             workflow_index=source_job.workflow_index,
             rerun_in_place=True,
             archive_sample_names=archive_sample_names,
@@ -1835,7 +3269,7 @@ async def rename_job_workflow(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
-        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED)
+        terminal_statuses = (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.STALE)
         if job.status not in terminal_statuses:
             raise HTTPException(
                 status_code=400,
@@ -2149,6 +3583,7 @@ async def create_ssh_profile(req: SSHProfileCreate):
             user_id=req.user_id,
             nickname=req.nickname,
             ssh_host=req.ssh_host,
+            transfer_host=req.transfer_host,
             ssh_port=req.ssh_port,
             ssh_username=req.ssh_username,
             auth_method=req.auth_method,
@@ -2183,12 +3618,13 @@ async def create_ssh_profile(req: SSHProfileCreate):
 
 
 @app.get("/ssh-profiles", response_model=list[SSHProfileOut])
-async def list_ssh_profiles(user_id: str = Query(..., min_length=1)):
-    """List SSH profiles for a user."""
+async def list_ssh_profiles(user_id: str | None = Query(None, min_length=1)):
+    """List SSH profiles, optionally filtered to one user."""
     async with SessionLocal() as session:
-        result = await session.execute(
-            select(SSHProfile).where(SSHProfile.user_id == user_id).order_by(SSHProfile.created_at.desc())
-        )
+        query = select(SSHProfile).order_by(SSHProfile.created_at.desc())
+        if user_id:
+            query = query.where(SSHProfile.user_id == user_id)
+        result = await session.execute(query)
         profiles = result.scalars().all()
         return [_profile_to_out(p) for p in profiles]
 
@@ -2273,6 +3709,7 @@ async def test_ssh_profile(
         user_id=profile.user_id,
         nickname=profile.nickname,
         ssh_host=profile.ssh_host,
+        transfer_host=profile.transfer_host,
         ssh_port=profile.ssh_port,
         ssh_username=profile.ssh_username,
         auth_method=profile.auth_method,
@@ -2411,6 +3848,7 @@ def _profile_to_out(profile: SSHProfile) -> SSHProfileOut:
         user_id=profile.user_id,
         nickname=profile.nickname,
         ssh_host=profile.ssh_host,
+        transfer_host=profile.transfer_host,
         ssh_port=profile.ssh_port,
         ssh_username=profile.ssh_username,
         auth_method=profile.auth_method,

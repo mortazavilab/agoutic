@@ -12,7 +12,15 @@ import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fastapi import HTTPException
+from sqlalchemy import func, select
+
 from common.logging_config import get_logger
+from cortex.config import GENOME_ALIASES, default_haplotype_vcf_for_reference
+from cortex.db_helpers import _resolve_project_dir
+from cortex.models import Project, ProjectAccess, User
+from cortex.remote_orchestration import _extract_remote_profile_nickname
+from cortex import user_jail
 
 if TYPE_CHECKING:
     from cortex.schemas import ConversationState
@@ -20,10 +28,218 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _PROJECT_WORKFLOW_REF_RE = re.compile(
-    r"\b(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b",
+    r"\b(?:(?P<owner>[a-z0-9][a-z0-9_-]*)\s*:\s*)?"
+    r"(?P<project>[a-z0-9][a-z0-9_-]*)\s*:\s*(?P<workflow>workflow\d+)\b",
     re.IGNORECASE,
 )
 _BED_PATH_RE = re.compile(r"(?P<path>(?:/|~|\.)[^\s,;]+\.bed)\b", re.IGNORECASE)
+_PORE_C_INPUT_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.(?:bam|fastq|fq)(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_PORE_C_HINTED_INPUT_RE = re.compile(
+    r"\b(?P<input_type>bam|fastq|fq)\b(?:\s+(?:file|files|input|inputs|reads?|directory|dir))?\s*(?:at|in|from|=|:)?\s*(?P<path>(?:/|~|\.)\S+)",
+    re.IGNORECASE,
+)
+_PORE_C_REFERENCE_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.(?:fa|fasta|fna)(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_PORE_C_VCF_PATH_RE = re.compile(
+    r"(?P<path>(?:/|~|\.)[^\s,;]+?\.vcf(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_WORKFLOW_RE = re.compile(r"\b(workflow\d+)\b", re.IGNORECASE)
+_HAPLOTYPE_MODE_RE = re.compile(r"\b(DNA|RNA|cDNA)\b", re.IGNORECASE)
+_HAPLOTYPE_VCF_HINT_RE = re.compile(
+    r"(?:with\s+file|using|with)\s+(?P<path>(?:/|~|\.)?[^\s,;]+?\.vcf(?:\.gz)?)\b",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_VCF_SAMPLE_FLAG_RE = re.compile(r"--vcf-sample\s+(?P<sample>[^\s,;]+(?:,[^\s,;]+)?)", re.IGNORECASE)
+_HAPLOTYPE_FOUNDER_PAIR_RE = re.compile(
+    r"\bfounders?\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s*(?:,|and|vs)\s*(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_SAMPLE_PAIR_RE = re.compile(
+    r"\bsample\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s*(?:,|and|vs)\s*(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_SAMPLE_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)(?:\s+(?:DNA|RNA|cDNA))?\s+sample\s+(?P<sample>.+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_BETWEEN_PAIR_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)\b.*?\bbetween\s+(?P<first>[A-Za-z0-9/_\- ]+?)\s+(?:and|vs)\s+(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_MOUSE_VS_PAIR_RE = re.compile(
+    r"\bhaplotype\s+(?:mouse|mm39)\b.*?\b(?P<first>[A-Za-z0-9/_\- ]+?)\s+vs\s+(?P<second>[A-Za-z0-9/_\- ]+?)(?=\s+workflow\d+\b|\s+(?:with|using|from|in|on)\b|[.,;]|$)",
+    re.IGNORECASE,
+)
+_HAPLOTYPE_F1_TOKEN_RE = re.compile(r"\b(?P<sample>[A-Za-z0-9/_-]*F1)\b", re.IGNORECASE)
+_GENOME_ALIAS_RE = re.compile(
+    r"\b(" + "|".join(sorted((re.escape(alias) for alias in GENOME_ALIASES), key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+) if GENOME_ALIASES else re.compile(r"$^")
+_DOGME_BATCH_SAMPLE_RE = re.compile(
+    r"\b(?P<sample_name>[A-Za-z0-9_-]+)\s*(?:=|:)\s*(?P<input_directory>(?:/|~|\.)[^\s,;]+)",
+    re.IGNORECASE,
+)
+_PORE_C_SAMPLE_SHEET_RE = re.compile(
+    r"(?:sample[_ ]sheet|samplesheet)\s+(?:at|in|from|path)?\s*[=:]?\s*(?P<path>\S+\.(?:csv|tsv|txt))",
+    re.IGNORECASE,
+)
+
+_MOUSE_FOUNDER_ALIAS_TO_CANONICAL = {
+    "ref": "C57BL_6J",
+    "b6": "C57BL_6J",
+    "c57bl6": "C57BL_6J",
+    "c57bl6j": "C57BL_6J",
+    "aj": "A_J",
+    "a": "A_J",
+    "129s1": "129S1_SvImJ",
+    "129s1svimj": "129S1_SvImJ",
+    "nod": "NOD_ShiLtJ",
+    "nodshiltj": "NOD_ShiLtJ",
+    "nzo": "NZO_HlLtJ",
+    "nzohlltj": "NZO_HlLtJ",
+    "cast": "CAST_EiJ",
+    "casteij": "CAST_EiJ",
+    "pwk": "PWK_PhJ",
+    "pwkphj": "PWK_PhJ",
+    "wsb": "WSB_EiJ",
+    "wsbeij": "WSB_EiJ",
+}
+_MOUSE_FOUNDER_ORDER = ["C57BL_6J", "A_J", "129S1_SvImJ", "NOD_ShiLtJ", "NZO_HlLtJ", "CAST_EiJ", "PWK_PhJ", "WSB_EiJ"]
+_MOUSE_FOUNDER_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+_MOUSE_FOUNDER_SEPARATOR_RE = re.compile(r"[\s/_-]+")
+_MOUSE_F1_SUFFIX_RE = re.compile(r"f1$", re.IGNORECASE)
+_MOUSE_FOUNDER_F1_KEYS = sorted(
+    _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.items(),
+    key=lambda item: (-len(item[0]), item[0]),
+)
+
+
+def _collapse_mouse_founder_token(value: str) -> str:
+    return _MOUSE_FOUNDER_NON_ALNUM_RE.sub("", str(value or "").strip().lower())
+
+
+def _mouse_founder_lookup_keys(value: str) -> tuple[str, ...]:
+    raw_value = str(value or "").strip().lower()
+    if not raw_value:
+        return ()
+    keys: list[str] = []
+    collapsed = _collapse_mouse_founder_token(raw_value)
+    if collapsed:
+        keys.append(collapsed)
+    prefix = _collapse_mouse_founder_token(_MOUSE_FOUNDER_SEPARATOR_RE.split(raw_value, maxsplit=1)[0])
+    if prefix and prefix not in keys:
+        keys.append(prefix)
+    return tuple(keys)
+
+
+def _resolve_mouse_founder_alias(value: str) -> str | None:
+    for key in _mouse_founder_lookup_keys(value):
+        canonical = _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.get(key)
+        if canonical:
+            return canonical
+    return None
+
+
+def _parse_mouse_founder_f1(value: str) -> list[str] | None:
+    raw_value = str(value or "").strip()
+    if not raw_value or not _MOUSE_F1_SUFFIX_RE.search(raw_value):
+        return None
+
+    body = _MOUSE_F1_SUFFIX_RE.sub("", raw_value).strip()
+    if not body:
+        return None
+
+    parts = [token for token in _MOUSE_FOUNDER_SEPARATOR_RE.split(body) if token]
+    if len(parts) == 2:
+        first = _resolve_mouse_founder_alias(parts[0])
+        second = _resolve_mouse_founder_alias(parts[1])
+        if first and second and first != second:
+            return [label for label in _MOUSE_FOUNDER_ORDER if label in {first, second}]
+        return None
+
+    collapsed = _collapse_mouse_founder_token(body)
+    if not collapsed:
+        return None
+
+    for prefix, first in _MOUSE_FOUNDER_F1_KEYS:
+        if not collapsed.startswith(prefix):
+            continue
+        remainder = collapsed[len(prefix):]
+        if not remainder:
+            continue
+        second = _MOUSE_FOUNDER_ALIAS_TO_CANONICAL.get(remainder)
+        if second and second != first:
+            return [label for label in _MOUSE_FOUNDER_ORDER if label in {first, second}]
+    return None
+
+
+def _clean_haplotype_founder_token(value: str) -> str:
+    return str(value or "").strip().strip('"').strip("'").rstrip(".,;:!?")
+
+
+def _extract_haplotype_founder_samples(message: str) -> list[str]:
+    requested_tokens: list[str] = []
+    for match in _HAPLOTYPE_VCF_SAMPLE_FLAG_RE.finditer(message):
+        requested_tokens.extend(
+            _clean_haplotype_founder_token(part)
+            for part in match.group("sample").split(",")
+            if _clean_haplotype_founder_token(part)
+        )
+
+    for pattern in (
+        _HAPLOTYPE_FOUNDER_PAIR_RE,
+        _HAPLOTYPE_SAMPLE_PAIR_RE,
+        _HAPLOTYPE_MOUSE_BETWEEN_PAIR_RE,
+        _HAPLOTYPE_MOUSE_VS_PAIR_RE,
+    ):
+        pair_match = pattern.search(message)
+        if not pair_match:
+            continue
+        requested_tokens.extend(
+            [
+                _clean_haplotype_founder_token(pair_match.group("first")),
+                _clean_haplotype_founder_token(pair_match.group("second")),
+            ]
+        )
+        break
+
+    mouse_sample_match = _HAPLOTYPE_MOUSE_SAMPLE_RE.search(message)
+    if mouse_sample_match:
+        requested_tokens.append(_clean_haplotype_founder_token(mouse_sample_match.group("sample")))
+
+    for match in _HAPLOTYPE_F1_TOKEN_RE.finditer(message):
+        token = _clean_haplotype_founder_token(match.group("sample"))
+        if token and token not in requested_tokens:
+            requested_tokens.append(token)
+
+    resolved: list[str] = []
+    for token in requested_tokens:
+        founder_pair = _parse_mouse_founder_f1(token)
+        if founder_pair:
+            for founder in founder_pair:
+                if founder not in resolved:
+                    resolved.append(founder)
+            continue
+        founder = _resolve_mouse_founder_alias(token)
+        if founder and founder not in resolved:
+            resolved.append(founder)
+
+    return [label for label in _MOUSE_FOUNDER_ORDER if label in resolved]
+
+
+def _extract_mentioned_reference_genomes(message: str) -> list[str]:
+    mentioned_references: list[str] = []
+    for match in _GENOME_ALIAS_RE.findall(message):
+        canonical = GENOME_ALIASES.get(str(match).strip().lower())
+        if canonical and canonical not in mentioned_references:
+            mentioned_references.append(canonical)
+    return mentioned_references
 
 
 def _clean_overlap_display_label(label_text: str) -> str:
@@ -95,13 +311,20 @@ def _project_owner_root(project_dir: str, default_work_dir: str = "") -> str:
 
 
 def _resolve_project_workflow_ref(ref: str, project_dir: str, default_work_dir: str = "") -> str:
+    workflow_dir = _resolve_project_workflow_dir(ref, project_dir, default_work_dir)
+    if workflow_dir == ref:
+        return ref
+    return f"{workflow_dir}/openChromatin"
+
+
+def _resolve_project_workflow_dir(ref: str, project_dir: str, default_work_dir: str = "") -> str:
     match = _PROJECT_WORKFLOW_REF_RE.fullmatch((ref or "").strip())
     if not match:
         return ref
     owner_root = _project_owner_root(project_dir, default_work_dir)
     if not owner_root:
         return ref
-    return f"{owner_root.rstrip('/')}/{match.group('project')}/{match.group('workflow')}/openChromatin"
+    return f"{owner_root.rstrip('/')}/{match.group('project')}/{match.group('workflow')}"
 
 
 def _resolve_existing_path(path_value: str, conv_state: "ConversationState", project_dir: str) -> str:
@@ -115,6 +338,126 @@ def _resolve_existing_path(path_value: str, conv_state: "ConversationState", pro
     if work_dir:
         return str((Path(work_dir) / expanded).resolve())
     return expanded
+
+
+def _pore_c_allowed_root(conv_state: "ConversationState", project_dir: str) -> Path | None:
+    users_root = (user_jail.AGOUTIC_DATA / "users").resolve()
+    for raw_root in (getattr(conv_state, "work_dir", None), project_dir):
+        if not raw_root:
+            continue
+        candidate = Path(os.path.expanduser(str(raw_root))).resolve()
+        try:
+            relative = candidate.relative_to(users_root)
+        except ValueError:
+            continue
+        if relative.parts:
+            return users_root / relative.parts[0]
+    return None
+
+
+def _resolve_pore_c_jailed_path(path_value: str, conv_state: "ConversationState", project_dir: str) -> str:
+    resolved = Path(_resolve_existing_path(path_value, conv_state, project_dir)).expanduser().resolve()
+
+    try:
+        user_jail._ensure_within_jail(resolved)
+    except PermissionError as exc:
+        raise ValueError(f"Pore-C path must stay inside the user jail: {resolved}") from exc
+
+    allowed_root = _pore_c_allowed_root(conv_state, project_dir)
+    if allowed_root is not None:
+        try:
+            resolved.relative_to(allowed_root.resolve())
+        except ValueError as exc:
+            raise ValueError(f"Pore-C path must stay inside the user jail: {resolved}") from exc
+
+    return str(resolved)
+
+
+def _trim_path_token(path_value: str) -> str:
+    return str(path_value or "").strip().strip('"').strip("'").rstrip(".,;:!?")
+
+
+def _derive_sample_name_from_input_path(path_value: str) -> str:
+    file_name = Path(path_value).name
+    lowered = file_name.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq", ".bam"):
+        if lowered.endswith(suffix):
+            return file_name[: -len(suffix)] or "pore_c_sample"
+    return Path(file_name).stem or "pore_c_sample"
+
+
+def _pore_c_output_root(input_path: str, conv_state: "ConversationState", project_dir: str) -> str:
+    output_root = _project_output_root(project_dir, conv_state)
+    if output_root:
+        return output_root
+
+    normalized_input = _trim_path_token(input_path)
+    if not normalized_input:
+        return ""
+
+    input_candidate = Path(os.path.expanduser(normalized_input))
+    parent = input_candidate if input_candidate.is_dir() else input_candidate.parent
+    return str(parent)
+
+
+def _pore_c_output_flags(message: str) -> dict[str, bool]:
+    def _alias_pattern(alias: str) -> str:
+        parts = [part for part in re.split(r"[\s_-]+", alias.strip()) if part]
+        return r"[\s_-]+".join(re.escape(part) for part in parts)
+
+    def _extract_flag(default: bool, *aliases: str) -> bool:
+        if not aliases:
+            return default
+        for alias in aliases:
+            alias_pattern = _alias_pattern(alias)
+            if re.search(rf"\b(?:no|without|disable|disabled|skip)\s+{alias_pattern}\b", message, re.IGNORECASE):
+                return False
+        for alias in aliases:
+            alias_pattern = _alias_pattern(alias)
+            if re.search(rf"\b(?:with|enable|enabled|generate|include|output)?\s*{alias_pattern}\b", message, re.IGNORECASE):
+                return True
+        return default
+
+    flags = {
+        "pairs": _extract_flag(True, "pairs"),
+        "mcool": _extract_flag(True, "mcool", "cooler", "contact map"),
+        "hi_c": _extract_flag(False, "hi c", "hic"),
+        "bed": _extract_flag(False, "bed"),
+        "chromunity": _extract_flag(False, "chromunity"),
+        "coverage": _extract_flag(False, "coverage"),
+        "paired_end": _extract_flag(False, "paired end", "paired_end"),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _extract_pore_c_sample_name(message: str) -> str | None:
+    patterns = (
+        r"\bsample(?:\s+name)?\s+([A-Za-z0-9_.-]+)",
+        r"\bsample(?:\s+name)?\s*(?:=|:|is|called|named)\s*([A-Za-z0-9_.-]+)",
+        r"\bcalled\s+([A-Za-z0-9_.-]+)",
+        r"\bnamed\s+([A-Za-z0-9_.-]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if not match:
+            continue
+        sample_name = match.group(1).strip().strip(".,;:!?")
+        if sample_name:
+            return sample_name
+    return None
+
+
+def _extract_pore_c_cutter(message: str) -> str | None:
+    match = re.search(
+        r"\b(?:cutter|enzyme|restriction\s+enzyme)\s*(?:=|:|is)?\s*([A-Za-z0-9_.-]+)",
+        message,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(1).strip().strip(".,;:!?")
 
 
 def _project_output_root(project_dir: str, conv_state: "ConversationState") -> str:
@@ -306,9 +649,65 @@ def build_de_group_clarification(
 # ---------------------------------------------------------------------------
 
 def _extract_plan_params(message: str, conv_state: "ConversationState", plan_type: str,
-                         project_dir: str = "") -> dict:
+                         project_dir: str = "",
+                         project_workflow_paths: dict[tuple[str, str], str] | None = None) -> dict:
     """Extract relevant parameters from the user message and conversation state."""
     params: dict = {"goal": message}
+
+    if plan_type == "run_dogme_batch":
+        batch_samples = [
+            {
+                "sample_id": str(index + 1),
+                "sample_name": match.group("sample_name"),
+                "input_directory": match.group("input_directory").rstrip(".,;:!?"),
+            }
+            for index, match in enumerate(_DOGME_BATCH_SAMPLE_RE.finditer(message))
+        ]
+        shared_params: dict = {}
+        mode_match = re.search(r"\b(DNA|RNA|cDNA)\b", message, re.IGNORECASE)
+        if mode_match:
+            shared_params["mode"] = mode_match.group(1).upper()
+        fastq_inputs = [
+            sample["input_directory"].lower().endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz"))
+            for sample in batch_samples
+        ]
+        if any(fastq_inputs):
+            shared_params["input_type"] = "fastq"
+            if shared_params.get("mode") == "CDNA":
+                shared_params["entry_point"] = "fastqCDNA"
+        genome_matches = [
+            GENOME_ALIASES.get(match.group(1).lower(), match.group(1))
+            for match in _GENOME_ALIAS_RE.finditer(message)
+        ]
+        if genome_matches:
+            shared_params["reference_genome"] = list(dict.fromkeys(genome_matches))
+        has_remote_intent = bool(re.search(r"\b(slurm|sbatch|cluster|remote)\b", message, re.IGNORECASE))
+        explicit_profile_match = re.search(
+            r"\b(?:using|via)\s+(?:the\s+)?[a-zA-Z0-9_-]+\s+profile\b",
+            message,
+            re.IGNORECASE,
+        )
+        hpc_profile_match = re.search(r"\bon\s+(hpc\d+)\b", message, re.IGNORECASE)
+        ssh_profile_nickname = (
+            _extract_remote_profile_nickname(message)
+            if explicit_profile_match or hpc_profile_match
+            else None
+        )
+        if has_remote_intent or ssh_profile_nickname:
+            shared_params["execution_mode"] = "slurm"
+        if ssh_profile_nickname:
+            shared_params["ssh_profile_nickname"] = ssh_profile_nickname
+
+        parallelism_match = re.search(
+            r"\b(?:parallelism|max(?:imum)?\s+parallel|parallel)\s*(?:=|:|of)?\s*(\d+)\b",
+            message,
+            re.IGNORECASE,
+        )
+        if parallelism_match:
+            params["requested_max_parallel"] = int(parallelism_match.group(1))
+        params["batch_samples"] = batch_samples
+        params["shared_params"] = shared_params
+        return params
 
     if plan_type == "compare_samples":
         # Try to extract sample names from the message
@@ -496,6 +895,59 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         params["min_overlap_bp"] = 1
         return params
 
+    if plan_type == "run_wf_pore_c":
+        input_match = next(_PORE_C_INPUT_PATH_RE.finditer(message or ""), None)
+        input_path = ""
+        input_type = ""
+        if input_match is not None:
+            input_path = _resolve_pore_c_jailed_path(input_match.group("path"), conv_state, project_dir)
+            lowered = input_path.lower()
+            input_type = "bam" if lowered.endswith(".bam") else "fastq"
+        else:
+            hinted_match = _PORE_C_HINTED_INPUT_RE.search(message or "")
+            if hinted_match is not None:
+                input_path = _resolve_pore_c_jailed_path(hinted_match.group("path"), conv_state, project_dir)
+                hinted_type = hinted_match.group("input_type").lower()
+                input_type = "bam" if hinted_type == "bam" else "fastq"
+
+        reference_match = _PORE_C_REFERENCE_PATH_RE.search(message or "")
+        vcf_match = _PORE_C_VCF_PATH_RE.search(message or "")
+        sample_sheet_match = _PORE_C_SAMPLE_SHEET_RE.search(message or "")
+
+        if input_path:
+            params["file_path"] = input_path
+            params["source_path"] = input_path
+            params["input_directory"] = input_path
+        if input_type:
+            params["input_type"] = input_type
+        if reference_match is not None:
+            params["reference_fasta"] = _resolve_pore_c_jailed_path(reference_match.group("path"), conv_state, project_dir)
+        if vcf_match is not None:
+            params["vcf"] = _resolve_pore_c_jailed_path(vcf_match.group("path"), conv_state, project_dir)
+        if sample_sheet_match is not None:
+            params["sample_sheet"] = _resolve_pore_c_jailed_path(sample_sheet_match.group("path"), conv_state, project_dir)
+
+        sample_name = _extract_pore_c_sample_name(message or "")
+        if not sample_name and input_path:
+            sample_name = _derive_sample_name_from_input_path(input_path)
+        if sample_name:
+            params["sample_name"] = sample_name
+            params["sample"] = sample_name
+
+        params["cutter"] = _extract_pore_c_cutter(message or "") or "NlaIII"
+        params["workflow_key"] = "wf_pore_c"
+        params["workflow_repo"] = "epi2me-labs/wf-pore-c"
+        params["workflow_version"] = "v1.3.1"
+        params["report_filename"] = "wf-pore-c-report.html"
+        params["preview_only"] = True
+        params["output_flags"] = _pore_c_output_flags(message or "")
+
+        output_root = _pore_c_output_root(input_path, conv_state, project_dir)
+        if output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
+
+        return params
+
     if plan_type == "run_xgenepy_analysis":
         m = re.search(r"counts?\s+(?:at|in|from|path)?\s*[=:]?\s*(\S+\.(?:csv|tsv|txt))", message, re.I)
         if m:
@@ -516,7 +968,74 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             except ValueError:
                 pass
 
+    if plan_type == "haplotype_with_vcf":
+        mode_match = _HAPLOTYPE_MODE_RE.search(message)
+        if mode_match:
+            raw_mode = mode_match.group(1).strip().lower()
+            params["input_type"] = "cDNA" if raw_mode == "cdna" else raw_mode.upper()
+
+        default_work_dir = str(getattr(conv_state, "work_dir", "") or "")
+
+        mentioned_references = _extract_mentioned_reference_genomes(message)
+        if len(mentioned_references) == 1:
+            params["reference_genome"] = mentioned_references[0]
+
+        vcf_match = _HAPLOTYPE_VCF_HINT_RE.search(message) or _PORE_C_VCF_PATH_RE.search(message)
+        if vcf_match:
+            params["vcf_path"] = _trim_path_token(vcf_match.group("path"))
+
+        founder_samples = _extract_haplotype_founder_samples(message)
+        if founder_samples:
+            params["vcf_selected_samples"] = founder_samples
+            params.setdefault("reference_genome", "mm39")
+
+        if not params.get("vcf_path"):
+            default_reference = params.get("reference_genome")
+            default_vcf = default_haplotype_vcf_for_reference(default_reference)
+            if default_vcf:
+                params["vcf_path"] = default_vcf
+                params["vcf_defaulted"] = True
+
+        project_ref_matches = list(_PROJECT_WORKFLOW_REF_RE.finditer(message or ""))
+        project_ref_workflow_names = {match.group("workflow").strip().lower() for match in project_ref_matches}
+        workflow_tokens = [match.strip() for match in _HAPLOTYPE_WORKFLOW_RE.findall(message)]
+        if workflow_tokens or project_ref_matches:
+            workflow_dirs: list[str] = []
+            for match in project_ref_matches:
+                resolved = _resolve_project_workflow_dir(match.group(0), project_dir, default_work_dir)
+                if isinstance(resolved, str) and resolved and resolved not in workflow_dirs:
+                    workflow_dirs.append(resolved)
+            for workflow_name in workflow_tokens:
+                if workflow_name.lower() in project_ref_workflow_names:
+                    continue
+                if project_dir:
+                    workflow_dirs.append(str(Path(project_dir) / workflow_name))
+                elif default_work_dir:
+                    base = Path(default_work_dir).resolve().parent
+                    workflow_dirs.append(str((base / workflow_name).resolve()))
+            if workflow_dirs:
+                params["workflow_dirs"] = workflow_dirs
+                params["work_dir"] = workflow_dirs[0]
+
+        output_root = _project_output_root(project_dir, conv_state)
+        if output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
+
+        params.setdefault(
+            "goal",
+            "Label long-read BAM reads with haplotype or genotype assignments using an indexed VCF",
+        )
+        return params
+
     if plan_type == "reconcile_bams":
+        mentioned_references: list[str] = []
+        for match in re.findall(r"\b(GRCh38|mm39|mad1|hg38|mm10|human|mouse)\b", message, re.I):
+            canonical = GENOME_ALIASES.get(match.strip().lower())
+            if canonical and canonical not in mentioned_references:
+                mentioned_references.append(canonical)
+        if len(mentioned_references) == 1:
+            params["reference"] = mentioned_references[0]
+
         m = re.search(r"(?:output\s+(?:prefix|name)|prefix)\s*[=:]?\s*([a-zA-Z0-9._-]+)", message, re.I)
         if m:
             params["output_prefix"] = m.group(1)
@@ -533,10 +1052,12 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
                 if m:
                     params["output_directory"] = m.group(1).rstrip(".,;:!?")
 
-        # Default output to the current project directory so cross-project
-        # reconcile writes into the active project, not the source project.
-        if not params.get("output_directory") and project_dir:
-            params["output_directory"] = project_dir
+        # Default output to a fresh workflow directory in the active project so
+        # reconcile can pass the exact destination downstream instead of asking
+        # the wrapper to allocate one later.
+        output_root = _project_output_root(project_dir, conv_state)
+        if not params.get("output_directory") and output_root:
+            params["output_directory"] = _next_project_workflow_dir(output_root)
 
         m = re.search(r"(?:annotation\s+gtf|gtf\s+(?:path|file)|use\s+gtf)\s*[=:]?\s*(\S+\.(?:gtf|gtf\.gz))", message, re.I)
         if m:
@@ -548,28 +1069,28 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
             match.strip().lower()
             for match in re.findall(r"\b(workflow[\w.-]+)\b", message, re.I)
         }
-        project_workflow_refs: list[tuple[str, str]] = []
+        project_workflow_refs: list[tuple[str | None, str, str]] = []
 
         # Cross-project explicit mentions:
-        # "sampleA in projectX:workflow2"
-        # "projectX:workflow2"
+        # "sampleA in owner:projectX:workflow2"
+        # "owner:projectX:workflow2"
         project_workflow_mentions = re.findall(
-            r"([a-zA-Z0-9_.-]+)\s+in\s+([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)",
+            r"([a-zA-Z0-9_.-]+)\s+in\s+(?:([a-zA-Z0-9_.-]+)\s*:\s*)?([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)",
             message,
             re.I,
         )
         if project_workflow_mentions:
-            selected_names = [sample for sample, _project, _wf in project_workflow_mentions]
-            for _sample, project_name, workflow_name in project_workflow_mentions:
+            selected_names = [sample for sample, _owner, _project, _wf in project_workflow_mentions]
+            for _sample, owner_name, project_name, workflow_name in project_workflow_mentions:
                 selected_workflow_tokens.add(workflow_name.lower())
-                project_workflow_refs.append((project_name.strip(), workflow_name.strip()))
+                project_workflow_refs.append((owner_name.strip() or None, project_name.strip(), workflow_name.strip()))
 
-        for project_name, workflow_name in re.findall(
-            r"\b([a-zA-Z0-9_.-]+)\s*:\s*(workflow[\w.-]+)\b",
-            message,
-            re.I,
-        ):
-            ref = (project_name.strip(), workflow_name.strip())
+        for match in _PROJECT_WORKFLOW_REF_RE.finditer(message):
+            ref = (
+                (match.group("owner") or "").strip() or None,
+                match.group("project").strip(),
+                match.group("workflow").strip(),
+            )
             if ref not in project_workflow_refs:
                 project_workflow_refs.append(ref)
 
@@ -658,11 +1179,18 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
 
         if project_workflow_refs:
             selected_workflow_tokens.clear()
-            for project_name, workflow_name in project_workflow_refs:
+            for owner_name, project_name, workflow_name in project_workflow_refs:
                 selected_workflow_tokens.add(workflow_name.lower())
-                if candidate_base_dirs:
+                mapping_key = (
+                    (owner_name.lower(), project_name.lower(), workflow_name.lower())
+                    if owner_name else (project_name.lower(), workflow_name.lower())
+                )
+                resolved = (project_workflow_paths or {}).get(
+                    mapping_key
+                )
+                if not resolved and candidate_base_dirs:
                     resolved = f"{candidate_base_dirs[0].rstrip('/')}/{project_name}/{workflow_name}"
-                else:
+                elif not resolved:
                     resolved = f"{project_name}/{workflow_name}"
                 if resolved not in workflow_dirs:
                     workflow_dirs.append(resolved)
@@ -727,7 +1255,7 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         if sample_match:
             params["sample_name"] = sample_match.group(1)
 
-        input_match = re.search(r"(?:at|from)\s+(\S+)", message, re.I)
+        input_match = re.search(r"(?:at|from|using)\s+(?:the\s+)?(\S+)", message, re.I)
         if input_match:
             params["input_directory"] = input_match.group(1).rstrip(".,;:!?")
 
@@ -738,3 +1266,56 @@ def _extract_plan_params(message: str, conv_state: "ConversationState", plan_typ
         params["work_dir"] = conv_state.work_dir
 
     return params
+
+
+def resolve_reconcile_project_workflow_paths(message: str, session, user) -> dict[tuple[str, ...], str]:
+    """Resolve authorized cross-project reconcile sources to their owner directories."""
+    references = [
+        (match.group("owner"), match.group("project"), match.group("workflow"))
+        for match in _PROJECT_WORKFLOW_REF_RE.finditer(message)
+    ]
+    resolved_paths: dict[tuple[str, ...], str] = {}
+
+    for owner_ref, project_ref, workflow_ref in references:
+        key = (
+            (owner_ref.lower(), project_ref.lower(), workflow_ref.lower())
+            if owner_ref else (project_ref.lower(), workflow_ref.lower())
+        )
+        if key in resolved_paths:
+            continue
+
+        project_query = select(Project).where(func.lower(Project.slug) == project_ref.lower())
+        if owner_ref:
+            project_query = project_query.join(User, Project.owner_id == User.id).where(
+                func.lower(User.username) == owner_ref.lower()
+            )
+        projects = list(session.execute(project_query).scalars())
+        if not projects:
+            project_label = f"{owner_ref}:{project_ref}" if owner_ref else project_ref
+            raise HTTPException(status_code=404, detail=f"Project '{project_label}' was not found.")
+
+        accessible_projects = []
+        for project in projects:
+            if getattr(user, "role", "") == "admin" or project.owner_id == user.id or project.is_public:
+                accessible_projects.append(project)
+                continue
+            access = session.execute(
+                select(ProjectAccess).where(
+                    ProjectAccess.project_id == project.id,
+                    ProjectAccess.user_id == user.id,
+                )
+            ).scalar_one_or_none()
+            if access is not None:
+                accessible_projects.append(project)
+
+        if not accessible_projects:
+            raise HTTPException(status_code=403, detail=f"You do not have access to project '{project_ref}'.")
+        if len(accessible_projects) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Project reference '{project_ref}' is ambiguous among accessible projects.",
+            )
+
+        resolved_paths[key] = str(_resolve_project_dir(session, user, accessible_projects[0].id) / workflow_ref)
+
+    return resolved_paths

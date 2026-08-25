@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fastapi.concurrency import run_in_threadpool
+
 import pandas as pd
 
 from analyzer import enrichment_engine as analyzer_enrichment_engine
@@ -657,7 +659,82 @@ def _format_file_list(names: list[str], *, limit: int = 3) -> str:
     return f"{summary}, and {labels[-1]}"
 
 
-def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
+def _reconcile_report_priority(path: str) -> tuple[int, str]:
+    lower_path = path.lower()
+    if lower_path.endswith("reconciled_summary.txt"):
+        return (0, lower_path)
+    if lower_path.endswith("_summary.txt"):
+        return (1, lower_path)
+    if lower_path.endswith((".md", ".markdown")):
+        return (2, lower_path)
+    if lower_path.endswith((".html", ".htm")):
+        return (3, lower_path)
+    if lower_path.endswith((".txt", ".log")):
+        return (4, lower_path)
+    return (10, lower_path)
+
+
+def _report_code_fence(render_mode: str, source_extension: str) -> str:
+    if render_mode == "html_raw":
+        return "html"
+    if render_mode == "markdown" or source_extension in {".md", ".markdown"}:
+        return "markdown"
+    return "text"
+
+
+async def _read_reconcile_report_snippets(work_dir: str, report_files: list[str]) -> list[dict[str, Any]]:
+    if not work_dir or not report_files:
+        return []
+
+    snippets: list[dict[str, Any]] = []
+    for report_path in sorted(report_files, key=_reconcile_report_priority)[:2]:
+        try:
+            result = await _call_mcp_tool(
+                "analyzer",
+                "read_file_content",
+                {
+                    "work_dir": work_dir,
+                    "file_path": report_path,
+                    "preview_lines": 120,
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to read reconcile summary report",
+                work_dir=work_dir,
+                file_path=report_path,
+                error=str(exc),
+            )
+            continue
+
+        if not isinstance(result, dict) or result.get("success") is False:
+            logger.warning(
+                "Analyzer could not read reconcile summary report",
+                work_dir=work_dir,
+                file_path=report_path,
+                result=result,
+            )
+            continue
+
+        content = str(result.get("content") or "").strip()
+        if not content:
+            continue
+
+        snippets.append(
+            {
+                "file_path": report_path,
+                "content": content,
+                "is_truncated": bool(result.get("is_truncated")),
+                "line_count": result.get("line_count"),
+                "render_mode": str(result.get("render_mode") or "plain"),
+                "source_extension": str(result.get("source_extension") or Path(report_path).suffix.lower()),
+            }
+        )
+
+    return snippets
+
+
+async def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
     work_dir, located_files = _extract_latest_located_files(
         plan_payload,
         step,
@@ -677,7 +754,11 @@ def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
     mapping_files = [path for path in output_files if path.lower().endswith(".mapping.tsv")]
     bam_files = [path for path in output_files if path.lower().endswith(".bam")]
     gtf_files = [path for path in output_files if path.lower().endswith(".gtf")]
-    report_files = [path for path in output_files if path.lower().endswith("_summary.txt")]
+    report_files = [
+        path
+        for path in output_files
+        if path.lower().endswith(("_summary.txt", ".md", ".markdown", ".html", ".htm", ".txt", ".log"))
+    ]
 
     runtime_work_dir = (
         _resolve_runtime_work_directory(plan_payload, step)
@@ -685,6 +766,8 @@ def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
     )
     if runtime_work_dir and (not work_dir or not output_files):
         work_dir = runtime_work_dir
+
+    report_snippets = await _read_reconcile_report_snippets(work_dir or "", report_files)
 
     observations: list[str] = []
     workflow_name = Path(work_dir).name if work_dir else ""
@@ -713,6 +796,16 @@ def _build_reconcile_interpretation(plan_payload: dict, step: dict) -> str:
         observations.append(f"Merged annotation written to {Path(gtf_files[0]).name}.")
     if report_files:
         observations.append(f"Summary report: {Path(report_files[0]).name}.")
+    for report in report_snippets:
+        fence = _report_code_fence(report["render_mode"], report["source_extension"])
+        report_note = f"Report excerpt from {Path(report['file_path']).name}:\n```{fence}\n{report['content']}\n```"
+        if report["is_truncated"]:
+            total_lines = report.get("line_count")
+            if total_lines:
+                report_note += f"\n(Preview truncated from {total_lines} lines.)"
+            else:
+                report_note += "\n(Preview truncated.)"
+        observations.append(report_note)
 
     if not observations:
         tables = _extract_all_dependency_tables(plan_payload, step)
@@ -1096,7 +1189,11 @@ def _build_inline_image_entry(path_value: str, caption: str) -> dict[str, Any]:
     try:
         image_path = Path(path_value)
         if image_path.exists() and image_path.is_file():
-            entry["data_b64"] = base64.b64encode(image_path.read_bytes()).decode("ascii")
+            # Use threadpool to avoid blocking the event loop on disk I/O.
+            data = asyncio.get_event_loop().run_until_complete(
+                run_in_threadpool(image_path.read_bytes)
+            )
+            entry["data_b64"] = base64.b64encode(data).decode("ascii")
     except Exception:
         pass
     return entry
@@ -1527,7 +1624,7 @@ def _build_de_plot_step_payload(plan_payload: dict, step: dict, result_payload: 
     return payload
 
 
-def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
+async def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
     de_outputs = _extract_edgepython_dependency_outputs(plan_payload, step)
     if any(de_outputs.values()):
         interpretation = _build_de_interpretation(plan_payload, step)
@@ -1541,7 +1638,7 @@ def _build_qc_interpretation(plan_payload: dict, step: dict) -> str:
         return "\n".join(line for line in lines if line)
 
     if plan_payload.get("plan_type") == "reconcile_bams":
-        return _build_reconcile_interpretation(plan_payload, step)
+        return await _build_reconcile_interpretation(plan_payload, step)
 
     tables = _extract_all_dependency_tables(plan_payload, step)
     if not tables:
@@ -1751,7 +1848,7 @@ async def execute_step(
     # Resolve tool calls: use step-specific calls, or fall back to defaults
     explicit_tool_calls = bool(step.get("tool_calls"))
     tool_calls = step.get("tool_calls") or []
-    if not tool_calls:
+    if not tool_calls and not step.get("skip_default_tool_calls"):
         defaults = STEP_TOOL_DEFAULTS.get(kind)
         if defaults:
             tool_calls = defaults
@@ -1887,7 +1984,7 @@ async def execute_step(
         elif plan_payload.get("plan_type") == "run_de_pipeline" and kind == "INTERPRET_RESULTS":
             summary_payload = await _build_de_interpretation_payload(plan_payload, step)
         else:
-            summary_payload = {"markdown": _build_qc_interpretation(plan_payload, step)}
+            summary_payload = {"markdown": await _build_qc_interpretation(plan_payload, step)}
         step["status"] = "COMPLETED"
         step["result"] = summary_payload
         step["completed_at"] = datetime.datetime.utcnow().isoformat() + "Z"
@@ -2014,6 +2111,10 @@ async def execute_plan(
             _ensure_de_workflow_context(plan_payload, project_dir_path)
         except Exception:
             logger.debug("Failed to initialize DE workflow directory", exc_info=True)
+
+    if _normalize_legacy_reconcile_auto_approvals(plan_payload):
+        _persist_step_update(session, workflow_block, plan_payload)
+        plan_payload = get_block_payload(workflow_block)
 
     try:
         validate_plan(
@@ -2344,7 +2445,7 @@ async def _execute_parallel_safe_step(step: dict, *, plan_payload: dict | None =
     if not isinstance(tool_calls, list):
         return StepResult(success=False, error="Invalid tool_calls for step")
 
-    if not tool_calls:
+    if not tool_calls and not step.get("skip_default_tool_calls"):
         defaults = STEP_TOOL_DEFAULTS.get(kind)
         if defaults:
             tool_calls = defaults
@@ -2398,3 +2499,26 @@ def _persist_step_update(session, workflow_block: "ProjectBlock", payload: dict)
     session.commit()
     session.refresh(workflow_block)
     sync_project_tasks(session, workflow_block.project_id)
+
+
+def _normalize_legacy_reconcile_auto_approvals(payload: dict) -> bool:
+    """Repair older split-reconcile plans that auto-approved later REQUEST_APPROVAL steps incorrectly."""
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("plan_type") != "reconcile_bams":
+        return False
+
+    changed = False
+    for step in payload.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        if step.get("kind") != "REQUEST_APPROVAL":
+            continue
+        if not step.get("auto_approve_from_shared_reconcile_authorization"):
+            continue
+        if step.get("status") != "COMPLETED":
+            continue
+        if step.get("requires_approval") is not True:
+            step["requires_approval"] = True
+            changed = True
+    return changed

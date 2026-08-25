@@ -71,6 +71,66 @@ def seed_user(test_session_factory):
     return user
 
 
+def _seed_user_with_session(
+    test_session_factory,
+    *,
+    user_id: str,
+    email: str,
+    username: str,
+    session_id: str,
+    role: str = "user",
+    is_active: bool = True,
+):
+    session = test_session_factory()
+    user = User(
+        id=user_id,
+        email=email,
+        role=role,
+        username=username,
+        is_active=is_active,
+    )
+    session.add(user)
+    session.add(
+        SessionModel(
+            id=session_id,
+            user_id=user_id,
+            is_valid=True,
+            expires_at=datetime.datetime(2099, 1, 1),
+        )
+    )
+    session.commit()
+    session.close()
+    return user
+
+
+def _grant_project_access(
+    test_session_factory,
+    *,
+    user_id: str,
+    project_id: str,
+    project_name: str,
+    role: str,
+    invited_by: str | None = None,
+):
+    session = test_session_factory()
+    now = datetime.datetime.utcnow()
+    session.add(
+        ProjectAccess(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
+            role=role,
+            invited_by=invited_by,
+            created_at=now,
+            updated_at=now,
+            last_accessed=now,
+        )
+    )
+    session.commit()
+    session.close()
+
+
 @pytest.fixture()
 def client(test_session_factory, seed_user, tmp_path, monkeypatch):
     """
@@ -98,6 +158,33 @@ class TestHealthCheck:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
+
+    def test_llm_models(self, client):
+        resp = client.get("/config/llm-models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == [
+            {"key": "default", "model": "gemma4:31b"},
+            {"key": "fast", "model": "devstral-small-2:latest"},
+            {"key": "smart", "model": "devstral-2:latest"},
+            {"key": "coder", "model": "qwen3-coder:latest"},
+            {"key": "heavy", "model": "gpt-oss:120b"},
+        ]
+
+    def test_reference_genomes(self, client):
+        resp = client.get("/config/reference-genomes")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == len(data["genomes"])
+        assert {"GRCh38", "mm39", "chm13", "mad1"}.issubset(set(data["genomes"]))
+        assert data["default"] == "GRCh38"
+        items_by_id = {item["id"]: item for item in data["items"]}
+        assert items_by_id["GRCh38"]["aliases"] == ["hg38", "human"]
+        assert items_by_id["mm39"]["aliases"] == ["mm10", "mouse"]
+        assert items_by_id["chm13"]["assets"]["fasta"] is True
+        assert items_by_id["chm13"]["assets"]["gtf"] is True
+        assert items_by_id["mad1"]["assets"]["fasta"] is True
+        assert items_by_id["mad1"]["assets"]["kallisto_index"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +236,499 @@ class TestListProjects:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["projects"]) >= 2
+
+
+class TestProjectCollaborators:
+    def _create_project(self, client, name: str = "Shared Project"):
+        resp = client.post("/projects", json={"name": name})
+        assert resp.status_code == 200
+        return resp.json()
+
+    def _set_session(self, client, session_id: str):
+        client.cookies.set("session", session_id)
+
+    def test_owner_can_add_collaborator_by_email(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+
+        resp = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "viewer@example.com", "role": "viewer"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "created"
+        assert resp.json()["email"] == "viewer@example.com"
+        assert resp.json()["role"] == "viewer"
+
+    def test_admin_can_add_collaborator_to_any_project(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="admin-uid",
+            email="admin@example.com",
+            username="adminuser",
+            session_id="admin-session",
+            role="admin",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+
+        self._set_session(client, "admin-session")
+        resp = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "editor@example.com", "role": "editor"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "created"
+        assert resp.json()["role"] == "editor"
+
+    def test_editor_viewer_and_unrelated_users_cannot_add_collaborators(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="other-uid",
+            email="other@example.com",
+            username="otheruser",
+            session_id="other-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="target-uid",
+            email="target@example.com",
+            username="targetuser",
+            session_id="target-session",
+        )
+
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        for session_id in ("editor-session", "viewer-session", "other-session"):
+            self._set_session(client, session_id)
+            resp = client.post(
+                f"/projects/{project['id']}/collaborators",
+                json={"email": "target@example.com", "role": "viewer"},
+            )
+            assert resp.status_code == 403
+
+    def test_add_collaborator_rejects_unknown_inactive_duplicate_and_owner_role(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="inactive-uid",
+            email="inactive@example.com",
+            username="inactiveuser",
+            session_id="inactive-session",
+            is_active=False,
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        unknown = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "missing@example.com", "role": "viewer"},
+        )
+        assert unknown.status_code == 404
+
+        inactive = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "inactive@example.com", "role": "viewer"},
+        )
+        assert inactive.status_code == 409
+
+        duplicate = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "viewer@example.com", "role": "editor"},
+        )
+        assert duplicate.status_code == 409
+
+        owner_role = client.post(
+            f"/projects/{project['id']}/collaborators",
+            json={"email": "viewer@example.com", "role": "owner"},
+        )
+        assert owner_role.status_code == 422
+
+    def test_owner_and_admin_get_full_collaborator_list(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="admin-uid",
+            email="admin@example.com",
+            username="adminuser",
+            session_id="admin-session",
+            role="admin",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        owner_resp = client.get(f"/projects/{project['id']}/collaborators")
+        assert owner_resp.status_code == 200
+        owner_emails = {item["email"] for item in owner_resp.json()["collaborators"]}
+        assert owner_emails == {"test@example.com", "editor@example.com", "viewer@example.com"}
+
+        self._set_session(client, "admin-session")
+        admin_resp = client.get(f"/projects/{project['id']}/collaborators")
+        assert admin_resp.status_code == 200
+        admin_emails = {item["email"] for item in admin_resp.json()["collaborators"]}
+        assert admin_emails == owner_emails
+
+    def test_non_owner_collaborator_sees_full_roster(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        self._set_session(client, "editor-session")
+        resp = client.get(f"/projects/{project['id']}/collaborators")
+        assert resp.status_code == 200
+        emails = {item["email"] for item in resp.json()["collaborators"]}
+        assert emails == {"test@example.com", "editor@example.com", "viewer@example.com"}
+
+    def test_owner_can_update_collaborator_role_and_others_cannot(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="other-uid",
+            email="other@example.com",
+            username="otheruser",
+            session_id="other-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        owner_update = client.patch(
+            f"/projects/{project['id']}/collaborators/viewer-uid",
+            json={"role": "editor"},
+        )
+        assert owner_update.status_code == 200
+        assert owner_update.json()["role"] == "editor"
+
+        for session_id in ("editor-session", "viewer-session", "other-session"):
+            self._set_session(client, session_id)
+            resp = client.patch(
+                f"/projects/{project['id']}/collaborators/editor-uid",
+                json={"role": "viewer"},
+            )
+            assert resp.status_code == 403
+
+    def test_owner_and_admin_can_remove_collaborators_but_not_owner(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="admin-uid",
+            email="admin@example.com",
+            username="adminuser",
+            session_id="admin-session",
+            role="admin",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        owner_delete = client.delete(f"/projects/{project['id']}/collaborators/viewer-uid")
+        assert owner_delete.status_code == 200
+        assert owner_delete.json()["status"] == "removed"
+
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+        self._set_session(client, "admin-session")
+        admin_delete = client.delete(f"/projects/{project['id']}/collaborators/viewer-uid")
+        assert admin_delete.status_code == 200
+
+        owner_delete = client.delete(f"/projects/{project['id']}/collaborators/test-uid")
+        assert owner_delete.status_code == 409
+
+    def test_non_owner_cannot_remove_other_collaborators(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        self._set_session(client, "viewer-session")
+        resp = client.delete(f"/projects/{project['id']}/collaborators/editor-uid")
+        assert resp.status_code == 403
+
+    def test_owner_can_transfer_ownership_to_existing_collaborator_and_move_project_dir(self, client, test_session_factory, tmp_path):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+
+        old_dir = tmp_path / "users" / "testuser" / project["slug"] / "data"
+        old_dir.mkdir(parents=True, exist_ok=True)
+        (old_dir / "reads.fastq").write_text("ACGT")
+
+        transfer_resp = client.post(
+            f"/projects/{project['id']}/transfer-ownership",
+            json={"user_id": "editor-uid"},
+        )
+
+        assert transfer_resp.status_code == 200
+        assert transfer_resp.json()["status"] == "transferred"
+        assert transfer_resp.json()["role"] == "owner"
+
+        owner_roster = client.get(f"/projects/{project['id']}/collaborators")
+        assert owner_roster.status_code == 200
+        owner_roles = {item["email"]: item["role"] for item in owner_roster.json()["collaborators"]}
+        assert owner_roles["editor@example.com"] == "owner"
+        assert owner_roles["test@example.com"] == "editor"
+
+        self._set_session(client, "editor-session")
+        new_owner_projects = client.get("/projects")
+        assert new_owner_projects.status_code == 200
+        new_owner_project = next(item for item in new_owner_projects.json()["projects"] if item["id"] == project["id"])
+        assert new_owner_project["role"] == "owner"
+
+        new_dir = tmp_path / "users" / "editoruser" / project["slug"] / "data" / "reads.fastq"
+        assert new_dir.read_text() == "ACGT"
+        assert not (tmp_path / "users" / "testuser" / project["slug"]).exists()
+
+    def test_non_owner_cannot_transfer_ownership(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editoruser",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="editor",
+            invited_by="test-uid",
+        )
+
+        self._set_session(client, "editor-session")
+        transfer_resp = client.post(
+            f"/projects/{project['id']}/transfer-ownership",
+            json={"user_id": "test-uid"},
+        )
+        assert transfer_resp.status_code == 403
+
+    def test_collaborator_can_leave_and_owner_cannot(self, client, test_session_factory):
+        project = self._create_project(client)
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="vieweruser",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id=project["id"],
+            project_name=project["name"],
+            role="viewer",
+            invited_by="test-uid",
+        )
+
+        self._set_session(client, "viewer-session")
+        leave_resp = client.post(f"/projects/{project['id']}/leave")
+        assert leave_resp.status_code == 200
+        assert leave_resp.json()["status"] == "left"
+
+        projects_resp = client.get("/projects")
+        assert projects_resp.status_code == 200
+        assert all(item["id"] != project["id"] for item in projects_resp.json()["projects"])
+
+        self._set_session(client, "test-session-token")
+        owner_leave = client.post(f"/projects/{project['id']}/leave")
+        assert owner_leave.status_code == 409
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +870,31 @@ class TestBlockEndpoints:
         data = get_resp.json()
         assert "blocks" in data
         assert len(data["blocks"]) >= 1
+
+    def test_get_blocks_can_page_backwards(self, client):
+        project_id = self._create_project(client)
+        for message in ("first", "second", "third"):
+            response = client.post("/block", json={
+                "project_id": project_id,
+                "type": "USER_MESSAGE",
+                "payload": {"markdown": message},
+                "status": "DONE",
+            })
+            assert response.status_code == 200
+
+        newest_page = client.get(f"/blocks?project_id={project_id}&limit=2")
+        assert newest_page.status_code == 200
+        newest_data = newest_page.json()
+        assert len(newest_data["blocks"]) == 2
+        assert newest_data["has_older"] is True
+
+        oldest_page = client.get(
+            f"/blocks?project_id={project_id}&before_seq={newest_data['oldest_seq']}&limit=2"
+        )
+        assert oldest_page.status_code == 200
+        oldest_data = oldest_page.json()
+        assert len(oldest_data["blocks"]) == 1
+        assert oldest_data["has_older"] is False
 
     def test_update_block(self, client):
         project_id = self._create_project(client)

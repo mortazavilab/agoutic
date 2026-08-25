@@ -68,7 +68,7 @@ Use these step kind strings exactly as written.
 
 ## Rules
 
-1. Keep plans short — 3 to 8 steps maximum
+1. Keep plans short — 3 to 10 steps maximum
 2. Mark downloads, pipeline submissions, and DE analysis as requires_approval: true
 3. Read-only steps (locate, parse, summarize, plot, interpret) do NOT require approval
 4. Use depends_on to express ordering — a step runs only after its dependencies complete

@@ -1,8 +1,13 @@
 import os
 
 import streamlit as st
+from appui_config import LOCAL_DEFAULT_MAX_TASK_MEMORY_GB, SLURM_DEFAULT_CPU_MEMORY_GB
+from appui_services import load_reference_genome_catalog
 from components.cards import info_callout, metadata_row, section_header, status_chip
 from components.forms import grouped_section, review_panel
+
+
+_LEGACY_SLURM_DEFAULT_CPU_MEMORY_GB = 16
 
 
 _DEFAULT_CLUSTER_MODKIT_BINARY_DIR = "/share/crsp/lab/seyedam/share/igvf_packages/modkit_v0.5.0/dist_modkit_v0.5.0_5120ef7_tch"
@@ -62,6 +67,426 @@ def _build_cluster_modkit_profile(modkit_dir: str) -> str:
 
 _DEFAULT_CLUSTER_MODKIT_PROFILE = _build_cluster_modkit_profile(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
 _DEFAULT_CLUSTER_MODKIT_BIND_PATHS = _default_cluster_modkit_bind_paths(_DEFAULT_CLUSTER_MODKIT_BINARY_DIR)
+_WF_PORE_C_DEFAULT_CUTTER = "NlaIII"
+_WF_PORE_C_OUTPUT_FLAG_ORDER = ("pairs", "mcool", "hi_c", "bed", "chromunity", "coverage", "paired_end")
+_WF_PORE_C_OUTPUT_FLAG_LABELS = {
+    "pairs": "Pairs",
+    "mcool": "mcool",
+    "hi_c": "Hi-C",
+    "bed": "BED",
+    "chromunity": "Chromunity",
+    "coverage": "Coverage",
+    "paired_end": "Paired-End",
+}
+
+
+def _default_dogme_accuracy(mode: str | None) -> str:
+    if str(mode or "").strip().upper() == "RNA":
+        return "sup"
+    return "hac"
+
+
+def _wf_pore_c_ui_enabled() -> bool:
+    return str(os.getenv("WF_PORE_C_ENABLED", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _approval_workflow_key(params: dict | None) -> str:
+    raw_value = ""
+    if isinstance(params, dict):
+        raw_value = params.get("workflow_key")
+    normalized = str(raw_value or "dogme").strip().lower() or "dogme"
+    if normalized == "wf_pore_c" and _wf_pore_c_ui_enabled():
+        return "wf_pore_c"
+    return "dogme"
+
+
+def _wf_pore_c_output_flag_values(raw_flags) -> dict[str, bool]:
+    flags = {
+        "pairs": bool((raw_flags or {}).get("pairs", True)),
+        "mcool": bool((raw_flags or {}).get("mcool", True)),
+        "hi_c": bool((raw_flags or {}).get("hi_c", False)),
+        "bed": bool((raw_flags or {}).get("bed", False)),
+        "chromunity": bool((raw_flags or {}).get("chromunity", False)),
+        "coverage": bool((raw_flags or {}).get("coverage", False)),
+        "paired_end": bool((raw_flags or {}).get("paired_end", False)),
+    }
+    if flags["bed"]:
+        flags["paired_end"] = True
+    return flags
+
+
+def _approval_project_data_inventory(api_url: str, request_fn, project_id: str | None) -> dict[str, list[str]]:
+    inventory = {"fastq_paths": [], "pod5_paths": []}
+    normalized_project_id = str(project_id or "").strip()
+    if not normalized_project_id:
+        return inventory
+
+    try:
+        response = request_fn("GET", f"{api_url}/projects/{normalized_project_id}/files", timeout=5)
+    except Exception:
+        return inventory
+
+    if getattr(response, "status_code", None) != 200:
+        return inventory
+
+    try:
+        payload = response.json()
+    except Exception:
+        return inventory
+
+    for item in payload.get("files") or []:
+        if not isinstance(item, dict):
+            continue
+        rel_path = str(item.get("path") or "").strip()
+        if not rel_path.startswith("data/"):
+            continue
+        filename = str(item.get("name") or os.path.basename(rel_path)).strip()
+        lower_name = filename.lower()
+        if lower_name.endswith((".fastq", ".fastq.gz", ".fq", ".fq.gz")):
+            if rel_path not in inventory["fastq_paths"]:
+                inventory["fastq_paths"].append(rel_path)
+        if lower_name.endswith((".pod5", ".fast5")):
+            if rel_path not in inventory["pod5_paths"]:
+                inventory["pod5_paths"].append(rel_path)
+    return inventory
+
+
+def _approval_fastq_sample_name(candidate_path: str | None) -> str:
+    filename = os.path.basename(str(candidate_path or "").strip())
+    lower_name = filename.lower()
+    for suffix in (".fastq.gz", ".fq.gz", ".fastq", ".fq"):
+        if lower_name.endswith(suffix):
+            return filename[: -len(suffix)]
+    return ""
+
+
+def _approval_has_generic_sample_name(sample_name: str | None) -> bool:
+    cleaned = str(sample_name or "").strip().lower()
+    if not cleaned:
+        return True
+    return cleaned == "sample" or "_sample_" in cleaned
+
+
+def _approval_dogme_fastq_state(
+    extracted_params: dict | None,
+    *,
+    api_url: str,
+    request_fn,
+    project_id: str | None,
+) -> dict[str, object]:
+    params = extracted_params or {}
+    clarification = params.get("approval_clarification") if isinstance(params.get("approval_clarification"), dict) else None
+    prefill = params.get("approval_prefill") if isinstance(params.get("approval_prefill"), dict) else {}
+    inventory = _approval_project_data_inventory(api_url, request_fn, project_id)
+
+    has_fastq = bool(inventory["fastq_paths"])
+    has_pod5 = bool(inventory["pod5_paths"])
+    explicit_input_request = bool(params.get("input_type_explicit"))
+
+    default_input_type = str(params.get("input_type") or "pod5").strip().lower() or "pod5"
+    default_mode = str(params.get("mode") or "DNA").strip().upper() or "DNA"
+    default_entry_point = str(params.get("entry_point") or "(auto)").strip() or "(auto)"
+
+    if clarification and clarification.get("blocking"):
+        default_input_type = "fastq"
+        default_mode = "CDNA"
+        default_entry_point = "fastqCDNA"
+    elif prefill:
+        default_input_type = str(prefill.get("input_type") or default_input_type).strip().lower() or default_input_type
+        default_mode = str(prefill.get("mode") or default_mode).strip().upper() or default_mode
+        default_entry_point = str(prefill.get("entry_point") or default_entry_point).strip() or default_entry_point
+    else:
+        # Approval default policy: symlinked files in project data/ count the same as regular files.
+        # If both pod5 and FASTQ are present and the user did not explicitly request one,
+        # keep pod5 as the default because it remains the primary Dogme path.
+        if not explicit_input_request and has_fastq and not has_pod5:
+            default_input_type = "fastq"
+            default_mode = "CDNA"
+            default_entry_point = "fastqCDNA"
+        elif not explicit_input_request and has_fastq and has_pod5:
+            default_input_type = "pod5"
+            if default_entry_point == "fastqCDNA":
+                default_entry_point = "(auto)"
+
+    default_sample_name = ""
+    if default_input_type == "fastq" and len(inventory["fastq_paths"]) == 1:
+        current_sample_name = str(params.get("sample_name") or "").strip()
+        if _approval_has_generic_sample_name(current_sample_name):
+            default_sample_name = _approval_fastq_sample_name(inventory["fastq_paths"][0])
+
+    return {
+        "clarification": clarification,
+        "has_fastq": has_fastq,
+        "has_pod5": has_pod5,
+        "fastq_paths": inventory["fastq_paths"],
+        "default_input_type": default_input_type,
+        "default_mode": default_mode,
+        "default_entry_point": default_entry_point,
+        "default_sample_name": default_sample_name,
+    }
+
+
+def _approval_gate_field_visibility(extracted_params: dict | None, *, gate_action: str) -> dict[str, bool | str]:
+    workflow_key = _approval_workflow_key(extracted_params)
+    is_remote_stage = str(gate_action or "").strip().lower() == "remote_stage"
+    is_wf_pore_c = workflow_key == "wf_pore_c"
+    return {
+        "workflow_key": workflow_key,
+        "show_mode": not is_wf_pore_c,
+        "show_entry_point": not is_wf_pore_c and not is_remote_stage,
+        "show_modifications": not is_wf_pore_c and not is_remote_stage,
+        "show_dogme_advanced": not is_wf_pore_c and not is_remote_stage,
+        "show_reference_fasta": is_wf_pore_c,
+        "show_vcf": is_wf_pore_c,
+        "show_sample_sheet": is_wf_pore_c,
+        "show_cutter": is_wf_pore_c,
+        "show_output_flags": is_wf_pore_c,
+    }
+
+
+def _workflow_input_path_label(workflow_key: str) -> str:
+    if workflow_key == "wf_pore_c":
+        return "Input BAM / FASTQ"
+    return "Input Directory"
+
+
+def _path_looks_like_file(path_value: str | None) -> bool:
+    cleaned = str(path_value or "").strip()
+    if not cleaned or cleaned.endswith("/"):
+        return False
+    if cleaned.lower().startswith("remote:"):
+        cleaned = cleaned[7:].strip()
+    lower = cleaned.lower()
+    return lower.endswith(
+        (
+            ".bam",
+            ".fastq",
+            ".fq",
+            ".fast5",
+            ".pod5",
+            ".bed",
+            ".vcf",
+            ".vcf.gz",
+            ".fa",
+            ".fasta",
+            ".fa.gz",
+            ".fasta.gz",
+            ".txt",
+            ".csv",
+            ".tsv",
+        )
+    )
+
+
+def _approval_input_path_label(extracted_params: dict | None, *, gate_action: str) -> str:
+    workflow_key = _approval_workflow_key(extracted_params)
+    if workflow_key == "wf_pore_c":
+        return _workflow_input_path_label(workflow_key)
+
+    params = extracted_params or {}
+    is_file = _path_looks_like_file(params.get("input_directory"))
+    normalized_gate_action = str(gate_action or "").strip().lower()
+
+    if params.get("staged_remote_input_path") or params.get("remote_staged_sample"):
+        return "Staged Sample Source File" if is_file else "Staged Sample Source Directory"
+    if normalized_gate_action == "remote_stage":
+        return "Local Source File" if is_file else "Local Source Directory"
+    return "Input File" if is_file else "Input Directory"
+
+
+def _approval_input_path_help(extracted_params: dict | None, *, gate_action: str) -> str:
+    workflow_key = _approval_workflow_key(extracted_params)
+    if workflow_key == "wf_pore_c":
+        return "Path to the BAM or FASTQ input for wf-pore-c."
+
+    params = extracted_params or {}
+    is_file = _path_looks_like_file(params.get("input_directory"))
+    normalized_gate_action = str(gate_action or "").strip().lower()
+
+    if params.get("staged_remote_input_path") or params.get("remote_staged_sample"):
+        return "Original source path recorded for the reused staged sample. The staged remote cache path is shown separately below."
+    if normalized_gate_action == "remote_stage":
+        return "Local source path that will be copied into the remote staging cache."
+    if is_file:
+        return "Full path to the input file."
+    return "Full path to the input directory."
+
+
+def _approval_path_summary_rows(extracted_params: dict | None, *, gate_action: str) -> dict[str, str]:
+    params = extracted_params or {}
+    rows: dict[str, str] = {}
+
+    remote_input_path = str(params.get("remote_input_path") or "").strip()
+    staged_remote_input_path = str(params.get("staged_remote_input_path") or "").strip()
+    input_directory = params.get("input_directory")
+
+    if remote_input_path:
+        rows["Remote Input File" if _path_looks_like_file(remote_input_path) else "Remote Input Path"] = remote_input_path
+    elif input_directory not in (None, "", [], {}):
+        rows[_approval_input_path_label(params, gate_action=gate_action)] = str(input_directory)
+
+    if staged_remote_input_path:
+        rows["Staged Remote File" if _path_looks_like_file(staged_remote_input_path) else "Staged Remote Path"] = staged_remote_input_path
+
+    return rows
+
+
+def _approval_haplotype_sample_label(extracted_params: dict | None) -> str:
+    params = extracted_params or {}
+    assignment_mode = str(params.get("assignment_mode") or "").strip().lower()
+    if assignment_mode == "founder_panel":
+        return "Selected Founders"
+    return "Selected VCF Samples"
+
+
+def _approval_haplotype_summary_rows(extracted_params: dict | None) -> dict[str, str]:
+    params = extracted_params or {}
+    rows: dict[str, str] = {}
+
+    mode = str(params.get("mode") or "").strip()
+    if mode:
+        rows["Mode"] = mode
+
+    reference = params.get("reference_genome")
+    if isinstance(reference, list):
+        reference_text = ", ".join(str(item).strip() for item in reference if str(item).strip())
+    else:
+        reference_text = str(reference or "").strip()
+    if reference_text:
+        rows["Reference Genome"] = reference_text
+
+    assignment_mode = str(params.get("assignment_mode") or "").strip()
+    if assignment_mode:
+        rows["Assignment Mode"] = assignment_mode.replace("_", " ").title()
+
+    vcf_path = str(params.get("vcf_path") or "").strip()
+    if vcf_path:
+        rows["Resolved Founder VCF" if params.get("vcf_defaulted") else "VCF Path"] = vcf_path
+
+    selected_samples = params.get("vcf_selected_samples") if isinstance(params.get("vcf_selected_samples"), list) else []
+    if selected_samples:
+        rows[_approval_haplotype_sample_label(params)] = ", ".join(str(item) for item in selected_samples if str(item).strip())
+
+    output_directory = str(params.get("output_directory") or "").strip()
+    if output_directory:
+        rows["Output Directory"] = output_directory
+
+    bam_inputs = params.get("bam_inputs") if isinstance(params.get("bam_inputs"), list) else []
+    bam_names: list[str] = []
+    for item in bam_inputs:
+        if not isinstance(item, dict):
+            continue
+        bam_name = str(item.get("name") or "").strip()
+        if not bam_name:
+            bam_name = os.path.basename(str(item.get("path") or "").strip())
+        if bam_name:
+            bam_names.append(bam_name)
+    if bam_names:
+        rows["Input BAMs"] = ", ".join(bam_names)
+
+    return rows
+
+
+def _build_haplotype_approval_params(
+    extracted_params: dict | None,
+    *,
+    vcf_path: str,
+    output_directory: str,
+    selected_samples_text: str,
+    min_informative_sites: int,
+    min_mapq: int,
+) -> dict:
+    edited_params = dict(extracted_params or {})
+
+    resolved_vcf_path = str(vcf_path or "").strip() or str(edited_params.get("vcf_path") or "").strip()
+    if resolved_vcf_path:
+        edited_params["vcf_path"] = resolved_vcf_path
+
+    resolved_output_directory = str(output_directory or "").strip() or str(edited_params.get("output_directory") or "").strip()
+    if resolved_output_directory:
+        edited_params["output_directory"] = resolved_output_directory
+
+    parsed_samples = [item.strip() for item in str(selected_samples_text or "").split(",") if item.strip()]
+    if parsed_samples:
+        edited_params["vcf_selected_samples"] = parsed_samples
+        if str(edited_params.get("assignment_mode") or "").strip().lower() == "founder_panel":
+            edited_params["assignment_labels"] = parsed_samples
+        sample_sources = edited_params.get("vcf_selected_sample_sources")
+        if isinstance(sample_sources, dict):
+            edited_params["vcf_selected_sample_sources"] = {
+                sample: sample_sources.get(sample, sample)
+                for sample in parsed_samples
+            }
+
+    edited_params["min_informative_sites"] = int(min_informative_sites)
+    edited_params["min_mapq"] = int(min_mapq)
+    return edited_params
+
+
+def _approval_gate_reference_genome_catalog(api_url: str, request_fn, raw_value=None) -> dict:
+    fallback: list[str] = []
+    if isinstance(raw_value, str):
+        fallback.append(raw_value)
+    elif isinstance(raw_value, list):
+        fallback.extend(str(item or "").strip() for item in raw_value)
+    fallback.extend(["GRCh38", "mm39", "mad1"])
+    normalized_fallback: list[str] = []
+    for genome in fallback:
+        cleaned = str(genome or "").strip()
+        if cleaned and cleaned not in normalized_fallback:
+            normalized_fallback.append(cleaned)
+    return load_reference_genome_catalog(
+        api_url=api_url,
+        request_fn=request_fn,
+        fallback=normalized_fallback,
+    )
+
+
+def _approval_gate_genome_options(genome_catalog: dict) -> list[str]:
+    genomes = genome_catalog.get("genomes") if isinstance(genome_catalog, dict) else None
+    normalized_genomes: list[str] = []
+    if isinstance(genomes, list):
+        for genome in genomes:
+            cleaned = str(genome or "").strip()
+            if cleaned and cleaned not in normalized_genomes:
+                normalized_genomes.append(cleaned)
+    return normalized_genomes
+
+
+def _approval_gate_genome_labels(genome_catalog: dict) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    items = genome_catalog.get("items") if isinstance(genome_catalog, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            genome_id = str(item.get("id") or "").strip()
+            if not genome_id:
+                continue
+            label = str(item.get("label") or genome_id).strip() or genome_id
+            labels[genome_id] = label
+    for genome in _approval_gate_genome_options(genome_catalog):
+        labels.setdefault(genome, genome)
+    return labels
+
+
+def _normalize_reference_genome_selection(raw_value, genome_options: list[str]) -> list[str]:
+    current_genomes = raw_value if raw_value is not None else ["mm39"]
+    if isinstance(current_genomes, str):
+        if current_genomes.startswith("["):
+            try:
+                import json as _json
+                current_genomes = _json.loads(current_genomes)
+            except (ValueError, TypeError):
+                current_genomes = [current_genomes]
+        else:
+            current_genomes = [current_genomes]
+    current_genomes = [genome for genome in current_genomes if genome in genome_options]
+    if current_genomes:
+        return current_genomes
+    if "mm39" in genome_options:
+        return ["mm39"]
+    return genome_options[:1]
 
 
 def _extract_modkit_binary_dir_from_profile(profile_text: str) -> str:
@@ -146,6 +571,38 @@ def _text_to_paths(value: str) -> list[str]:
     return normalized
 
 
+def _pending_gate_slurm_default_refresh_payload(*, status, content: dict | None) -> dict | None:
+    if str(status or "").strip().upper() != "PENDING":
+        return None
+    if not isinstance(content, dict):
+        return None
+    if isinstance(content.get("edited_params"), dict):
+        return None
+
+    extracted_params = content.get("extracted_params")
+    if not isinstance(extracted_params, dict):
+        return None
+    if (extracted_params.get("execution_mode") or "local") != "slurm":
+        return None
+
+    current_memory_gb = extracted_params.get("slurm_memory_gb")
+    if current_memory_gb not in {None, "", _LEGACY_SLURM_DEFAULT_CPU_MEMORY_GB}:
+        return None
+
+    refreshed_content = dict(content)
+    refreshed_params = dict(extracted_params)
+    refreshed_params["slurm_memory_gb"] = SLURM_DEFAULT_CPU_MEMORY_GB
+    refreshed_content["extracted_params"] = refreshed_params
+    return refreshed_content
+
+
+def _prime_post_approval_refresh_state() -> None:
+    st.session_state["_has_running_job"] = True
+    st.session_state["_has_full_refresh_job"] = True
+    st.session_state.pop("_job_finished_at", None)
+    st.session_state["_suppress_auto_refresh_until"] = 0.0
+
+
 def render_block_part1(
     *,
     btype,
@@ -187,7 +644,7 @@ def render_block_part1(
     elif btype == "AGENT_PLAN":
         handled = True
         with st.chat_message("assistant", avatar="🤖"):
-            section_header("Agent Response", "Summary first, details on demand", icon="🤖")
+            section_header("Agent Response", "Analysis summary and details", icon="🤖")
             show_metadata()
             st.divider()
             if "markdown" in content:
@@ -211,7 +668,13 @@ def render_block_part1(
                         # ── Render visible DataFrames (with DF IDs) between answer and raw details ──
                         _dfs = content.get("_dataframes")
                         if _dfs and isinstance(_dfs, dict):
-                            _render_embedded_dataframes(_dfs, block_id, only_visible=True)
+                            # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                            is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                            if is_terminal:
+                                with st.expander("📊 DataFrames", expanded=False):
+                                    _render_embedded_dataframes(_dfs, block_id, only_visible=True)
+                            else:
+                                _render_embedded_dataframes(_dfs, block_id, only_visible=True)
                         with st.expander(summary_text, expanded=False):
                             # Non-visible (supplementary) DFs go inside raw details
                             if _dfs and isinstance(_dfs, dict):
@@ -221,19 +684,32 @@ def render_block_part1(
                         _render_md_with_dataframes(md, block_id, "main")
                         _dfs = content.get("_dataframes")
                         if _dfs and isinstance(_dfs, dict):
-                            _render_embedded_dataframes(_dfs, block_id)
+                            # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                            is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                            if is_terminal:
+                                with st.expander("📊 DataFrames", expanded=False):
+                                    _render_embedded_dataframes(_dfs, block_id)
+                            else:
+                                _render_embedded_dataframes(_dfs, block_id)
                 else:
                     _render_md_with_dataframes(md, block_id, "main")
                     # ── Render embedded DataFrames after plain markdown ──
                     _dfs = content.get("_dataframes")
                     if _dfs and isinstance(_dfs, dict):
-                        _render_embedded_dataframes(_dfs, block_id)
+                        # For completed/failed blocks, wrap in expander to avoid expensive re-renders
+                        is_terminal = status in ("COMPLETED", "DONE", "FAILED", "CANCELLED")
+                        if is_terminal:
+                            with st.expander("📊 DataFrames", expanded=False):
+                                _render_embedded_dataframes(_dfs, block_id)
+                        else:
+                            _render_embedded_dataframes(_dfs, block_id)
 
             # ── Inline sync progress (visible right in the agent response) ──
             _sync_run_uuid = content.get("_sync_run_uuid", "")
             if _sync_run_uuid:
                 _sync_detail = ""
                 _sync_message = ""
+                _active_result_sync_states = {"pending_import", "downloading_outputs"}
                 _sync_state = (
                     st.session_state.get(f"_transfer_state_{_sync_run_uuid}") or "downloading_outputs"
                 ).strip().lower()
@@ -242,10 +718,13 @@ def render_block_part1(
                     _sync_state = (_sj.get("transfer_state") or _sync_state).strip().lower()
                     _sync_detail = (_sj.get("transfer_detail") or "").strip()
                     _sync_message = (_sj.get("message") or "").strip()
-                if _sync_state == "downloading_outputs":
+                if _sync_state in _active_result_sync_states:
                     st.info(f"📥 **Sync in progress** — {_sync_detail or 'transferring files…'}", icon="⏳")
                 elif _sync_state == "outputs_downloaded":
                     st.success("✅ Results synced successfully.")
+                elif _sync_state == "stale":
+                    _detail = _sync_detail or _sync_message or "The transfer was marked stale by maintenance cleanup."
+                    st.warning(f"⚠️ Sync marked stale: {_detail}")
                 elif _sync_state == "transfer_failed":
                     _detail = _sync_detail or _sync_message
                     if _detail:
@@ -254,6 +733,67 @@ def render_block_part1(
                         )
                     else:
                         st.error("❌ Sync failed. You can retry with **sync results locally with force**.")
+
+            _clean_runs = content.get("_clean_runs") if isinstance(content.get("_clean_runs"), list) else []
+            if _clean_runs:
+                st.divider()
+                st.markdown("**Workflow Clean Status**")
+                for _clean_idx, _clean_run in enumerate(_clean_runs, start=1):
+                    if not isinstance(_clean_run, dict):
+                        continue
+                    _clean_run_uuid = str(_clean_run.get("run_uuid") or "").strip()
+                    _clean_label = str(
+                        _clean_run.get("workflow_ref")
+                        or _clean_run.get("workflow_label")
+                        or _clean_run_uuid
+                        or f"workflow {_clean_idx}"
+                    ).strip()
+                    _clean_scope = "remote" if _clean_run.get("remote") else "local"
+                    _clean_stage_key = f"_clean_stage_{_clean_run_uuid}_{_clean_scope}"
+                    _clean_message_key = f"_clean_message_{_clean_run_uuid}_{_clean_scope}"
+                    _clean_stage = str(
+                        st.session_state.get(_clean_stage_key)
+                        or _clean_run.get("run_stage")
+                        or ""
+                    ).strip().upper()
+                    _clean_message = str(
+                        st.session_state.get(_clean_message_key)
+                        or _clean_run.get("message")
+                        or ""
+                    ).strip()
+                    _clean_terminal = _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}
+                    if _clean_run_uuid:
+                        if _clean_stage:
+                            st.session_state[_clean_stage_key] = _clean_stage
+                        if _clean_message:
+                            st.session_state[_clean_message_key] = _clean_message
+                        if not _clean_terminal:
+                            try:
+                                _clean_resp = make_authenticated_request(
+                                    "GET",
+                                    f"{API_URL}/jobs/{_clean_run_uuid}/clean-status?remote={'true' if _clean_run.get('remote') else 'false'}",
+                                    timeout=5,
+                                )
+                                if getattr(_clean_resp, "status_code", None) == 200:
+                                    _clean_status = _clean_resp.json()
+                                    if isinstance(_clean_status, dict):
+                                        _clean_stage = str(_clean_status.get("run_stage") or _clean_stage).strip().upper()
+                                        _clean_message = str(_clean_status.get("message") or _clean_message).strip()
+                                        if _clean_stage:
+                                            st.session_state[_clean_stage_key] = _clean_stage
+                                        if _clean_message:
+                                            st.session_state[_clean_message_key] = _clean_message
+                                        _clean_terminal = _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE", "CLEAN_FAILED"}
+                            except Exception:
+                                pass
+                    if _clean_stage in {"CLEANED_LOCAL", "CLEANED_REMOTE"}:
+                        st.success(f"✅ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
+                    elif _clean_stage == "CLEAN_FAILED":
+                        st.error(f"❌ `{_clean_label}` — {_clean_message or 'Workflow clean failed.'}")
+                    elif _clean_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE"}:
+                        st.info(f"⏳ `{_clean_label}` — {_clean_message or _clean_stage.replace('_', ' ').title()}")
+                    else:
+                        st.caption(f"`{_clean_label}` — {_clean_message or 'Workflow clean started.'}")
 
             _all_blocks = st.session_state.get("blocks", [])
             _related_workflow = _find_related_workflow_plan(block, _all_blocks)
@@ -280,7 +820,7 @@ def render_block_part1(
                     _label = _img.get("label", "Plot")
                     if _b64:
                         _img_bytes = base64.b64decode(_b64)
-                        st.image(_img_bytes, caption=_label, use_container_width=True)
+                        st.image(_img_bytes, caption=_label, width="stretch")
 
             # ── Per-message token count ──
             _msg_tokens = content.get("tokens")
@@ -304,6 +844,19 @@ def render_block_part1(
     elif btype == "APPROVAL_GATE":
         handled = True
         with st.chat_message("assistant", avatar="🚦"):
+            refreshed_content = _pending_gate_slurm_default_refresh_payload(status=status, content=content)
+            if refreshed_content is not None:
+                try:
+                    resp = make_authenticated_request(
+                        "PATCH",
+                        f"{API_URL}/block/{block_id}",
+                        json={"payload": refreshed_content},
+                    )
+                    if getattr(resp, "status_code", None) == 200:
+                        content = refreshed_content
+                except Exception:
+                    pass
+
             # Get extracted parameters and metadata
             extracted_params = content.get("extracted_params", {})
             approved_params = content.get("edited_params") or extracted_params
@@ -336,22 +889,26 @@ def render_block_part1(
 
             _summary = {}
             _src_params = approved_params if isinstance(approved_params, dict) else extracted_params
+            _summary_gate_action = extracted_params.get("gate_action") or content.get("gate_action", "job")
             if isinstance(_src_params, dict):
-                for _k in [
-                    "sample_name",
-                    "mode",
-                    "input_type",
-                    "input_directory",
-                    "execution_mode",
-                    "entry_point",
-                    "result_destination",
-                    "ssh_profile_nickname",
-                    "remote_base_path",
-                ]:
-                    _v = _src_params.get(_k)
-                    if _v not in (None, "", [], {}):
-                        _summary[_k.replace("_", " ").title()] = _v
-                _summary["Gate Action"] = extracted_params.get("gate_action") or content.get("gate_action", "job")
+                if _summary_gate_action == "haplotype_with_vcf":
+                    _summary.update(_approval_haplotype_summary_rows(_src_params))
+                else:
+                    for _k in [
+                        "sample_name",
+                        "mode",
+                        "input_type",
+                        "execution_mode",
+                        "entry_point",
+                        "result_destination",
+                        "ssh_profile_nickname",
+                        "remote_base_path",
+                    ]:
+                        _v = _src_params.get(_k)
+                        if _v not in (None, "", [], {}):
+                            _summary[_k.replace("_", " ").title()] = _v
+                _summary.update(_approval_path_summary_rows(_src_params, gate_action=_summary_gate_action))
+                _summary["Gate Action"] = _summary_gate_action
                 if (extracted_params.get("gate_action") or content.get("gate_action")) == "compare_region_overlaps":
                     if _src_params.get("sample_a_label"):
                         _summary["Sample A"] = _src_params.get("sample_a_label")
@@ -417,6 +974,7 @@ def render_block_part1(
                             f"{API_URL}/block/{block_id}",
                             json={"status": "APPROVED", "payload": payload_update}
                         )
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     if col2.button("♻️ Replace With Fresh Copy", key=f"replace_stage_{block_id}"):
                         payload_update = dict(content)
@@ -450,6 +1008,7 @@ def render_block_part1(
                             f"{API_URL}/block/{block_id}",
                             json={"status": "APPROVED", "payload": payload_update}
                         )
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     if col2.button("❌ Cancel", key=f"dl_reject_{block_id}"):
                         payload_update = dict(content)
@@ -463,6 +1022,8 @@ def render_block_part1(
 
                 elif _gate_action == "remote_stage":
                     st.write("**📤 Remote Staging Plan**")
+                    _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action="remote_stage")
+                    _workflow_key = str(_field_visibility["workflow_key"])
 
                     _current_user_id = user.get("id") or user.get("user_id", "")
                     _saved_profiles = _load_user_ssh_profiles(_current_user_id)
@@ -480,38 +1041,93 @@ def render_block_part1(
                             help="Name to register for the staged sample."
                         )
 
-                        mode_options = ["DNA", "RNA", "CDNA"]
-                        current_mode = extracted_params.get("mode", "DNA")
-                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
-                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        mode = None
+                        reference_fasta = ""
+                        vcf = ""
+                        sample_sheet = ""
+                        cutter = _WF_PORE_C_DEFAULT_CUTTER
+                        output_flags = {}
+
+                        if _field_visibility["show_mode"]:
+                            mode_options = ["DNA", "RNA", "CDNA"]
+                            current_mode = extracted_params.get("mode", "DNA")
+                            mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                            mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        else:
+                            st.caption("Workflow: `wf-pore-c`")
 
                         input_directory = st.text_input(
-                            "Input Directory",
+                            _approval_input_path_label(extracted_params, gate_action="remote_stage"),
                             value=extracted_params.get("input_directory", ""),
-                            help="Local source folder that will be staged to the remote data cache."
+                            help=_approval_input_path_help(extracted_params, gate_action="remote_stage")
                         )
 
-                        genome_options = ["GRCh38", "mm39"]
-                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
-                        if isinstance(current_genomes, str):
-                            if current_genomes.startswith("["):
-                                try:
-                                    import json as _json
-                                    current_genomes = _json.loads(current_genomes)
-                                except (ValueError, TypeError):
-                                    current_genomes = [current_genomes]
-                            else:
-                                current_genomes = [current_genomes]
-                        current_genomes = [g for g in current_genomes if g in genome_options] or ["mm39"]
+                        input_type = extracted_params.get("input_type", "pod5")
+                        if _workflow_key == "wf_pore_c":
+                            input_type_options = ["bam", "fastq"]
+                            current_input_type = str(extracted_params.get("input_type", "bam") or "bam").strip().lower()
+                            input_type_index = (
+                                input_type_options.index(current_input_type)
+                                if current_input_type in input_type_options
+                                else 0
+                            )
+                            input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
+
+                            reference_fasta = st.text_input(
+                                "Reference FASTA",
+                                value=extracted_params.get("reference_fasta", "") or "",
+                                help="Reference FASTA that wf-pore-c will stage into the shared remote reference cache.",
+                            )
+                            vcf = st.text_input(
+                                "VCF (optional)",
+                                value=extracted_params.get("vcf", "") or "",
+                                help="Optional phased VCF to stage alongside the wf-pore-c run.",
+                            )
+                            sample_sheet = st.text_input(
+                                "Sample Sheet (optional)",
+                                value=extracted_params.get("sample_sheet", "") or "",
+                                help="Optional wf-pore-c sample sheet. Leave empty for a single-sample run using Sample Name.",
+                            )
+                            cutter = st.text_input(
+                                "Cutter",
+                                value=extracted_params.get("cutter", _WF_PORE_C_DEFAULT_CUTTER) or _WF_PORE_C_DEFAULT_CUTTER,
+                                help="Restriction enzyme cutter passed to wf-pore-c.",
+                            )
+
+                            grouped_section("wf-pore-c Outputs")
+                            current_output_flags = _wf_pore_c_output_flag_values(extracted_params.get("output_flags"))
+                            _flag_columns = st.columns(2)
+                            for flag_index, flag_name in enumerate(_WF_PORE_C_OUTPUT_FLAG_ORDER):
+                                with _flag_columns[flag_index % 2]:
+                                    output_flags[flag_name] = st.checkbox(
+                                        _WF_PORE_C_OUTPUT_FLAG_LABELS.get(flag_name, flag_name),
+                                        value=current_output_flags[flag_name],
+                                        key=f"remote_stage_{block_id}_{flag_name}",
+                                    )
+                            if output_flags.get("bed"):
+                                output_flags["paired_end"] = True
+                                st.caption("BED output requires paired-end output; paired-end will be submitted automatically.")
+                        else:
+                            st.caption(f"Input type: `{input_type}`")
+
+                        genome_catalog = _approval_gate_reference_genome_catalog(
+                            API_URL,
+                            make_authenticated_request,
+                            extracted_params.get("reference_genome", ["mm39"]),
+                        )
+                        genome_options = _approval_gate_genome_options(genome_catalog)
+                        genome_labels = _approval_gate_genome_labels(genome_catalog)
+                        current_genomes = _normalize_reference_genome_selection(
+                            extracted_params.get("reference_genome", ["mm39"]),
+                            genome_options,
+                        )
                         reference_genomes = st.multiselect(
                             "Reference Genome(s)",
                             genome_options,
                             default=current_genomes,
+                            format_func=lambda genome: genome_labels.get(genome, genome),
                             help="Reference assets that should be available under the remote ref/ cache."
                         )
-
-                        input_type = extracted_params.get("input_type", "pod5")
-                        st.caption(f"Input type: `{input_type}`")
 
                         grouped_section("Remote Target")
                         ssh_profile_id = extracted_params.get("ssh_profile_id") or ""
@@ -610,8 +1226,8 @@ def render_block_part1(
                                 if candidate.startswith("/"):
                                     remote_input_path = candidate.rstrip('.,;:!?')
                             edited_params = {
+                                "workflow_key": _workflow_key,
                                 "sample_name": sample_name,
-                                "mode": mode,
                                 "input_type": input_type,
                                 "input_directory": input_directory,
                                 "reference_genome": reference_genomes,
@@ -626,6 +1242,17 @@ def render_block_part1(
                                 "staged_remote_input_path": remote_input_path or None,
                                 "result_destination": extracted_params.get("result_destination") or ("both" if remote_input_path else "local"),
                             }
+                            if _workflow_key == "wf_pore_c":
+                                edited_params.update({
+                                    "mode": None,
+                                    "reference_fasta": reference_fasta or None,
+                                    "vcf": vcf or None,
+                                    "sample_sheet": sample_sheet or None,
+                                    "cutter": cutter or _WF_PORE_C_DEFAULT_CUTTER,
+                                    "output_flags": output_flags,
+                                })
+                            else:
+                                edited_params["mode"] = mode
                             payload_update = dict(content)
                             payload_update["edited_params"] = edited_params
                             resp = make_authenticated_request(
@@ -634,6 +1261,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -655,7 +1283,10 @@ def render_block_part1(
                 elif _gate_action == "reconcile_bams" and extracted_params:
                     preflight_summary = extracted_params.get("preflight_summary") or {}
                     bam_inputs = extracted_params.get("bam_inputs") or []
+                    reconcile_runs = extracted_params.get("reconcile_runs") if isinstance(extracted_params.get("reconcile_runs"), list) else []
                     reference = extracted_params.get("reference") or "unknown"
+                    approved_references = extracted_params.get("approved_references") if isinstance(extracted_params.get("approved_references"), list) else []
+                    shared_reconcile_approval = bool(extracted_params.get("approve_all_references") and reconcile_runs)
                     annotation_gtf = extracted_params.get("annotation_gtf") or "not resolved"
                     annotation_gtf_source = extracted_params.get("annotation_gtf_source") or "unknown"
                     annotation_evidence = extracted_params.get("annotation_evidence") or []
@@ -676,13 +1307,32 @@ def render_block_part1(
 
                     with st.form(key=f"reconcile_form_{block_id}"):
                         grouped_section("Reconcile Summary")
-                        st.write(f"**Reference**: `{reference}`")
+                        if shared_reconcile_approval:
+                            shared_references = approved_references or [run.get("reference") for run in reconcile_runs if isinstance(run, dict)]
+                            st.write(f"**References**: `{', '.join(shared_references)}`")
+                            st.info("This approval covers all per-reference reconcile runs listed below. The editable fields here correspond to the first run in that sequence.")
+                        else:
+                            st.write(f"**Reference**: `{reference}`")
                         st.write(f"**Execution Script**: `{underlying_script_id}`")
 
                         grouped_section("Reconcile Settings")
-                        output_directory = st.text_input("Workflow Root", value=output_directory, help="Parent project directory where the next workflowN folder will be created.")
-                        output_prefix = st.text_input("Output Prefix", value=output_prefix)
-                        annotation_gtf = st.text_input("Annotation GTF", value=annotation_gtf)
+                        output_directory = st.text_input(
+                            "Current Workflow Output Directory" if shared_reconcile_approval else "Workflow Root",
+                            value=output_directory,
+                            help=(
+                                "Resolved workflow directory for the first reconcile run in this shared approval."
+                                if shared_reconcile_approval else
+                                "Parent project directory where the next workflowN folder will be created."
+                            ),
+                        )
+                        output_prefix = st.text_input(
+                            "Current Output Prefix" if shared_reconcile_approval else "Output Prefix",
+                            value=output_prefix,
+                        )
+                        annotation_gtf = st.text_input(
+                            "Current Reference Annotation GTF" if shared_reconcile_approval else "Annotation GTF",
+                            value=annotation_gtf,
+                        )
                         st.caption(f"GTF source: `{annotation_gtf_source}`")
                         col1, col2 = st.columns(2)
                         gene_prefix = col1.text_input("Gene Prefix", value=gene_prefix_default)
@@ -697,6 +1347,25 @@ def render_block_part1(
                         min_tpm = col7.number_input("Min TPM", min_value=0.0, value=min_tpm_default, step=0.1, format="%.3f")
                         min_samples = col8.number_input("Min Samples", min_value=1, value=min_samples_default, step=1)
                         filter_known = st.checkbox("Filter Known Transcripts", value=filter_known_default)
+
+                        if shared_reconcile_approval:
+                            grouped_section("Planned Per-Reference Runs")
+                            for run in reconcile_runs:
+                                if not isinstance(run, dict):
+                                    continue
+                                run_reference = run.get("reference") or "unknown"
+                                st.write(f"**{run_reference}**")
+                                st.caption(
+                                    f"Output: `{run.get('output_directory') or 'not resolved'}` | "
+                                    f"Prefix: `{run.get('output_prefix') or 'reconciled'}` | "
+                                    f"GTF: `{run.get('annotation_gtf') or 'not resolved'}`"
+                                )
+                                for bam in run.get("bam_inputs") or []:
+                                    if not isinstance(bam, dict):
+                                        continue
+                                    sample_label = bam.get("sample") or "sample"
+                                    bam_path = bam.get("path") or ""
+                                    st.caption(f"{sample_label}: `{bam_path}`")
 
                         grouped_section("Validated Inputs")
                         st.write(f"{len(bam_inputs)} annotated BAM(s) passed preflight validation.")
@@ -761,6 +1430,107 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
+                                st.rerun()
+                            else:
+                                try:
+                                    error_detail = resp.json().get("detail") or resp.text
+                                except Exception:
+                                    error_detail = resp.text
+                                st.error(f"Approval failed: {error_detail}")
+
+                        if submit_reject:
+                            st.session_state[f"rejecting_{block_id}"] = True
+                            st.rerun()
+
+                elif _gate_action == "haplotype_with_vcf" and extracted_params:
+                    preflight_summary = extracted_params.get("preflight_summary") or {}
+                    bam_inputs = extracted_params.get("bam_inputs") if isinstance(extracted_params.get("bam_inputs"), list) else []
+                    assignment_mode = str(extracted_params.get("assignment_mode") or "").strip()
+                    reference_genome = extracted_params.get("reference_genome") or ""
+                    vcf_defaulted = bool(extracted_params.get("vcf_defaulted"))
+                    vcf_path_default = str(extracted_params.get("vcf_path") or "").strip()
+                    selected_samples_default = extracted_params.get("vcf_selected_samples") if isinstance(extracted_params.get("vcf_selected_samples"), list) else []
+                    selected_samples_text_default = ", ".join(str(item) for item in selected_samples_default if str(item).strip())
+                    output_directory_default = str(extracted_params.get("output_directory") or "").strip()
+                    min_informative_sites_default = int(extracted_params.get("min_informative_sites") or 2)
+                    min_mapq_default = int(extracted_params.get("min_mapq") or 0)
+
+                    with st.form(key=f"haplotype_form_{block_id}"):
+                        grouped_section("Haplotype Summary")
+                        if reference_genome:
+                            st.write(f"**Reference Genome**: `{reference_genome}`")
+                        if assignment_mode:
+                            st.write(f"**Assignment Mode**: `{assignment_mode.replace('_', ' ').title()}`")
+                        if vcf_defaulted:
+                            st.info("This run will use the default founder VCF resolved from the selected reference assets.")
+
+                        grouped_section("Resolved Inputs")
+                        vcf_path = st.text_input(
+                            "VCF Path",
+                            value=vcf_path_default,
+                            help="Indexed VCF that will be used for haplotyping.",
+                        )
+                        selected_samples_text = st.text_input(
+                            _approval_haplotype_sample_label(extracted_params),
+                            value=selected_samples_text_default,
+                            help="Comma-separated VCF samples or canonical founder labels that will be passed to the haplotype script.",
+                        )
+                        output_directory = st.text_input(
+                            "Output Directory",
+                            value=output_directory_default,
+                            help="Workflow directory where haplotyped BAMs and summaries will be written.",
+                        )
+                        col1, col2 = st.columns(2)
+                        min_informative_sites = col1.number_input(
+                            "Min Informative Sites",
+                            min_value=1,
+                            value=min_informative_sites_default,
+                            step=1,
+                        )
+                        min_mapq = col2.number_input(
+                            "Min MAPQ",
+                            min_value=0,
+                            value=min_mapq_default,
+                            step=1,
+                        )
+
+                        grouped_section("Validated BAM Inputs")
+                        st.write(f"{len(bam_inputs)} BAM(s) passed preflight validation.")
+                        for bam in bam_inputs:
+                            if not isinstance(bam, dict):
+                                continue
+                            sample_label = bam.get("sample") or bam.get("name") or os.path.basename(str(bam.get("path") or ""))
+                            bam_path = bam.get("path") or ""
+                            st.caption(f"{sample_label}: `{bam_path}`")
+
+                        message = preflight_summary.get("message") if isinstance(preflight_summary, dict) else None
+                        if message:
+                            st.info(message)
+
+                        st.divider()
+                        col1, col2 = st.columns(2)
+                        submit_approve = col1.form_submit_button("✅ Approve Haplotype", width="stretch")
+                        submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
+
+                        if submit_approve:
+                            edited_params = _build_haplotype_approval_params(
+                                extracted_params,
+                                vcf_path=vcf_path,
+                                output_directory=output_directory,
+                                selected_samples_text=selected_samples_text,
+                                min_informative_sites=int(min_informative_sites),
+                                min_mapq=int(min_mapq),
+                            )
+                            payload_update = dict(content)
+                            payload_update["edited_params"] = edited_params
+                            resp = make_authenticated_request(
+                                "PATCH",
+                                f"{API_URL}/block/{block_id}",
+                                json={"status": "APPROVED", "payload": payload_update}
+                            )
+                            if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -885,6 +1655,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -899,93 +1670,262 @@ def render_block_part1(
 
                 elif extracted_params:
                     st.write("**📋 Extracted Parameters** (edit if needed):")
+                    _batch_params = extracted_params if isinstance(extracted_params.get("batch_samples"), list) else None
+                    _is_dogme_batch = bool(_batch_params)
+                    if _is_dogme_batch:
+                        _batch_shared_params = _batch_params.get("shared_params") or {}
+                        extracted_params = {**_batch_params, **_batch_shared_params}
+                        st.caption(
+                            f"Batch submission: {len(_batch_params['batch_samples'])} samples. "
+                            "Settings below apply to every sample."
+                        )
+                        st.dataframe(
+                            [
+                                {
+                                    "Sample": sample.get("sample_name", ""),
+                                    "Input": sample.get("input_directory", ""),
+                                }
+                                for sample in _batch_params["batch_samples"]
+                                if isinstance(sample, dict)
+                            ],
+                            hide_index=True,
+                            width="stretch",
+                        )
+                    _field_visibility = _approval_gate_field_visibility(extracted_params, gate_action=_gate_action)
+                    _workflow_key = str(_field_visibility["workflow_key"])
+                    _active_project_id = st.session_state.get("active_project_id")
+                    _dogme_fastq_state = _approval_dogme_fastq_state(
+                        extracted_params,
+                        api_url=API_URL,
+                        request_fn=make_authenticated_request,
+                        project_id=_active_project_id,
+                    ) if _workflow_key == "dogme" else {}
                     
                     with st.form(key=f"params_form_{block_id}"):
                         grouped_section("Core Run Settings")
+                        _submit_block_reason = None
+
+                        requested_max_parallel = None
+                        if _is_dogme_batch:
+                            requested_max_parallel = st.number_input(
+                                "Batch Submission Parallelism",
+                                min_value=1,
+                                max_value=256,
+                                value=int(extracted_params.get("requested_max_parallel") or 1),
+                                help="Maximum number of batch submissions to coordinate at once. Server-wide capacity limits still apply.",
+                            )
+
+                        _sample_name_default = extracted_params.get("sample_name", "")
+                        if _workflow_key == "dogme" and _dogme_fastq_state.get("default_sample_name"):
+                            _sample_name_default = _dogme_fastq_state["default_sample_name"]
+
                         # Sample name
                         sample_name = st.text_input(
                             "Sample Name",
-                            value=extracted_params.get("sample_name", ""),
+                            value=_sample_name_default,
                             help="Name for this sample"
                         )
                         
-                        # Mode selection
-                        mode_options = ["DNA", "RNA", "CDNA"]
-                        current_mode = extracted_params.get("mode", "DNA")
-                        mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
-                        mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
-                        
+                        mode = None
+                        modifications = None
+                        entry_point = None
+                        reference_fasta = ""
+                        vcf = ""
+                        sample_sheet = ""
+                        cutter = _WF_PORE_C_DEFAULT_CUTTER
+                        output_flags = {}
+
+                        _blocking_fastq_clarification = None
+                        _blocking_fastq_resolution = ""
+                        if _workflow_key == "dogme":
+                            _clarification = _dogme_fastq_state.get("clarification")
+                            if isinstance(_clarification, dict) and _clarification.get("blocking"):
+                                _blocking_fastq_clarification = _clarification
+                                st.warning(_clarification.get("banner_text") or "FASTQ input is only supported for Dogme cDNA mode.")
+                                _resolution_labels = [option.get("label", "") for option in _clarification.get("options") or [] if option.get("label")]
+                                _blocking_fastq_resolution = st.selectbox(
+                                    "Required action",
+                                    [""] + _resolution_labels,
+                                    index=0,
+                                    help="Choose how to resolve this FASTQ request before approving the run.",
+                                    key=f"fastq_resolution_{block_id}",
+                                )
+                                if not _blocking_fastq_resolution:
+                                    _submit_block_reason = _clarification.get("banner_text") or "Choose how to resolve the FASTQ request before submitting."
+
                         # Input type
-                        input_type_options = ["pod5", "bam"]
-                        current_input_type = extracted_params.get("input_type", "pod5")
+                        if _workflow_key == "dogme":
+                            input_type_options = ["pod5", "bam", "fastq"]
+                            current_input_type = _dogme_fastq_state.get("default_input_type") or extracted_params.get("input_type", "pod5")
+                            if _blocking_fastq_resolution:
+                                if _blocking_fastq_resolution == "Use FASTQ for cDNA (fastqCDNA)":
+                                    current_input_type = "fastq"
+                                else:
+                                    current_input_type = "pod5"
+                        else:
+                            input_type_options = ["bam", "fastq"]
+                            current_input_type = extracted_params.get("input_type", "bam")
                         input_type_index = input_type_options.index(current_input_type) if current_input_type in input_type_options else 0
                         input_type = st.selectbox("Input Type", input_type_options, index=input_type_index)
+
+                        if _field_visibility["show_mode"]:
+                            if _workflow_key == "dogme" and input_type == "fastq":
+                                mode_options = ["CDNA"]
+                                current_mode = "CDNA"
+                            else:
+                                mode_options = ["DNA", "RNA", "CDNA"]
+                                current_mode = extracted_params.get("mode", "DNA")
+                                if _workflow_key == "dogme":
+                                    current_mode = _dogme_fastq_state.get("default_mode") or current_mode
+                                    if _blocking_fastq_resolution and _blocking_fastq_resolution != "Use FASTQ for cDNA (fastqCDNA)":
+                                        current_mode = (_blocking_fastq_clarification or {}).get("requested_mode") or current_mode
+                            mode_index = mode_options.index(current_mode) if current_mode in mode_options else 0
+                            mode = st.selectbox("Analysis Mode", mode_options, index=mode_index)
+                        else:
+                            st.caption("Workflow: `wf-pore-c`")
                         
                         # Entry point (Dogme workflow)
-                        entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
-                        current_entry = extracted_params.get("entry_point") or "(auto)"
-                        entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
-                        entry_point = st.selectbox(
-                            "Pipeline Entry Point",
-                            entry_point_options,
-                            index=entry_index,
-                            help="main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
-                        )
+                        if _field_visibility["show_entry_point"]:
+                            if _workflow_key == "dogme" and input_type == "fastq":
+                                entry_point_options = ["fastqCDNA"]
+                                current_entry = "fastqCDNA"
+                            else:
+                                entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
+                                current_entry = extracted_params.get("entry_point") or "(auto)"
+                                if _workflow_key == "dogme":
+                                    current_entry = _dogme_fastq_state.get("default_entry_point") or current_entry
+                                    if current_entry == "fastqCDNA" and input_type != "fastq":
+                                        current_entry = "(auto)"
+                            entry_index = entry_point_options.index(current_entry) if current_entry in entry_point_options else 0
+                            entry_point = st.selectbox(
+                                "Pipeline Entry Point",
+                                entry_point_options,
+                                index=entry_index,
+                                help=(
+                                    "Dogme FASTQ input is only supported through fastqCDNA."
+                                    if _workflow_key == "dogme" and input_type == "fastq"
+                                    else "main=(auto) full pipeline, basecall=only basecalling, remap=from unmapped BAM, modkit=modifications only, annotateRNA=transcript annotation, reports=generate reports"
+                                )
+                            )
+
+                        dogme_revision = None
+                        if _workflow_key == "dogme":
+                            dogme_revision_options = ["default", "devel"]
+                            current_dogme_revision = extracted_params.get("dogme_revision") or "default"
+                            dogme_revision = st.selectbox(
+                                "Dogme Revision",
+                                dogme_revision_options,
+                                index=dogme_revision_options.index(current_dogme_revision) if current_dogme_revision in dogme_revision_options else 0,
+                                format_func=lambda value: "Default release" if value == "default" else "devel branch",
+                                help="Use the devel branch when the Dogme repository requires an explicit revision.",
+                            )
+
+                        if _workflow_key == "dogme" and input_type == "fastq":
+                            _nonblocking_clarification = _dogme_fastq_state.get("clarification")
+                            if isinstance(_nonblocking_clarification, dict) and not _nonblocking_clarification.get("blocking"):
+                                st.info(_nonblocking_clarification.get("banner_text") or "FASTQ input is only supported for Dogme cDNA mode.")
+                            st.caption("FASTQ input is submitted through Dogme `fastqCDNA` and staged as `fastqs/{sample_name}.fastq[.gz]` using the approved sample name.")
+
+                        if _workflow_key == "dogme" and input_type == "fastq" and mode != "CDNA":
+                            _submit_block_reason = (
+                                "FASTQ input is only supported for Dogme cDNA mode. "
+                                f"Change the mode to CDNA or switch the input type away from FASTQ for {mode}."
+                            )
+                            st.warning(_submit_block_reason)
                         
+                        _staged_remote_input_path = extracted_params.get("staged_remote_input_path") or ""
+                        if _staged_remote_input_path:
+                            st.caption(f"Reusing staged remote path: `{_staged_remote_input_path}`")
+
                         # Input directory
                         input_directory = st.text_input(
-                            "Input Directory",
+                            _approval_input_path_label(extracted_params, gate_action=_gate_action),
                             value=extracted_params.get("input_directory", ""),
-                            help="Full path to input files"
+                            help=_approval_input_path_help(extracted_params, gate_action=_gate_action)
                         )
+
+                        if _workflow_key == "wf_pore_c":
+                            reference_fasta = st.text_input(
+                                "Reference FASTA",
+                                value=extracted_params.get("reference_fasta", "") or "",
+                                help="Reference FASTA passed to wf-pore-c.",
+                            )
+                            vcf = st.text_input(
+                                "VCF (optional)",
+                                value=extracted_params.get("vcf", "") or "",
+                                help="Optional phased VCF for haplotype-aware wf-pore-c runs.",
+                            )
+                            sample_sheet = st.text_input(
+                                "Sample Sheet (optional)",
+                                value=extracted_params.get("sample_sheet", "") or "",
+                                help="Optional wf-pore-c sample sheet. Leave empty for a single-sample run.",
+                            )
+                            cutter = st.text_input(
+                                "Cutter",
+                                value=extracted_params.get("cutter", _WF_PORE_C_DEFAULT_CUTTER) or _WF_PORE_C_DEFAULT_CUTTER,
+                                help="Restriction enzyme cutter argument for wf-pore-c.",
+                            )
                         
                         # Reference genomes (multi-select)
-                        genome_options = ["GRCh38", "mm39"]  # TODO: fetch from /genomes endpoint
-                        current_genomes = extracted_params.get("reference_genome", ["mm39"])
-                        # Handle stringified JSON lists from DB (e.g. '["mm39"]')
-                        if isinstance(current_genomes, str):
-                            if current_genomes.startswith("["):
-                                try:
-                                    import json as _json
-                                    current_genomes = _json.loads(current_genomes)
-                                except (ValueError, TypeError):
-                                    current_genomes = [current_genomes]
-                            else:
-                                current_genomes = [current_genomes]
-                        # Filter to only valid options
-                        current_genomes = [g for g in current_genomes if g in genome_options]
-                        if not current_genomes:
-                            current_genomes = ["mm39"]
+                        genome_catalog = _approval_gate_reference_genome_catalog(
+                            API_URL,
+                            make_authenticated_request,
+                            extracted_params.get("reference_genome", ["mm39"]),
+                        )
+                        genome_options = _approval_gate_genome_options(genome_catalog)
+                        genome_labels = _approval_gate_genome_labels(genome_catalog)
+                        current_genomes = _normalize_reference_genome_selection(
+                            extracted_params.get("reference_genome", ["mm39"]),
+                            genome_options,
+                        )
                         reference_genomes = st.multiselect(
                             "Reference Genome(s)",
                             genome_options,
                             default=current_genomes,
+                            format_func=lambda genome: genome_labels.get(genome, genome),
                             help="Select one or more reference genomes"
                         )
                         
                         # Modifications (optional)
-                        modifications = st.text_input(
-                            "Modifications (optional)",
-                            value=extracted_params.get("modifications", "") or "",
-                            help="Comma-separated modification motifs (leave empty for auto)"
-                        )
+                        if _field_visibility["show_modifications"]:
+                            modifications = st.text_input(
+                                "Modifications (optional)",
+                                value=extracted_params.get("modifications", "") or "",
+                                help="Comma-separated modification motifs (leave empty for auto)"
+                            )
+                        elif _field_visibility["show_output_flags"]:
+                            grouped_section("wf-pore-c Outputs")
+                            current_output_flags = _wf_pore_c_output_flag_values(extracted_params.get("output_flags"))
+                            _flag_columns = st.columns(2)
+                            for flag_index, flag_name in enumerate(_WF_PORE_C_OUTPUT_FLAG_ORDER):
+                                with _flag_columns[flag_index % 2]:
+                                    output_flags[flag_name] = st.checkbox(
+                                        _WF_PORE_C_OUTPUT_FLAG_LABELS.get(flag_name, flag_name),
+                                        value=current_output_flags[flag_name],
+                                        key=f"approval_{block_id}_{flag_name}",
+                                    )
+                            if output_flags.get("bed"):
+                                output_flags["paired_end"] = True
+                                st.caption("BED output requires paired-end output; paired-end will be submitted automatically.")
                         
                         # Max concurrent GPU tasks — visible at top level (not hidden in Advanced)
-                        _gpu_raw = extracted_params.get("max_gpu_tasks")
-                        _gpu_val = int(_gpu_raw) if _gpu_raw is not None else None
-                        if _gpu_val is not None and _gpu_val < 1:
-                            _gpu_val = 1
-                        if _gpu_val is not None and _gpu_val > 16:
-                            _gpu_val = 16
-                        _gpu_options = [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-                        _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
-                        max_gpu_tasks = st.selectbox(
-                            "🖥️ Max Concurrent GPU Tasks",
-                            options=_gpu_options,
-                            index=_gpu_idx,
-                            format_func=lambda value: "No maximum" if value is None else str(value),
-                            help="Maximum simultaneous dorado/GPU tasks within a pipeline run. Leave at 'No maximum' to let Nextflow manage concurrency.",
-                        )
+                        max_gpu_tasks = None
+                        if _workflow_key != "wf_pore_c":
+                            _gpu_raw = extracted_params.get("max_gpu_tasks")
+                            _gpu_val = int(_gpu_raw) if _gpu_raw is not None else None
+                            if _gpu_val is not None and _gpu_val < 1:
+                                _gpu_val = 1
+                            if _gpu_val is not None and _gpu_val > 16:
+                                _gpu_val = 16
+                            _gpu_options = [None, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+                            _gpu_idx = _gpu_options.index(_gpu_val) if _gpu_val in _gpu_options else 0
+                            max_gpu_tasks = st.selectbox(
+                                "🖥️ Max Concurrent GPU Tasks",
+                                options=_gpu_options,
+                                index=_gpu_idx,
+                                format_func=lambda value: "No maximum" if value is None else str(value),
+                                help="Maximum simultaneous dorado/GPU tasks within a pipeline run. Leave at 'No maximum' to let Nextflow manage concurrency.",
+                            )
 
                         grouped_section("Execution")
                         execution_mode_options = ["local", "slurm"]
@@ -1006,7 +1946,9 @@ def render_block_part1(
                         slurm_gpu_account = extracted_params.get("slurm_gpu_account", "") or ""
                         slurm_gpu_partition = extracted_params.get("slurm_gpu_partition", "") or ""
                         slurm_cpus = int(extracted_params.get("slurm_cpus") or 4)
-                        slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or 16)
+                        local_max_task_cpus = int(extracted_params.get("local_max_task_cpus") or 12)
+                        local_max_task_memory_gb = int(extracted_params.get("local_max_task_memory_gb") or LOCAL_DEFAULT_MAX_TASK_MEMORY_GB)
+                        slurm_memory_gb = int(extracted_params.get("slurm_memory_gb") or SLURM_DEFAULT_CPU_MEMORY_GB)
                         slurm_walltime = extracted_params.get("slurm_walltime", "48:00:00") or "48:00:00"
                         slurm_gpus = max(int(extracted_params.get("slurm_gpus") or 1), 1)
                         slurm_gpu_type = extracted_params.get("slurm_gpu_type", "") or ""
@@ -1126,7 +2068,13 @@ def render_block_part1(
                             with col_slurm_2:
                                 slurm_partition = st.text_input("SLURM Partition", value=slurm_partition)
                                 slurm_gpu_partition = st.text_input("GPU Partition Override", value=slurm_gpu_partition, help="Optional partition to use when GPUs are requested.")
-                                slurm_memory_gb = st.number_input("SLURM Memory (GB)", min_value=1, max_value=2048, value=slurm_memory_gb)
+                                slurm_memory_gb = st.number_input(
+                                    "SLURM Memory (GB)",
+                                    min_value=1,
+                                    max_value=2048,
+                                    value=slurm_memory_gb,
+                                    key=f"slurm_memory_gb_{block_id}",
+                                )
                                 slurm_gpus = st.number_input("SLURM GPUs", min_value=1, max_value=32, value=slurm_gpus)
 
                             slurm_gpu_type = st.text_input("GPU Type (optional)", value=slurm_gpu_type)
@@ -1137,7 +2085,7 @@ def render_block_part1(
                                 help="Choose whether results stay remote, sync back locally, or both."
                             )
 
-                            if mode == "DNA":
+                            if _workflow_key == "dogme" and mode == "DNA":
                                 st.caption(
                                     "DNA SLURM runs now use the shared Dogme SIF with the built-in OpenChromatin GPU runtime. "
                                     "Custom cluster modkit and bind-path overrides are no longer needed in this approval form."
@@ -1217,90 +2165,132 @@ def render_block_part1(
                                 custom_dogme_profile_value = ""
                                 custom_dogme_bind_paths_text = ""
                         else:
+                            if _workflow_key == "wf_pore_c":
+                                st.caption("Local execution uses these per-task CPU and memory ceilings to keep wf-pore-c within the AGOUTIC host's available resources.")
+                            else:
+                                st.caption("Local execution uses these per-task CPU and memory ceilings to keep Dogme within the AGOUTIC host's available resources.")
+                            local_max_task_cpus = st.number_input(
+                                "Local Max Task CPUs",
+                                min_value=1,
+                                max_value=256,
+                                value=local_max_task_cpus,
+                                help="Maximum CPUs any single Dogme task may request when running locally. Lower this if the host has fewer cores than Dogme's default task sizes.",
+                            )
+                            local_max_task_memory_gb = st.number_input(
+                                "Local Max Task Memory (GB)",
+                                min_value=1,
+                                max_value=2048,
+                                value=local_max_task_memory_gb,
+                                help="Maximum memory any single Dogme task may request when running locally. Lower this if the host has less available RAM than Dogme's default local task sizes.",
+                            )
                             result_destination = None
                             custom_dogme_profile_value = ""
                             custom_dogme_bind_paths_text = ""
                         
                         # Advanced parameters in expander
-                        with st.expander("⚙️ Advanced Parameters (optional)"):
-                            st.caption("Leave empty to use defaults")
-                            
-                            # modkit_filter_threshold
-                            modkit_threshold = st.number_input(
-                                "Modkit Filter Threshold",
-                                min_value=0.0,
-                                max_value=1.0,
-                                value=extracted_params.get("modkit_filter_threshold", 0.9),
-                                step=0.05,
-                                help="Modification calling threshold (default: 0.9)"
-                            )
-                            
-                            # min_cov
-                            min_cov_default = extracted_params.get("min_cov")
-                            if min_cov_default is None:
-                                # Show placeholder based on mode
-                                min_cov_placeholder = 1 if mode == "DNA" else 3
-                                st.caption(f"Min Coverage: (auto - will use {min_cov_placeholder} for {mode} mode)")
-                                min_cov = None
-                            else:
-                                min_cov = st.number_input(
-                                    "Minimum Coverage",
+                        modkit_threshold = extracted_params.get("modkit_filter_threshold", 0.9)
+                        min_cov = extracted_params.get("min_cov")
+                        per_mod = extracted_params.get("per_mod", 5)
+                        accuracy = extracted_params.get("accuracy") or _default_dogme_accuracy(mode)
+                        if _field_visibility["show_dogme_advanced"]:
+                            with st.expander("⚙️ Advanced Parameters (optional)"):
+                                st.caption("Leave empty to use defaults")
+                                
+                                # modkit_filter_threshold
+                                modkit_threshold = st.number_input(
+                                    "Modkit Filter Threshold",
+                                    min_value=0.0,
+                                    max_value=1.0,
+                                    value=extracted_params.get("modkit_filter_threshold", 0.9),
+                                    step=0.05,
+                                    help="Modification calling threshold (default: 0.9)"
+                                )
+                                
+                                # min_cov
+                                min_cov_default = extracted_params.get("min_cov")
+                                if min_cov_default is None:
+                                    min_cov_placeholder = 1 if mode == "DNA" else 3
+                                    st.caption(f"Min Coverage: (auto - will use {min_cov_placeholder} for {mode} mode)")
+                                    min_cov = None
+                                else:
+                                    min_cov = st.number_input(
+                                        "Minimum Coverage",
+                                        min_value=1,
+                                        max_value=100,
+                                        value=min_cov_default,
+                                        help="Minimum coverage for modification calls"
+                                    )
+                                
+                                # per_mod
+                                per_mod = st.number_input(
+                                    "Per Mod Threshold",
                                     min_value=1,
                                     max_value=100,
-                                    value=min_cov_default,
-                                    help="Minimum coverage for modification calls"
+                                    value=extracted_params.get("per_mod", 5),
+                                    help="Percentage threshold for modifications (default: 5)"
                                 )
-                            
-                            # per_mod
-                            per_mod = st.number_input(
-                                "Per Mod Threshold",
-                                min_value=1,
-                                max_value=100,
-                                value=extracted_params.get("per_mod", 5),
-                                help="Percentage threshold for modifications (default: 5)"
-                            )
-                            
-                            # accuracy
-                            accuracy_options = ["sup", "hac", "fast"]
-                            current_accuracy = extracted_params.get("accuracy", "sup")
-                            accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
-                            accuracy = st.selectbox(
-                                "Basecalling Accuracy",
-                                accuracy_options,
-                                index=accuracy_index,
-                                help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
-                            )
+                                
+                                # accuracy
+                                accuracy_options = ["sup", "hac", "fast"]
+                                current_accuracy = extracted_params.get("accuracy") or _default_dogme_accuracy(mode)
+                                accuracy_index = accuracy_options.index(current_accuracy) if current_accuracy in accuracy_options else 0
+                                accuracy = st.selectbox(
+                                    "Basecalling Accuracy",
+                                    accuracy_options,
+                                    index=accuracy_index,
+                                    help="Model accuracy: sup=super accurate, hac=high accuracy, fast=fast mode"
+                                )
                         
                         st.divider()
+                        if _submit_block_reason:
+                            st.caption("Approve is disabled until the FASTQ input conflict is resolved.")
                         
                         # Action buttons
                         col1, col2 = st.columns(2)
                         
-                        submit_approve = col1.form_submit_button("✅ Approve", width="stretch")
+                        submit_approve = col1.form_submit_button("✅ Approve", width="stretch", disabled=bool(_submit_block_reason))
                         submit_reject = col2.form_submit_button("❌ Reject", width="stretch")
                         
                         if submit_approve:
                             # Build edited params
                             edited_params = {
+                                "workflow_key": _workflow_key,
                                 "sample_name": sample_name,
-                                "mode": mode,
                                 "input_type": input_type,
-                                "entry_point": entry_point if entry_point != "(auto)" else None,
                                 "input_directory": input_directory,
                                 "reference_genome": reference_genomes,
-                                "modifications": modifications if modifications else None,
-                                # Advanced parameters
-                                "modkit_filter_threshold": modkit_threshold,
-                                "min_cov": min_cov,
-                                "per_mod": per_mod,
-                                "accuracy": accuracy,
-                                "max_gpu_tasks": max_gpu_tasks,
                                 "custom_dogme_profile": (custom_dogme_profile_value.strip() or None) if allow_custom_dogme_profile else None,
                                 "custom_dogme_bind_paths": _text_to_paths(custom_dogme_bind_paths_text) if allow_custom_dogme_profile else [],
                                 "execution_mode": execution_mode,
                             }
+                            if _workflow_key == "wf_pore_c":
+                                edited_params.update({
+                                    "mode": None,
+                                    "reference_fasta": reference_fasta or None,
+                                    "vcf": vcf or None,
+                                    "sample_sheet": sample_sheet or None,
+                                    "cutter": cutter or _WF_PORE_C_DEFAULT_CUTTER,
+                                    "output_flags": output_flags,
+                                    "workflow_repo": extracted_params.get("workflow_repo") or None,
+                                    "workflow_version": extracted_params.get("workflow_version") or None,
+                                    "report_filename": extracted_params.get("report_filename") or None,
+                                })
+                            else:
+                                edited_params.update({
+                                    "mode": mode,
+                                    "entry_point": entry_point if entry_point != "(auto)" else None,
+                                    "dogme_revision": dogme_revision if dogme_revision != "default" else None,
+                                    "modifications": modifications if modifications else None,
+                                    "modkit_filter_threshold": modkit_threshold,
+                                    "min_cov": min_cov,
+                                    "per_mod": per_mod,
+                                    "accuracy": accuracy,
+                                    "max_gpu_tasks": max_gpu_tasks,
+                                })
                             if execution_mode == "slurm":
                                 edited_params.update({
+                                    "local_max_task_cpus": None,
+                                    "local_max_task_memory_gb": None,
                                     "ssh_profile_id": ssh_profile_id,
                                     "ssh_profile_nickname": ssh_profile_nickname or None,
                                     "local_workflow_directory": local_workflow_directory or None,
@@ -1318,6 +2308,8 @@ def render_block_part1(
                                 })
                             else:
                                 edited_params.update({
+                                    "local_max_task_cpus": int(local_max_task_cpus),
+                                    "local_max_task_memory_gb": int(local_max_task_memory_gb),
                                     "local_workflow_directory": None,
                                     "ssh_profile_id": None,
                                     "ssh_profile_nickname": None,
@@ -1336,6 +2328,28 @@ def render_block_part1(
                             # Preserve resume_from_dir for resubmit-resume flow
                             if extracted_params.get("resume_from_dir"):
                                 edited_params["resume_from_dir"] = extracted_params["resume_from_dir"]
+
+                            if _is_dogme_batch:
+                                edited_params_from_form = edited_params
+                                batch_metadata_keys = {
+                                    "batch_id",
+                                    "batch_samples",
+                                    "shared_params",
+                                    "requested_max_parallel",
+                                    "retry_of_batch_id",
+                                    "goal",
+                                }
+                                edited_params = {
+                                    key: value
+                                    for key, value in _batch_params.items()
+                                    if key in batch_metadata_keys
+                                }
+                                edited_params["shared_params"] = {
+                                    key: value
+                                    for key, value in edited_params_from_form.items()
+                                    if key not in batch_metadata_keys
+                                }
+                                edited_params["requested_max_parallel"] = int(requested_max_parallel)
                             
                             # Update block with edited params and approved status
                             payload_update = dict(content)
@@ -1347,6 +2361,7 @@ def render_block_part1(
                                 json={"status": "APPROVED", "payload": payload_update}
                             )
                             if resp.status_code == 200:
+                                _prime_post_approval_refresh_state()
                                 st.rerun()
                             else:
                                 try:
@@ -1425,6 +2440,7 @@ def render_block_part1(
                         json={"status": "APPROVED", "payload": dict(content)},
                     )
                     if resp.status_code == 200:
+                        _prime_post_approval_refresh_state()
                         st.rerun()
                     st.error(f"Action failed: {resp.text}")
                 if col2.button("❌ Dismiss", key=f"pending_reject_{block_id}"):

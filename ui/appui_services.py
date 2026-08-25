@@ -6,7 +6,7 @@ import streamlit as st
 
 def create_project_server_side(name: str | None, api_url: str, request_fn) -> dict:
     """Create a project via POST /projects and return {id, slug, name}."""
-    project_name = name or f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
+    project_name = str(name or "").strip() or f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
     try:
         resp = request_fn(
             "POST",
@@ -20,37 +20,175 @@ def create_project_server_side(name: str | None, api_url: str, request_fn) -> di
                 "id": data["id"],
                 "slug": data.get("slug", ""),
                 "name": data.get("name", project_name),
+                "error": "",
             }
+        detail = getattr(resp, "text", "")[:200] or f"HTTP {resp.status_code}"
+        return {"id": "", "slug": "", "name": project_name, "error": detail}
+    except Exception as exc:
+        return {"id": "", "slug": "", "name": project_name, "error": str(exc)}
+
+
+def load_reference_genome_catalog(
+    *,
+    api_url: str,
+    request_fn,
+    fallback: list[str] | None = None,
+    cache_seconds: float = 60.0,
+) -> dict:
+    normalized_fallback: list[str] = []
+    for genome in fallback or ["GRCh38", "mm39", "mad1"]:
+        cleaned = str(genome or "").strip()
+        if cleaned and cleaned not in normalized_fallback:
+            normalized_fallback.append(cleaned)
+
+    fallback_catalog = {
+        "default": None,
+        "genomes": normalized_fallback,
+        "items": [
+            {
+                "id": genome,
+                "label": genome,
+                "aliases": [],
+                "is_default": False,
+                "assets": {},
+            }
+            for genome in normalized_fallback
+        ],
+        "count": len(normalized_fallback),
+    }
+
+    cache_key = "_reference_genome_catalog_cache"
+    now = time.time()
+    cached = st.session_state.get(cache_key)
+    if isinstance(cached, dict):
+        catalog = cached.get("catalog")
+        fetched_at = float(cached.get("fetched_at") or 0.0)
+        if (
+            isinstance(catalog, dict)
+            and isinstance(catalog.get("genomes"), list)
+            and catalog.get("genomes")
+            and (now - fetched_at) < cache_seconds
+        ):
+            return catalog
+
+    try:
+        resp = request_fn(
+            "GET",
+            f"{api_url}/config/reference-genomes",
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            data = resp.json() or {}
+            genomes = data.get("genomes") if isinstance(data, dict) else None
+            items = data.get("items") if isinstance(data, dict) else None
+            if isinstance(genomes, list):
+                normalized_genomes: list[str] = []
+                for genome in genomes:
+                    cleaned = str(genome or "").strip()
+                    if cleaned and cleaned not in normalized_genomes:
+                        normalized_genomes.append(cleaned)
+
+                items_by_id: dict[str, dict] = {}
+                if isinstance(items, list):
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        genome_id = str(item.get("id") or item.get("genome") or "").strip()
+                        if not genome_id or genome_id not in normalized_genomes:
+                            continue
+
+                        aliases: list[str] = []
+                        raw_aliases = item.get("aliases")
+                        if isinstance(raw_aliases, list):
+                            for alias in raw_aliases:
+                                cleaned_alias = str(alias or "").strip()
+                                if cleaned_alias and cleaned_alias not in aliases:
+                                    aliases.append(cleaned_alias)
+
+                        assets: dict[str, bool] = {}
+                        raw_assets = item.get("assets")
+                        if isinstance(raw_assets, dict):
+                            for key, value in raw_assets.items():
+                                cleaned_key = str(key or "").strip()
+                                if cleaned_key:
+                                    assets[cleaned_key] = bool(value)
+
+                        label = str(item.get("label") or genome_id).strip() or genome_id
+                        items_by_id[genome_id] = {
+                            "id": genome_id,
+                            "label": label,
+                            "aliases": aliases,
+                            "is_default": bool(item.get("is_default")),
+                            "assets": assets,
+                        }
+
+                normalized_items = [
+                    items_by_id.get(
+                        genome,
+                        {
+                            "id": genome,
+                            "label": genome,
+                            "aliases": [],
+                            "is_default": False,
+                            "assets": {},
+                        },
+                    )
+                    for genome in normalized_genomes
+                ]
+                default_genome = str(data.get("default") or "").strip() if isinstance(data, dict) else ""
+                normalized_catalog = {
+                    "default": default_genome if default_genome in normalized_genomes else None,
+                    "genomes": normalized_genomes,
+                    "items": normalized_items,
+                    "count": len(normalized_genomes),
+                }
+                st.session_state[cache_key] = {
+                    "fetched_at": now,
+                    "catalog": normalized_catalog,
+                }
+                st.session_state["_available_reference_genomes_cache"] = {
+                    "fetched_at": now,
+                    "genomes": normalized_genomes,
+                }
+                return normalized_catalog
     except Exception:
         pass
 
-    import uuid as _uuid
+    if isinstance(cached, dict):
+        catalog = cached.get("catalog")
+        if isinstance(catalog, dict) and isinstance(catalog.get("genomes"), list) and catalog.get("genomes"):
+            return catalog
+    return fallback_catalog
 
-    return {"id": str(_uuid.uuid4()), "slug": "", "name": project_name}
 
-
-def launchpad_headers(internal_api_secret: str | None) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if internal_api_secret:
-        headers["X-Internal-Secret"] = internal_api_secret
-    return headers
-
+def load_available_reference_genomes(
+    *,
+    api_url: str,
+    request_fn,
+    fallback: list[str] | None = None,
+    cache_seconds: float = 60.0,
+) -> list[str]:
+    catalog = load_reference_genome_catalog(
+        api_url=api_url,
+        request_fn=request_fn,
+        fallback=fallback,
+        cache_seconds=cache_seconds,
+    )
+    genomes = catalog.get("genomes") if isinstance(catalog, dict) else None
+    return list(genomes) if isinstance(genomes, list) else []
 
 def load_user_ssh_profiles(
     user_id: str,
     *,
-    launchpad_url: str,
+    api_url: str,
     request_fn,
-    internal_api_secret: str | None,
 ) -> list[dict]:
     if not user_id:
         return []
     try:
         resp = request_fn(
             "GET",
-            f"{launchpad_url}/ssh-profiles",
-            params={"user_id": user_id},
-            headers=launchpad_headers(internal_api_secret),
+            f"{api_url}/remote-profiles",
             timeout=8,
         )
         if resp.status_code != 200:
@@ -110,7 +248,6 @@ def get_cached_job_status(
     timeout = float(timeout_seconds or 0) if timeout_seconds else 0.0
     if timeout <= 0:
         timeout = 5.0
-    timeout = min(timeout, 5.0)
 
     try:
         resp = request_fn(
@@ -169,6 +306,8 @@ def _workflow_highlight_steps(workflow_block: dict) -> list[dict]:
 
 def _block_requires_full_refresh(block: dict) -> bool:
     """Return True when a block needs whole-page reruns, not just fragment refresh."""
+    active_result_sync_states = {"pending_import", "downloading_outputs"}
+    terminal_result_sync_states = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
     if not isinstance(block, dict):
         return False
     btype = block.get("type")
@@ -180,17 +319,35 @@ def _block_requires_full_refresh(block: dict) -> bool:
         job_status = payload.get("job_status", {}) if isinstance(payload.get("job_status"), dict) else {}
         nested_status = str(job_status.get("status") or "").upper()
         transfer_state = str(job_status.get("transfer_state") or "").strip().lower()
+        imported_source_kind = str(payload.get("imported_source_kind") or job_status.get("imported_source_kind") or "").strip().lower()
+        needs_import_sync_recovery = (
+            imported_source_kind == "slurm"
+            and nested_status in {"COMPLETED", "RUNNING", "PENDING"}
+            and transfer_state not in terminal_result_sync_states
+        )
         return (
             bstatus == "RUNNING"
             or nested_status in {"RUNNING", "PENDING"}
-            or transfer_state in {"downloading_outputs"}
+            or transfer_state in active_result_sync_states
+            or needs_import_sync_recovery
         )
     if btype == "AGENT_PLAN":
         payload = block.get("payload", {}) if isinstance(block.get("payload"), dict) else {}
         run_uuid = payload.get("_sync_run_uuid", "")
         if run_uuid:
             cached = (st.session_state.get(f"_transfer_state_{run_uuid}") or "").strip().lower()
-            if cached in {"downloading_outputs"}:
+            if cached in active_result_sync_states:
+                return True
+        clean_runs = payload.get("_clean_runs", []) if isinstance(payload.get("_clean_runs"), list) else []
+        for clean_run in clean_runs:
+            if not isinstance(clean_run, dict):
+                continue
+            run_uuid = str(clean_run.get("run_uuid") or "").strip()
+            if not run_uuid:
+                continue
+            clean_scope = "remote" if clean_run.get("remote") else "local"
+            clean_stage = str(st.session_state.get(f"_clean_stage_{run_uuid}_{clean_scope}") or "").strip().upper()
+            if clean_stage in {"CLEANING_LOCAL", "CLEANING_REMOTE"}:
                 return True
     return False
 
@@ -248,6 +405,8 @@ def _workflow_status_presentation(raw_status: str) -> tuple[str, str, str]:
         return "complete", raw_status.replace("_", " ").title(), "✅"
     if normalized == "deleted":
         return "pending", raw_status.replace("_", " ").title(), "🗑️"
+    if normalized == "stale":
+        return "warning", raw_status.replace("_", " ").title(), "⚠️"
     if normalized in {"failed", "rejected", "cancelled"}:
         return "failed", raw_status.replace("_", " ").title(), "❌"
     if normalized in {"running", "active"}:

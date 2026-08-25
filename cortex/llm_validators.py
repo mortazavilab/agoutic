@@ -16,6 +16,7 @@ import json
 import re
 
 from cortex.models import ProjectBlock
+from cortex.config import WF_PORE_C_ENABLED
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -126,7 +127,7 @@ def _validate_llm_output(
             if blk.type == "EXECUTION_JOB" and blk.status == "RUNNING":
                 _blk_pl = get_block_payload(blk)
                 _inner_status = _blk_pl.get("job_status", {}).get("status", "")
-                if _inner_status in ("COMPLETED", "FAILED"):
+                if _inner_status in ("COMPLETED", "FAILED", "STALE"):
                     # Block status is stale (likely due to server restart).
                     # Job is actually done — allow the skill switch.
                     break
@@ -244,6 +245,31 @@ def _auto_detect_skill_switch(user_message: str, current_skill: str) -> str | No
         return "remote_execution"
     if current_skill == "remote_execution" and (_has_remote_word_early or _has_remote_profile_phrase_early) and _has_remote_browse_intent_early:
         return None
+
+    # --- Early wf-pore-c pre-check ---
+    _has_pore_c_keyword_early = any(
+        phrase in msg_lower
+        for phrase in ("wf-pore-c", "wf pore-c", "pore-c", "pore c")
+    )
+    _has_contact_map_intent_early = bool(re.search(
+        r"\b(?:contact\s+map|cooler|mcool|pairs(?:\.gz)?|chromunity|hic)\b",
+        msg_lower,
+    ))
+    _has_pore_c_input_hint_early = bool(re.search(
+        r"\b[\w./-]+\.(?:bam|fastq|fq)(?:\.gz)?\b",
+        msg_lower,
+    )) or any(token in msg_lower for token in (" bam", " fastq", " fq "))
+    _has_pore_c_run_intent_early = any(
+        word in msg_lower
+        for word in ("run", "submit", "launch", "process", "generate", "build", "make")
+    )
+    if (
+        WF_PORE_C_ENABLED
+        and current_skill != "run_wf_pore_c"
+        and (_has_pore_c_keyword_early or _has_contact_map_intent_early)
+        and (_has_pore_c_run_intent_early or _has_pore_c_input_hint_early or _has_contact_map_intent_early)
+    ):
+        return "run_wf_pore_c"
 
     # --- Signals for analyze_local_sample ---
     # User mentions a local file path + analysis intent

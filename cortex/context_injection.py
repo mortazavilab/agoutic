@@ -8,6 +8,7 @@ injection, local-sample parameter collection, and ENCODE follow-up DF injection.
 
 import re
 
+from cortex.config import GENOME_ALIASES
 from cortex.conversation_state import _extract_job_context_from_history
 from cortex.encode_helpers import (
     _ENCODE_ASSAY_ALIASES,
@@ -18,6 +19,27 @@ from cortex.llm_validators import get_block_payload
 from common.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+_GENOME_TOKENS = tuple(dict.fromkeys([*GENOME_ALIASES.keys(), *GENOME_ALIASES.values()]))
+_GENOME_PATTERN = "|".join(re.escape(token) for token in sorted(_GENOME_TOKENS, key=len, reverse=True))
+
+
+def _canonicalize_genome_token(token: str) -> str:
+    cleaned = str(token or "").strip()
+    return GENOME_ALIASES.get(cleaned.lower(), cleaned)
+
+
+def _workflow_context_fields(workflow: dict) -> list[str]:
+    fields: list[str] = []
+    sample_name = str((workflow or {}).get("sample_name") or "").strip()
+    if sample_name:
+        fields.append(f"sample={sample_name}")
+    workflow_key = str((workflow or {}).get("workflow_key") or "dogme").strip().lower() or "dogme"
+    fields.append(f"workflow_key={workflow_key}")
+    mode = str((workflow or {}).get("mode") or "").strip()
+    if mode:
+        fields.append(f"mode={mode}")
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +62,7 @@ def _inject_job_context(user_message: str, active_skill: str,
         debug_info is a dict of diagnostic data for the UI debug panel.
 
     Covers:
-    - Dogme skills: inject UUID and work directory
+    - Workflow analysis skills: inject workflow UUID and work directory context
     - ENCODE skills: inject previous dataframe rows for follow-up filter questions
     """
     if not conversation_history:
@@ -106,10 +128,10 @@ def _inject_job_context(user_message: str, active_skill: str,
             {"source": "remembered_df_injection", "named_df": name},
         )
 
-    # --- Dogme skills: inject workflow directory paths ---
-    dogme_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna",
-                    "analyze_job_results"}
-    if active_skill in dogme_skills:
+    # --- Workflow analysis skills: inject workflow directory paths ---
+    dogme_run_skills = {"run_dogme_dna", "run_dogme_rna", "run_dogme_cdna"}
+    workflow_analysis_skills = dogme_run_skills | {"analyze_job_results"}
+    if active_skill in workflow_analysis_skills:
         context = _extract_job_context_from_history(
             conversation_history, history_blocks=history_blocks
         )
@@ -122,14 +144,13 @@ def _inject_job_context(user_message: str, active_skill: str,
             if len(workflows) == 1:
                 wf = workflows[0]
                 parts.append(f"work_dir={wf['work_dir']}")
-                if wf.get("sample_name"):
-                    parts.append(f"sample={wf['sample_name']}")
+                parts.extend(_workflow_context_fields(wf))
             else:
                 # Multiple workflows — enumerate them
                 wf_lines = []
                 for i, wf in enumerate(workflows, 1):
                     _folder = wf["work_dir"].rstrip("/").rsplit("/", 1)[-1] if wf["work_dir"] else f"workflow{i}"
-                    _label = f"{_folder} (sample={wf.get('sample_name', '?')}, mode={wf.get('mode', '?')}): work_dir={wf['work_dir']}"
+                    _label = f"{_folder} ({', '.join(_workflow_context_fields(wf))}): work_dir={wf['work_dir']}"
                     wf_lines.append(_label)
                 parts.append("workflows=[\n  " + "\n  ".join(wf_lines) + "\n]")
                 # Also note which one is the most recent / active
@@ -139,6 +160,8 @@ def _inject_job_context(user_message: str, active_skill: str,
         elif context.get("work_dir"):
             # Fallback: single work_dir from conversation text
             parts.append(f"work_dir={context['work_dir']}")
+            if context.get("workflow_key"):
+                parts.append(f"workflow_key={context['workflow_key']}")
         elif context.get("run_uuid"):
             # Legacy fallback
             parts.append(f"run_uuid={context['run_uuid']}")
@@ -212,7 +235,7 @@ def _inject_job_context(user_message: str, active_skill: str,
 
         context_line = f"[CONTEXT: {', '.join(parts)}]" if parts else ""
         augmented = "\n".join(filter(None, [context_line, user_message])) + _df_note
-        return augmented, {}, {"skill": active_skill, "context": "dogme",
+        return augmented, {}, {"skill": active_skill, "context": "workflow_analysis",
                                "df_note_injected": bool(_df_note)}
 
     # --- Local sample intake: inject already-collected parameters ---
@@ -233,7 +256,7 @@ def _inject_job_context(user_message: str, active_skill: str,
                 r'(DNA|RNA|CDNA|cDNA|Fiber-seq|Fiberseq)', re.IGNORECASE),
             "reference_genome": re.compile(
                 r'(?:reference\s*genome|genome)[:\s*]+'
-                r'(GRCh38|mm39|mm10|hg38|T2T-CHM13)', re.IGNORECASE),
+                rf'({_GENOME_PATTERN})', re.IGNORECASE),
         }
 
         # First pass: extract from the original user request and any assistant
@@ -243,7 +266,10 @@ def _inject_job_context(user_message: str, active_skill: str,
             for field, pat in _field_patterns.items():
                 m = pat.search(content)
                 if m:
-                    _collected[field] = m.group(1).strip().rstrip("*").strip()
+                    value = m.group(1).strip().rstrip("*").strip()
+                    if field == "reference_genome":
+                        value = _canonicalize_genome_token(value)
+                    _collected[field] = value
 
         # Heuristic: detect sample_type from keywords in ALL user messages
         # AND the current message (which hasn't been appended to history yet).
@@ -304,15 +330,15 @@ def _inject_job_context(user_message: str, active_skill: str,
                 if msg.get("role") != "user":
                     continue
                 _genome_m = re.match(
-                    r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', msg["content"], re.IGNORECASE)
+                    rf'^\s*({_GENOME_PATTERN})\s*$', msg["content"], re.IGNORECASE)
                 if _genome_m:
-                    _collected["reference_genome"] = _genome_m.group(1).strip()
+                    _collected["reference_genome"] = _canonicalize_genome_token(_genome_m.group(1))
 
         # Also check current message for a genome answer
         _cur_genome_m = re.match(
-            r'^\s*(GRCh38|mm39|mm10|hg38)\s*$', user_message, re.IGNORECASE)
+            rf'^\s*({_GENOME_PATTERN})\s*$', user_message, re.IGNORECASE)
         if _cur_genome_m:
-            _collected["reference_genome"] = _cur_genome_m.group(1).strip()
+            _collected["reference_genome"] = _canonicalize_genome_token(_cur_genome_m.group(1))
 
         # Heuristic: infer reference_genome from organism keywords
         if "reference_genome" not in _collected:

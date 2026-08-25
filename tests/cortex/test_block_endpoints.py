@@ -947,8 +947,8 @@ class TestLinkJobToConversation:
         assert data["status"] == "ok"
         assert "job_id" in data
 
-    def test_link_job_wrong_user(self, client, session_factory):
-        """Returns 403 when conversation belongs to another user."""
+    def test_link_job_allows_project_owner_for_conversation_created_by_other_user(self, client, session_factory):
+        """Project access, not conversation.user_id, controls visibility."""
         sess = session_factory()
         conv = Conversation(
             id="conv-other",
@@ -966,7 +966,7 @@ class TestLinkJobToConversation:
             "/conversations/conv-other/jobs",
             params={"run_uuid": "test-run"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------

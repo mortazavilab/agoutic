@@ -19,6 +19,9 @@ from cortex.skill_manifest import get_tool_call_spec
 logger = get_logger(__name__)
 
 
+HAPLOTYPE_SCRIPT_TIMEOUT_SECONDS = 43200.0
+
+
 # ---------------------------------------------------------------------------
 # Step / plan ID helpers
 # ---------------------------------------------------------------------------
@@ -99,12 +102,21 @@ def _template_remote_stage_workflow(params: dict) -> dict:
     steps = []
     idx = 0
 
+    locate_tool_calls = []
+    if not (input_dir and Path(input_dir).is_absolute()):
+        locate_tool_calls = [{
+            "source_key": "analyzer",
+            "tool": "list_job_files",
+            "params": {"work_dir": input_dir or work_dir},
+        }]
     s_locate = _make_step(
         "LOCATE_DATA",
         f"Locate data for {sample_name}",
         idx,
-        tool_calls=[{"source_key": "analyzer", "tool": "list_job_files", "params": {"work_dir": input_dir or work_dir}}],
+        tool_calls=locate_tool_calls,
     )
+    if input_dir and Path(input_dir).is_absolute():
+        s_locate["skip_default_tool_calls"] = True
     s_locate["id"] = "locate_data"
     steps.append(s_locate)
     idx += 1
@@ -238,6 +250,132 @@ def _template_run_workflow(params: dict) -> dict:
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
         "sample_name": sample_name,
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+def _template_run_dogme_batch(params: dict) -> dict:
+    """Build a single-approval DOGME workflow for multiple explicit samples."""
+    raw_samples = params.get("batch_samples") or []
+    batch_samples = []
+    for index, raw_sample in enumerate(raw_samples):
+        if not isinstance(raw_sample, dict):
+            continue
+        sample = dict(raw_sample)
+        sample["sample_id"] = str(sample.get("sample_id") or index + 1)
+        sample["sample_name"] = str(sample.get("sample_name") or f"sample_{index + 1}")
+        sample["input_directory"] = str(sample.get("input_directory") or "")
+        sample["status"] = str(sample.get("status") or "PENDING")
+        sample["run_uuid"] = sample.get("run_uuid")
+        sample["execution_block_id"] = sample.get("execution_block_id")
+        sample["error"] = sample.get("error")
+        batch_samples.append(sample)
+
+    steps = []
+    s_validate = _make_step("VALIDATE_INPUTS", "Validate batch input files", 0)
+    s_validate["id"] = "validate_batch_inputs"
+    steps.append(s_validate)
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve DOGME batch submission",
+        1,
+        requires_approval=True,
+        depends_on=[s_validate["id"]],
+    )
+    s_approve["id"] = "approve_dogme_batch"
+    steps.append(s_approve)
+
+    s_submit = _make_step(
+        "SUBMIT_WORKFLOW",
+        "Submit DOGME batch",
+        2,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+    )
+    s_submit["id"] = "submit_dogme_batch"
+    steps.append(s_submit)
+
+    s_monitor = _make_step(
+        "MONITOR_WORKFLOW",
+        "Monitor DOGME batch",
+        3,
+        depends_on=[s_submit["id"]],
+    )
+    s_monitor["id"] = "monitor_dogme_batch"
+    steps.append(s_monitor)
+
+    return {
+        "plan_type": "run_dogme_batch",
+        "title": f"Run DOGME for {len(batch_samples)} samples",
+        "goal": params.get("goal", "Analyze multiple samples with DOGME"),
+        "workflow_type": "dogme_batch",
+        "batch_id": str(params.get("batch_id") or _plan_instance_id()),
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": s_validate["id"],
+        "batch_samples": batch_samples,
+        "shared_params": dict(params.get("shared_params") or {}),
+        "requested_max_parallel": params.get("requested_max_parallel"),
+        "retry_of_batch_id": params.get("retry_of_batch_id"),
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+def _template_run_wf_pore_c(params: dict) -> dict:
+    """Deterministic Phase 1 plan for a wf-pore-c dry-run preview."""
+    sample_name = params.get("sample_name", "pore_c_sample")
+    input_path = params.get("file_path") or params.get("input_directory") or params.get("work_dir", "")
+
+    steps = []
+    idx = 0
+
+    s_validate = _make_step(
+        "VALIDATE_INPUTS",
+        f"Validate wf-pore-c inputs for {sample_name}",
+        idx,
+    )
+    s_validate["id"] = "validate_wf_pore_c_inputs"
+    steps.append(s_validate)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        f"Approve wf-pore-c dry-run preview for {sample_name}",
+        idx,
+        requires_approval=True,
+        depends_on=[s_validate["id"]],
+    )
+    s_approve["id"] = "approve_wf_pore_c_preview"
+    steps.append(s_approve)
+
+    return {
+        "plan_type": "run_wf_pore_c",
+        "title": f"Prepare wf-pore-c dry-run for {sample_name}",
+        "goal": params.get("goal", f"Prepare a wf-pore-c dry-run preview for {sample_name}"),
+        "workflow_type": "local_sample_intake",
+        "workflow_key": "wf_pore_c",
+        "workflow_repo": params.get("workflow_repo") or "epi2me-labs/wf-pore-c",
+        "workflow_version": params.get("workflow_version") or "v1.3.1",
+        "report_filename": params.get("report_filename") or "wf-pore-c-report.html",
+        "preview_only": True,
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "sample_name": sample_name,
+        "sample": params.get("sample") or sample_name,
+        "source_path": input_path,
+        "file_path": input_path,
+        "input_directory": input_path,
+        "input_type": params.get("input_type", ""),
+        "reference_fasta": params.get("reference_fasta", ""),
+        "vcf": params.get("vcf", ""),
+        "sample_sheet": params.get("sample_sheet", ""),
+        "cutter": params.get("cutter") or "NlaIII",
+        "output_directory": params.get("output_directory", ""),
+        "output_flags": dict(params.get("output_flags") or {}),
         "steps": steps,
         "artifacts": [],
     }
@@ -887,6 +1025,7 @@ def _template_reconcile_bams(params: dict) -> dict:
     output_prefix = params.get("output_prefix", "reconciled")
     output_directory = params.get("output_directory", "")
     annotation_gtf = params.get("annotation_gtf", "")
+    reference = str(params.get("reference") or "").strip()
     work_dir = params.get("work_dir", "")
     workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
     if not output_directory:
@@ -938,6 +1077,8 @@ def _template_reconcile_bams(params: dict) -> dict:
     idx += 1
 
     preflight_args = ["--json", "--preflight-only", "--output-prefix", output_prefix]
+    if reference:
+        preflight_args.extend(["--reference", reference])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             preflight_args.extend(["--workflow-dir", workflow_dir])
@@ -978,6 +1119,8 @@ def _template_reconcile_bams(params: dict) -> dict:
     idx += 1
 
     script_args = ["--json", "--output-prefix", output_prefix]
+    if reference:
+        script_args.extend(["--reference", reference])
     if workflow_dirs:
         for workflow_dir in workflow_dirs:
             script_args.extend(["--workflow-dir", workflow_dir])
@@ -1057,9 +1200,202 @@ def _template_reconcile_bams(params: dict) -> dict:
         "auto_execute_safe_steps": True,
         "status": "PENDING",
         "current_step_id": steps[0]["id"],
+        "reference": reference,
         "output_prefix": output_prefix,
         "output_directory": output_directory,
         "annotation_gtf": annotation_gtf,
+        "steps": steps,
+        "artifacts": [],
+    }
+
+
+def _template_haplotype_with_vcf(params: dict) -> dict:
+    """Deterministic plan for workflow-aware BAM haplotyping with a VCF."""
+    assay_mode = str(params.get("input_type") or params.get("mode") or "").strip().upper() or "RNA"
+    output_directory = params.get("output_directory", "")
+    work_dir = params.get("work_dir", "")
+    workflow_dirs = [str(item) for item in params.get("workflow_dirs", []) if isinstance(item, str) and item]
+    vcf_path = str(params.get("vcf_path") or "").strip()
+    vcf_selected_samples = [str(item) for item in params.get("vcf_selected_samples", []) if isinstance(item, str) and item]
+    reference_genome = str(params.get("reference_genome") or "").strip() or None
+    vcf_defaulted = bool(params.get("vcf_defaulted"))
+
+    if not output_directory:
+        if workflow_dirs:
+            workflow_roots = [os.path.dirname(path.rstrip("/")) or "/" for path in workflow_dirs]
+            output_directory = os.path.commonpath(workflow_roots)
+        elif work_dir:
+            output_directory = os.path.dirname(work_dir.rstrip("/")) or work_dir
+
+    steps = []
+    idx = 0
+
+    locate_tool_calls = []
+    discover_subdir = "annot" if assay_mode in {"RNA", "CDNA"} else "bams"
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            locate_tool_calls.append(
+                {
+                    "source_key": "analyzer",
+                    "tool": "list_job_files",
+                    "params": {
+                        "work_dir": f"{workflow_dir.rstrip('/')}/{discover_subdir}",
+                        "extensions": ".bam",
+                        "max_depth": 1,
+                        "allow_missing": True,
+                    },
+                }
+            )
+    elif work_dir:
+        locate_tool_calls.append(
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": f"{work_dir.rstrip('/')}/{discover_subdir}",
+                    "extensions": ".bam",
+                    "max_depth": 1,
+                    "allow_missing": True,
+                },
+            }
+        )
+
+    s_locate = _make_step(
+        "LOCATE_DATA",
+        "Locate BAM candidates for haplotyping",
+        idx,
+        tool_calls=locate_tool_calls,
+    )
+    steps.append(s_locate)
+    idx += 1
+
+    preflight_args = ["--json", "--preflight-only", "--mode", assay_mode]
+    if vcf_path:
+        preflight_args.extend(["--vcf", vcf_path])
+    for sample_name in vcf_selected_samples:
+        preflight_args.extend(["--vcf-sample", sample_name])
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            preflight_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        preflight_args.extend(["--workflow-dir", work_dir])
+    if output_directory:
+        preflight_args.extend(["--output-dir", output_directory])
+
+    s_preflight = _make_step(
+        "CHECK_EXISTING",
+        "Run haplotype preflight before approval",
+        idx,
+        depends_on=[s_locate["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                    "script_args": preflight_args,
+                },
+            }
+        ],
+    )
+    steps.append(s_preflight)
+    idx += 1
+
+    s_approve = _make_step(
+        "REQUEST_APPROVAL",
+        "Approve haplotype-with-VCF execution",
+        idx,
+        requires_approval=True,
+        depends_on=[s_preflight["id"]],
+    )
+    steps.append(s_approve)
+    idx += 1
+
+    script_args = ["--json", "--mode", assay_mode]
+    if vcf_path:
+        script_args.extend(["--vcf", vcf_path])
+    for sample_name in vcf_selected_samples:
+        script_args.extend(["--vcf-sample", sample_name])
+    if workflow_dirs:
+        for workflow_dir in workflow_dirs:
+            script_args.extend(["--workflow-dir", workflow_dir])
+    elif work_dir:
+        script_args.extend(["--workflow-dir", work_dir])
+    if output_directory:
+        script_args.extend(["--output-dir", output_directory])
+
+    s_run = _make_step(
+        "RUN_SCRIPT",
+        "Run haplotype-with-VCF script",
+        idx,
+        requires_approval=True,
+        depends_on=[s_approve["id"]],
+        tool_calls=[
+            {
+                "source_key": "launchpad",
+                "tool": "run_allowlisted_script",
+                "params": {
+                    "script_id": "haplotype_with_vcf/haplotype_with_vcf",
+                    "script_args": script_args,
+                    "timeout_seconds": HAPLOTYPE_SCRIPT_TIMEOUT_SECONDS,
+                },
+            }
+        ],
+    )
+    steps.append(s_run)
+    idx += 1
+
+    s_locate_out = _make_step(
+        "LOCATE_DATA",
+        "List haplotype output files for parsing",
+        idx,
+        depends_on=[s_run["id"]],
+        tool_calls=[
+            {
+                "source_key": "analyzer",
+                "tool": "list_job_files",
+                "params": {
+                    "work_dir": output_directory or work_dir or "",
+                    "max_depth": 2,
+                    "allow_missing": True,
+                },
+            }
+        ],
+    )
+    steps.append(s_locate_out)
+    idx += 1
+
+    s_parse = _make_step(
+        "PARSE_OUTPUT_FILE",
+        "Parse haplotype result tables",
+        idx,
+        depends_on=[s_locate_out["id"]],
+    )
+    steps.append(s_parse)
+    idx += 1
+
+    s_summary = _make_step(
+        "WRITE_SUMMARY",
+        "Summarize haplotype outputs and generated files",
+        idx,
+        depends_on=[s_parse["id"]],
+    )
+    steps.append(s_summary)
+
+    return {
+        "plan_type": "haplotype_with_vcf",
+        "title": "Haplotype long-read BAMs with a VCF",
+        "goal": params.get("goal", "Label long-read BAM reads with haplotype or genotype assignments using a VCF"),
+        "workflow_type": "haplotype_with_vcf",
+        "auto_execute_safe_steps": True,
+        "status": "PENDING",
+        "current_step_id": steps[0]["id"],
+        "input_type": assay_mode,
+        "reference_genome": reference_genome,
+        "vcf_path": vcf_path,
+        "vcf_defaulted": vcf_defaulted,
+        "vcf_selected_samples": vcf_selected_samples,
+        "output_directory": output_directory,
         "steps": steps,
         "artifacts": [],
     }
@@ -1214,6 +1550,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         tool_calls=locate_calls,
     )
+    s_locate["id"] = "locate_overlap"
     steps.append(s_locate)
     idx += 1
 
@@ -1224,6 +1561,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         requires_approval=True,
         depends_on=[s_locate["id"]],
     )
+    s_approve["id"] = "approve_overlap"
     steps.append(s_approve)
     idx += 1
 
@@ -1244,6 +1582,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
             }
         ],
     )
+    s_run["id"] = "run_overlap"
     steps.append(s_run)
     idx += 1
 
@@ -1253,6 +1592,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         depends_on=[s_run["id"]],
     )
+    s_parse["id"] = "parse_overlap_outputs"
     steps.append(s_parse)
     idx += 1
 
@@ -1262,6 +1602,7 @@ def _template_compare_region_overlaps(params: dict) -> dict:
         idx,
         depends_on=[s_parse["id"]],
     )
+    s_plot["id"] = "plot_overlap"
     s_plot["plot_type"] = plot_type
     if plot_title:
         s_plot["plot_title"] = plot_title

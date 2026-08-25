@@ -6,6 +6,7 @@ Usage:
     result = render_slurm_form(defaults={"cpus": 8, "memory_gb": 32})
 """
 
+from appui_config import SLURM_DEFAULT_CPU_MEMORY_GB
 import streamlit as st
 from typing import Optional
 from components.cards import section_header
@@ -56,7 +57,7 @@ def render_slurm_form(defaults: Optional[dict] = None) -> Optional[dict]:
             "Memory (GB)",
             min_value=1,
             max_value=1024,
-            value=defaults.get("memory_gb", 16),
+            value=defaults.get("memory_gb", SLURM_DEFAULT_CPU_MEMORY_GB),
             key="slurm_memory_gb",
         )
 

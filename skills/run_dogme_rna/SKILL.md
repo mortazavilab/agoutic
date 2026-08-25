@@ -67,11 +67,11 @@ The Dogme RNA pipeline performs:
 - `*.mapping_stats.txt` — read length and mapping quality distributions
 
 ### Modification Files (RNA has modifications)
-- `*.m6A.filtered.bed` — m6A modification calls with per-site frequencies
-- `*.pseU.filtered.bed` — pseudouridine modification calls (if model supports)
-- `*.m5C.filtered.bed` — m6A modification calls with per-site frequencies
-- `*.inosine.filtered.bed` — inosine modification calls with per-site frequencies
-- `*.Nm.filtered.bed` — Nm modification calls with per-site frequencies
+- `*.m6A.filtered.bed` or `*.m6A.filtered.bed.gz` — m6A modification calls with per-site frequencies
+- `*.pseU.filtered.bed` or `*.pseU.filtered.bed.gz` — pseudouridine modification calls (if model supports)
+- `*.m5C.filtered.bed` or `*.m5C.filtered.bed.gz` — m6A modification calls with per-site frequencies
+- `*.inosine.filtered.bed` or `*.inosine.filtered.bed.gz` — inosine modification calls with per-site frequencies
+- `*.Nm.filtered.bed` or `*.Nm.filtered.bed.gz` — Nm modification calls with per-site frequencies
 
 ### Transcript/Gene Counts in `annot/` folder
 - `*_qc_summary.csv` — gene-level expression counts
@@ -120,7 +120,33 @@ That guide includes:
 **RNA-specific tools:**
 - Modification sites: `parse_bed_file` for `*.m6A.filtered.bed`, `*.pseU.filtered.bed`
 - Gene counts: `parse_csv_file` for expression data
-- Summaries: `read_file_content` for `*.modkit_summary.txt`
+- Modification summaries: list `bedMethyl/*.filtered.bed` and `bedMethyl/*.filtered.bed.gz` files and use the allowlisted script `analyze_job_results/count_bed` to count sites across plus/minus files
+
+### Modification Summary Requests
+
+There is no `modkit_summary` file in the current RNA workflow outputs. For requests like:
+- "Show me the modification summary"
+- "Summarize the RNA modifications"
+- "How many modification sites were found?"
+
+use the workflow's `bedMethyl/` folder instead.
+
+Do not reject or redirect a workflow-specific analysis request just because that workflow is marked `FAILED` or `CANCELLED`. If the user explicitly asks for `workflow1`, `/use workflow1`, or another named workflow and result files are present, analyze that workflow's files directly. A cancelled or failed workflow can still contain synced outputs worth summarizing.
+
+When a workflow-specific RNA follow-up targets a failed/cancelled workflow, prefer this order:
+1. Check the requested workflow's relevant output folder such as `bedMethyl/`, `annot/`, or other expected result paths
+2. If the files exist, continue the analysis for that workflow instead of switching to a different completed workflow
+3. Only fall back to another workflow when the explicitly requested workflow truly has no relevant result files
+
+Preferred flow:
+1. List `.bed` and `.bed.gz` files in `<work_dir>/bedMethyl`
+2. Use only `*.filtered.bed` or `*.filtered.bed.gz` files that include explicit modification names such as `m6A`, `inosine`, `m5C`, `pseU`, or `Nm`
+3. Sum plus/minus files with the allowlisted script `analyze_job_results/count_bed`
+4. Present totals by modification, noting that the underlying dataframe remains available for plotting or chromosome-level follow-up
+
+When `count_bed` returns chromosome-level rows, the first markdown summary table must show numeric totals per modification by summing the `Count` column across chromosomes. Use a `Modification | Count` style summary, not a `Detected` or `Present` status table. Keep the detailed per-chromosome dataframe available for later plotting.
+
+Do not search for `modkit_summary`, `modification_summary.txt`, or similar nonexistent summary files for this workflow.
 
 ### RNA-Specific Notes
 
@@ -151,19 +177,27 @@ When user says "analyze the results":
 [[DATA_CALL: service=analyzer, tool=get_analysis_summary, work_dir=<work_dir>]]
 ```
 
-**STEP 2:** Present filtered file summary
-- The summary now excludes work/intermediate files automatically
-- Shows only final result files: txt, csv, bed files
+**STEP 2:** Use the summary only as the starting point, not the final answer
+- Do not stop after file counts or file-availability statements
+- Treat the summary as evidence for which result files should be parsed next
 
-**STEP 3:** Follow the shared workflow for finding and parsing files
+**STEP 3:** Parse the most informative key outputs immediately when they are available
+- Parse the main QC or quantification CSV when a `*_qc_summary.csv` or similar file is present
+- Parse the main stats CSV when a `*_final_stats.csv` or similar file is present
+- If RNA modification BED files are available, summarize them from `bedMethyl/` using the shared modification-summary flow
 - See [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the complete step-by-step workflow
 
-**STEP 4:** Present results with RNA-specific interpretation
-- Modification site locations and frequencies
-- Expression levels and isoform composition
-- Poly(A) tail length patterns
-- Alignment quality and read characteristics
-- Enrichment of modifications at known regulatory motifs
+**STEP 4:** Write a detailed first-pass analysis
+- Include an **Overall Assessment** that explains what completed successfully and what the file set implies about the run
+- Include **Key Metrics** using parsed values whenever available; if a key metric is not yet parsed, say which file contains it
+- Include **Reference-Specific Findings** when the reference genome or annotation target is clear
+- Include **QC Concerns or Limitations** grounded in parsed stats, missing artifacts, or workflow-specific caveats
+- Include **Recommended Next Steps** tied to the observed outputs
+
+**STEP 5:** Prefer evidence over generic filler
+- Base conclusions on parsed CSV or BED content whenever possible
+- Avoid vague statements like "QC Summary: Available" unless followed by interpretation
+- Mention notable files after the analytic sections above, not instead of them
 
 ---
 
@@ -173,11 +207,13 @@ When user says "analyze the results":
 - Reference [DOGME_QUICK_WORKFLOW_GUIDE.md](DOGME_QUICK_WORKFLOW_GUIDE.md) for the standard workflow
 - Execute tool calls immediately — don't explain what you're about to do
 - Present results with clear explanations of what they mean
+- For generic "analyze results" requests, default to a detailed post-run analysis with sections such as Overall Assessment, Key Metrics, QC Concerns or Limitations, and Recommended Next Steps
 - Offer suggestions for further analysis
 
 **DON'T:**
 - Explain your process step-by-step before executing
 - Say "the query did not return expected data" when parse succeeds
+- Stop after reporting file counts and file availability for a generic analysis request
 - Ask permission for obvious next steps
 - Forget the directory prefix in file_path parameter
 - Ask permission for obvious next steps ("Would you like me to parse this file?")
@@ -191,8 +227,8 @@ When user says "analyze the results":
 
 **STEP 6:** Parse modification BED files to get detailed m6A and other modification locations from STEP 3
 ```
-[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.plus.mod.filtered.bed]]
-[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.minus.mod.filtered.bed]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.plus.mod.filtered.bed.gz]]
+[[DATA_CALL: service=analyzer, tool=parse_bed_file, work_dir=<work_dir>, file_path=bedMethyl/sample_name.genomeRef.minus.mod.filtered.bed.gz]]
 ```
 
 **STEP 7:** Present results with RNA-specific interpretation (modification sites, expression levels)

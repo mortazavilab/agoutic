@@ -24,10 +24,12 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import select, desc
 
 import cortex.config as _cfg
 import cortex.db as _db
+from common.maintenance_mode import get_maintenance_state, maintenance_block_message
 from cortex.dependencies import require_project_access
 from cortex.db_helpers import _resolve_project_dir
 from cortex.models import Project, ProjectAccess, User
@@ -771,15 +773,26 @@ async def stage_files(
     """
     user = request.state.user
 
-    # Validate destination is specified
-    if not body.destination_project_id and not body.destination_project_name:
-        raise HTTPException(
-            status_code=400,
-            detail="Must specify either destination_project_id or destination_project_name"
-        )
-
     session = _db.SessionLocal()
     try:
+        if str(getattr(user, "role", "") or "").strip().lower() != "admin":
+            maintenance_state = get_maintenance_state(session)
+            if maintenance_state.get("mode"):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "maintenance_mode",
+                        "message": maintenance_block_message(maintenance_state, noun="transfer"),
+                    },
+                )
+
+        # Validate destination is specified
+        if not body.destination_project_id and not body.destination_project_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Must specify either destination_project_id or destination_project_name"
+            )
+
         # Step 1: Revalidate all selected files
         validated_files = []
         for sel in body.selected_files:
@@ -850,6 +863,9 @@ async def stage_files(
                 project_id=dest_project_id,
                 project_name=new_name,
                 role="owner",
+                invited_by=None,
+                created_at=now,
+                updated_at=now,
                 last_accessed=now,
             )
             session.add(access)

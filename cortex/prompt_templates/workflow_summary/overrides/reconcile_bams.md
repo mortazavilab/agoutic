@@ -1,0 +1,1 @@
+For reconcile_bams reports, prioritize transcript and isoform comparison points such as total transcript models, novelty categories, novel genes, novel isoforms, abundance-table counts, and filtering outcomes when those values are present.

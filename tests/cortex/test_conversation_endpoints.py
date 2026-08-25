@@ -24,6 +24,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from common.database import Base
+from launchpad.config import JobStatus
+from launchpad.models import DogmeJob
 from cortex.models import (
     User, Session as SessionModel, Project, ProjectAccess,
     ProjectBlock, Conversation, ConversationMessage,
@@ -146,6 +148,44 @@ def _seed_conversation(session_factory, conv_id="conv-1", proj_id="proj-1",
     sess.close()
 
 
+def _seed_user_with_session(session_factory, *, user_id: str, email: str, username: str, session_id: str):
+    sess = session_factory()
+    user = User(
+        id=user_id,
+        email=email,
+        role="user",
+        username=username,
+        is_active=True,
+    )
+    sess.add(user)
+    sess.add(
+        SessionModel(
+            id=session_id,
+            user_id=user_id,
+            is_valid=True,
+            expires_at=datetime.datetime(2099, 1, 1),
+        )
+    )
+    sess.commit()
+    sess.close()
+
+
+def _grant_project_access(session_factory, *, user_id: str, project_id: str, project_name: str, role: str):
+    sess = session_factory()
+    sess.add(
+        ProjectAccess(
+            id=str(uuid.uuid4()),
+            user_id=user_id,
+            project_id=project_id,
+            project_name=project_name,
+            role=role,
+            last_accessed=datetime.datetime.utcnow(),
+        )
+    )
+    sess.commit()
+    sess.close()
+
+
 # ---------------------------------------------------------------------------
 # GET /projects/{id}/conversations
 # ---------------------------------------------------------------------------
@@ -197,20 +237,114 @@ class TestConversationMessages:
         resp = client.get("/conversations/no-such-conv/messages")
         assert resp.status_code == 404
 
-    def test_access_denied_other_user(self, client, test_session_factory):
-        """Cannot read messages from another user's conversation."""
+    def test_access_denied_without_project_access(self, client, test_session_factory):
+        """Cannot read messages from a conversation in an unrelated project."""
         sess = test_session_factory()
         other = User(id="other-uid", email="other@x.com", role="user",
                      username="other", is_active=True)
         sess.add(other)
         sess.flush()
-        conv = Conversation(id="other-conv", project_id="proj-1",
+        other_project = Project(
+            id="other-proj",
+            name="Other Project",
+            owner_id="other-uid",
+            slug="other-project",
+        )
+        sess.add(other_project)
+        sess.flush()
+        sess.add(
+            ProjectAccess(
+                id=str(uuid.uuid4()),
+                user_id="other-uid",
+                project_id="other-proj",
+                project_name="Other Project",
+                role="owner",
+                last_accessed=datetime.datetime.utcnow(),
+            )
+        )
+        conv = Conversation(id="other-conv", project_id="other-proj",
                             user_id="other-uid", title="X")
         sess.add(conv)
         sess.commit()
         sess.close()
 
         resp = client.get("/conversations/other-conv/messages")
+        assert resp.status_code == 403
+
+    def test_viewer_with_project_access_can_read_messages(self, client, test_session_factory):
+        _seed_conversation(
+            test_session_factory,
+            conv_id="shared-conv",
+            messages=[("user", "Hello", None), ("assistant", "Shared", None)],
+        )
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-uid",
+            email="viewer@example.com",
+            username="viewer",
+            session_id="viewer-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-uid",
+            project_id="proj-1",
+            project_name="Test Project",
+            role="viewer",
+        )
+
+        client.cookies.set("session", "viewer-session")
+        resp = client.get("/conversations/shared-conv/messages")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["conversation_id"] == "shared-conv"
+        assert len(data["messages"]) == 2
+
+
+class TestConversationJobLinks:
+    def test_editor_with_project_access_can_link_job(self, client, test_session_factory):
+        _seed_conversation(test_session_factory, conv_id="editor-conv")
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="editor-uid",
+            email="editor@example.com",
+            username="editor",
+            session_id="editor-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="editor-uid",
+            project_id="proj-1",
+            project_name="Test Project",
+            role="editor",
+        )
+
+        client.cookies.set("session", "editor-session")
+        resp = client.post("/conversations/editor-conv/jobs", params={"run_uuid": "run-123"})
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ok"
+
+    def test_viewer_cannot_link_job(self, client, test_session_factory):
+        _seed_conversation(test_session_factory, conv_id="viewer-conv")
+        _seed_user_with_session(
+            test_session_factory,
+            user_id="viewer-job-uid",
+            email="viewerjob@example.com",
+            username="viewerjob",
+            session_id="viewer-job-session",
+        )
+        _grant_project_access(
+            test_session_factory,
+            user_id="viewer-job-uid",
+            project_id="proj-1",
+            project_name="Test Project",
+            role="viewer",
+        )
+
+        client.cookies.set("session", "viewer-job-session")
+        resp = client.post("/conversations/viewer-conv/jobs", params={"run_uuid": "run-456"})
+
         assert resp.status_code == 403
 
 
@@ -345,6 +479,18 @@ class TestProjectStats:
             payload_json=json.dumps({"text": "hello"}),
         )
         sess.add(blk)
+        sess.add(
+            DogmeJob(
+                run_uuid="stats-stale-run",
+                project_id="proj-1",
+                user_id="user-1",
+                workflow_key="dogme",
+                workflow_display_name="dogme",
+                sample_name="stats-sample",
+                input_directory="/tmp/input",
+                status=JobStatus.STALE.value,
+            )
+        )
         sess.commit()
         sess.close()
 
@@ -359,6 +505,7 @@ class TestProjectStats:
         data = resp.json()
         assert data["project_id"] == "proj-1"
         assert data["message_count"] >= 1
+        assert data["stale_count"] == 1
         assert "token_usage" in data
         assert data["disk_usage_bytes"] > 0
 

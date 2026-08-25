@@ -36,6 +36,7 @@ from common.database import DATABASE_URL  # noqa: E402
 
 # Internal API secret for Cortex <-> Launchpad communication
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+WF_PORE_C_ENABLED = os.getenv("WF_PORE_C_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 # --- NEXTFLOW / DOGME CONFIG (derived from AGOUTIC_CODE) ---
 # Path to Dogme pipeline repository
@@ -73,12 +74,6 @@ DOGME_DNA_OPENCHROM_LIBTORCH = Path(
     ).strip()
 )
 
-# Shared Apptainer image for SLURM DNA runs.
-DOGME_DNA_SLURM_CONTAINER = (
-    os.getenv("DOGME_DNA_SLURM_CONTAINER")
-    or "/share/crsp/lab/seyedam/share/agoutic/container/dogme-pipeline-openchrom-gpu-bedtools.sif"
-).strip()
-
 # Path to Nextflow executable
 NEXTFLOW_BIN = Path(os.getenv("NEXTFLOW_BIN", "/usr/local/bin/nextflow"))
 
@@ -95,7 +90,7 @@ if DEFAULT_MAX_GPU_TASKS is not None and not 1 <= DEFAULT_MAX_GPU_TASKS <= MAX_G
     )
 
 # Job polling interval (seconds)
-JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "10"))
+JOB_POLL_INTERVAL = int(os.getenv("JOB_POLL_INTERVAL", "30"))
 
 # Job timeout (seconds) - 48 hours default
 JOB_TIMEOUT = int(os.getenv("JOB_TIMEOUT", "172800"))
@@ -106,16 +101,64 @@ class DogmeMode(str, Enum):
     RNA = "RNA"
     CDNA = "CDNA"
 
+
+def default_dogme_accuracy(mode: str | None) -> str:
+    normalized_mode = str(mode or "").strip().upper()
+    if normalized_mode == DogmeMode.RNA.value:
+        return "sup"
+    return "hac"
+
+
+def resolve_dogme_accuracy(mode: str | None, accuracy: str | None) -> str:
+    cleaned_accuracy = str(accuracy or "").strip()
+    if cleaned_accuracy:
+        return cleaned_accuracy
+    return default_dogme_accuracy(mode)
+
 # --- JOB STATUS ---
 class JobStatus(str, Enum):
     PENDING = "PENDING"
     RUNNING = "RUNNING"
+    STALE = "STALE"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     DELETED = "DELETED"
 
 # --- REFERENCE GENOMES ---
+_REFERENCE_FASTA_SUFFIXES = (".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")
+_REFERENCE_GTF_SUFFIXES = (".gtf", ".gtf.gz")
+
+
+def discover_reference_genomes(reference_root: Path | None = None) -> dict[str, dict[str, Path]]:
+    """Discover reference directories with one FASTA and one GTF asset."""
+    root = reference_root or AGOUTIC_DATA / "references"
+    if not root.is_dir():
+        return {}
+
+    discovered: dict[str, dict[str, Path]] = {}
+    for reference_dir in sorted(root.iterdir()):
+        if not reference_dir.is_dir():
+            continue
+
+        files = [path for path in reference_dir.iterdir() if path.is_file()]
+        fasta_files = sorted(
+            path for path in files if path.name.lower().endswith(_REFERENCE_FASTA_SUFFIXES)
+        )
+        gtf_files = sorted(
+            path for path in files if path.name.lower().endswith(_REFERENCE_GTF_SUFFIXES)
+        )
+        if len(fasta_files) != 1 or len(gtf_files) != 1:
+            continue
+
+        discovered[reference_dir.name] = {
+            "fasta": fasta_files[0],
+            "gtf": gtf_files[0],
+        }
+
+    return discovered
+
+
 REFERENCE_GENOMES = {
     "GRCh38": {
         "fasta": AGOUTIC_DATA / "references" / "GRCh38" / "GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta",
@@ -129,8 +172,21 @@ REFERENCE_GENOMES = {
         "kallisto_index": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.idx",
         "kallisto_t2g": AGOUTIC_DATA / "references" / "mm39" / "mm39GencM36_k63.t2g",
     },
+    "chm13": {
+        "fasta": AGOUTIC_DATA / "references" / "chm13" / "chm13v2.0.fa",
+        "gtf": AGOUTIC_DATA / "references" / "chm13" / "Homo_sapiens-GCA_009914755.4-2022_07-genes_fixed.gtf",
+    },
+    "mad1": {
+        "fasta": AGOUTIC_DATA / "references" / "mad1" / "MAD1.fa",
+        "gtf": AGOUTIC_DATA / "references" / "mad1" / "MAD1.gtf",
+    },
     "default": "GRCh38",
 }
+
+# Explicit catalog entries take precedence; complete new reference folders are
+# automatically available to the UI and remote staging after service restart.
+for _reference_id, _reference_assets in discover_reference_genomes().items():
+    REFERENCE_GENOMES.setdefault(_reference_id, _reference_assets)
 
 # --- MODIFICATION MOTIFS ---
 DEFAULT_DNA_MODS = "5mCG_5hmCG,6mA"
@@ -140,10 +196,16 @@ DEFAULT_CDNA_MODS = ""  # cDNA does not call modifications
 # --- SLURM / REMOTE EXECUTION ---
 # Default SLURM resource limits (override via environment)
 SLURM_MAX_CPUS = int(os.getenv("SLURM_MAX_CPUS", "128"))
+SLURM_DEFAULT_CPU_MEMORY_GB = int(os.getenv("SLURM_DEFAULT_CPU_MEMORY_GB", "64"))
+LOCAL_DEFAULT_MAX_TASK_MEMORY_GB = int(os.getenv("LOCAL_DEFAULT_MAX_TASK_MEMORY_GB", "64"))
 SLURM_MAX_MEMORY_GB = int(os.getenv("SLURM_MAX_MEMORY_GB", "1024"))
 SLURM_MIN_WALLTIME_MINUTES = int(os.getenv("SLURM_MIN_WALLTIME_MINUTES", "2880"))  # 48h
 SLURM_MAX_WALLTIME_MINUTES = int(os.getenv("SLURM_MAX_WALLTIME_MINUTES", "4320"))  # 72h
 SLURM_MAX_GPUS = int(os.getenv("SLURM_MAX_GPUS", "8"))
+if SLURM_DEFAULT_CPU_MEMORY_GB > SLURM_MAX_MEMORY_GB:
+    raise ValueError("SLURM_DEFAULT_CPU_MEMORY_GB cannot exceed SLURM_MAX_MEMORY_GB")
+if LOCAL_DEFAULT_MAX_TASK_MEMORY_GB < 1:
+    raise ValueError("LOCAL_DEFAULT_MAX_TASK_MEMORY_GB must be at least 1")
 if SLURM_MIN_WALLTIME_MINUTES > SLURM_MAX_WALLTIME_MINUTES:
     raise ValueError("SLURM_MIN_WALLTIME_MINUTES cannot exceed SLURM_MAX_WALLTIME_MINUTES")
 # Comma-separated whitelist (empty = any allowed)
@@ -157,9 +219,12 @@ SSH_STRICT_HOST_KEY_CHECKING = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "true")
 SSH_AGENT_FORWARDING = os.getenv("SSH_AGENT_FORWARDING", "false").strip().lower() in {"1", "true", "yes"}
 SSH_CONNECT_TIMEOUT_SECONDS = int(os.getenv("SSH_CONNECT_TIMEOUT_SECONDS", "600"))
 SSH_CONNECTION_ATTEMPTS = int(os.getenv("SSH_CONNECTION_ATTEMPTS", "1"))
+SSH_SERVER_ALIVE_INTERVAL_SECONDS = int(os.getenv("SSH_SERVER_ALIVE_INTERVAL_SECONDS", "30"))
+SSH_SERVER_ALIVE_COUNT_MAX = int(os.getenv("SSH_SERVER_ALIVE_COUNT_MAX", "3"))
+RSYNC_TRANSPORT_RETRY_ATTEMPTS = int(os.getenv("RSYNC_TRANSPORT_RETRY_ATTEMPTS", "2"))
 
 # Local auth broker sessions for per-user SSH access via `su`
-LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS", "3600"))
+LOCAL_AUTH_SESSION_TTL_SECONDS = int(os.getenv("LOCAL_AUTH_SESSION_TTL_SECONDS", "259200"))
 LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_HELPER_START_TIMEOUT_SECONDS", "20"))
 LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS = int(os.getenv("LOCAL_AUTH_OPERATION_TIMEOUT_SECONDS", "3600"))
 LOCAL_AUTH_SOCKET_DIR = Path(os.getenv("LOCAL_AUTH_SOCKET_DIR", AGOUTIC_DATA / "runtime" / "local_auth"))

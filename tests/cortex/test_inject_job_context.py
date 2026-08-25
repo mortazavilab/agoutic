@@ -74,6 +74,7 @@ class TestDogmeInjection:
         assert "[CONTEXT:" in msg
         assert "work_dir=/data/proj/workflow1" in msg
         assert "sample=test1" in msg
+        assert "workflow_key=dogme" in msg
 
     def test_multiple_workflows(self):
         blocks = [
@@ -98,6 +99,46 @@ class TestDogmeInjection:
         assert "workflows=[" in msg
         assert "workflow1" in msg
         assert "workflow2" in msg
+        assert "workflow_key=dogme" in msg
+
+    def test_legacy_mode_only_analysis_context_resolves_to_dogme(self):
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow3",
+                "run_uuid": "uuid-legacy",
+                "sample_name": "legacy_sample",
+                "mode": "RNA",
+            }),
+        ]
+        history = _history([("user", "check results")])
+
+        msg, dfs, debug = _inject_job_context(
+            "Analyze the results", "analyze_job_results", history, blocks,
+        )
+
+        assert "workflow_key=dogme" in msg
+        assert "mode=RNA" in msg
+        assert debug.get("context") == "workflow_analysis"
+
+    def test_wf_pore_c_analysis_context_includes_workflow_key(self):
+        blocks = [
+            _make_block("EXECUTION_JOB", {
+                "work_directory": "/data/proj/workflow8",
+                "run_uuid": "uuid-wf",
+                "sample_name": "POREC_A",
+                "workflow_key": "wf_pore_c",
+                "mode": None,
+            }),
+        ]
+        history = _history([("user", "check results")])
+
+        msg, dfs, debug = _inject_job_context(
+            "Analyze the results", "analyze_job_results", history, blocks,
+        )
+
+        assert "workflow_key=wf_pore_c" in msg
+        assert "mode=" not in msg.split("[CONTEXT:", 1)[1].split("]", 1)[0]
+        assert debug.get("context") == "workflow_analysis"
 
     def test_uuid_fallback(self):
         history = _history([

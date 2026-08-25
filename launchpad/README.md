@@ -1,6 +1,6 @@
 # AGOUTIC Launchpad: Dogme/Nextflow Job Execution Engine
 
-**Docs Current For:** AGOUTIC 3.6.6  
+**Docs Current For:** AGOUTIC 3.7.6
 **Service Version:** 0.3.0  
 **Status:** Active Development
 
@@ -11,9 +11,11 @@ Launchpad is the **execution engine** for the AGOUTIC bioinformatics platform. I
 ### Key Responsibilities
 - 🚀 **Job Submission**: Receive and queue Dogme pipeline jobs (DNA/RNA/cDNA)
 - 📊 **Job Monitoring**: Track job progress in real-time
+- 🧵 **Script Lifecycle Control**: Standalone script jobs such as `reconcile_bams` and `haplotype_with_vcf` run in their own process groups, report live progress, and persist final output directories atomically on completion
 - 📝 **Logging**: Capture detailed execution logs
 - 🔍 **Status Tracking**: Maintain persistent job state in database
 - 📤 **Result Retrieval**: Return analysis outputs and reports
+- 🔁 **Remote Transfers**: Stage inputs and retrieve outputs through an optional dedicated rsync transfer host, falling back to the SLURM SSH host when unset
 - 🤝 **Dual Interface**: REST API + MCP Protocol for LLM agents
 
 ## Architecture: Dual Interface

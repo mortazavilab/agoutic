@@ -21,7 +21,8 @@
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AGOUTIC_VERSION="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null | tr -d '\n' || echo '0.0.0')"
+AGOUTIC_VERSION_RAW="$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null | tr -d '\n' || echo '0.0.0')"
+AGOUTIC_VERSION="${AGOUTIC_VERSION_RAW#v}"
 export AGOUTIC_CODE="${AGOUTIC_CODE:-$SCRIPT_DIR}"
 export AGOUTIC_DATA="${AGOUTIC_DATA:-$AGOUTIC_CODE/data}"
 
@@ -72,6 +73,18 @@ ensure_gene_caches() {
         error "Failed to build shared gene annotation caches"
         return 1
     fi
+}
+
+run_mark_stale_jobs() {
+    log "Marking orphaned stale job rows before startup..."
+    cd "$AGOUTIC_CODE" || return 1
+    python scripts/cortex/mark_stale_jobs.py
+}
+
+run_maintenance_status_report() {
+    log "Maintenance readiness report:"
+    cd "$AGOUTIC_CODE" || return 1
+    python scripts/cortex/maintenance_status.py
 }
 
 log() {
@@ -130,7 +143,7 @@ rotate_logs() {
         log "Rotated $rotated log file(s) with timestamp $timestamp"
     fi
 
-    # Archive rotated logs older than 30 days into monthly folders
+    # Archive rotated logs older than 7 days into monthly folders
     # e.g. logs/logs_202603/ for March 2026
     local archived=0
     for logfile in "$LOGS_DIR"/*.jsonl "$LOGS_DIR"/*.log; do
@@ -144,7 +157,7 @@ rotate_logs() {
         # Rotated files have at least one dot in the name portion, e.g. "cortex.20260213_082438"
         [[ "$name" == *.* ]] || continue
 
-        # Check if file is older than 30 days
+        # Check if file is older than 7 days
         if [[ "$(uname)" == "Darwin" ]]; then
             local age_days
             age_days=$(( ( $(date +%s) - $(stat -f %m "$logfile") ) / 86400 ))
@@ -152,7 +165,7 @@ rotate_logs() {
             local age_days
             age_days=$(( ( $(date +%s) - $(stat -c %Y "$logfile") ) / 86400 ))
         fi
-        [ "$age_days" -ge 30 ] || continue
+        [ "$age_days" -ge 7 ] || continue
 
         # Determine the month folder from the file's modification time
         local month_stamp
@@ -397,7 +410,7 @@ stop_process() {
 cmd_start() {
     ensure_dirs
     rotate_logs
-    log "Starting AGOUTIC servers (${AGOUTIC_VERSION})..."
+    log "Starting AGOUTIC servers (v${AGOUTIC_VERSION})..."
     echo ""
 
     if ! run_db_migrations; then
@@ -406,6 +419,10 @@ cmd_start() {
 
     if ! ensure_gene_caches; then
         return 1
+    fi
+
+    if ! run_mark_stale_jobs; then
+        warn "Failed to mark stale job rows before startup; continuing startup."
     fi
 
     # Launchpad - REST API (Nextflow/Dogme job execution)
@@ -498,6 +515,11 @@ cmd_status() {
             error "$label: not running (port: $port)"
         fi
     done
+
+    echo ""
+    if ! run_maintenance_status_report; then
+        warn "Maintenance readiness report failed. Run python scripts/cortex/maintenance_status.py manually."
+    fi
     echo ""
 }
 
@@ -506,6 +528,9 @@ cmd_restart() {
     echo ""
     sleep 2
     cmd_start
+    local restart_completed_at
+    restart_completed_at=$(date '+%Y-%m-%d %H:%M:%S %Z')
+    log "Restart completed at $restart_completed_at"
 }
 
 # --- Main ---

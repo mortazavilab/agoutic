@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.6.6
+**Release:** 3.7.6
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -21,7 +21,41 @@ with Alembic migrations. Gene annotation and enrichment tools moved from
 edgePython to Analyzer. The analyzer/server4 adapter layer proxies remaining
 edgePython MCP calls upstream. Atlas now exposes both ENCODE and IGVF
 consortium MCP servers through the same schema-aware routing and formatting
-layer.
+layer. Shared-project collaboration foundations now use the existing
+owner/editor/viewer project RBAC consistently for conversation history,
+project-scoped file routing, analyzer/job access, collaborator management APIs,
+and the Streamlit sharing UI.
+
+## Project Sharing And Collaboration
+
+AGOUTIC projects now support multi-user collaboration with project-scoped
+viewer, editor, and owner roles.
+
+- Owners can add collaborators directly from chat or from the Projects page,
+  and can transfer ownership to an existing viewer or editor collaborator.
+- Editors can work in shared projects and keep using normal mutating project actions.
+- Viewers can open shared conversation history, inspect project files and jobs,
+  and browse project state in a read-only mode.
+- Admins can manage collaborators for any project.
+
+The current collaboration UI surfaces are:
+
+- Chat: natural-language requests such as `share this project with alice@example.com`
+  open a dedicated sharing flow, and `list users` / `list collaborators` display the
+  current project roster with role and activity labels.
+- Sidebar and chat shell: owned vs shared projects are labeled explicitly,
+  viewer-only sessions have chat submission, uploads, and clear-chat disabled, and
+  a `list users` sidebar button exposes the current collaborator roster. Shared
+  owner/admin chat views also keep a pinned collaborator summary available while
+  the conversation scrolls.
+- Projects page: the project table shows access labels, owner/admin-only mutating
+  controls stay gated, and the Collaborators tab supports add, update, remove,
+  and ownership-transfer actions. Collaborator rosters are grouped by editors
+  and viewers to make role-based access easier to scan.
+
+Collaboration is project-scoped rather than conversation-scoped. Authorized
+members can reopen shared project conversations and continue follow-up work in
+the same project when their role allows it.
 
 ## 🖥️ Execution Modes
 
@@ -32,15 +66,46 @@ AGOUTIC supports **dual execution modes**:
 
 Remote execution features:
 - **Saved SSH profiles** — per-user connection profiles with secure key references (no raw secrets stored). Supports local OS user key access through a per-session broker launched under that Unix account with `su` (password used transiently, never stored)
+- **Separate rsync transfer host** — optionally stage inputs and download outputs through a dedicated host while SLURM submission, polling, and remote commands continue through the configured SSH host; blank transfer-host settings fall back automatically
 - **SLURM resource management** — configurable account, partition, CPUs, memory, walltime, GPUs with validation
 - **Shared OpenChromatin GPU runtime defaults** — DNA SLURM runs now default to the shared Dogme OpenChromatin GPU container and task-scoped runtime wiring instead of the older custom host-mounted modkit path
 - **Remote base path model** — a single `remote_base_path` anchors `ref/`, `data/`, and per-workflow remote directories
 - **Remote browsing and stage-only intake** — browse saved-cluster paths and stage references/input data without submitting a job
+- **Completed-workflow import** — adopt an already-run local or remote Dogme workflow into the current project as the next `workflowN`, infer metadata from the workflow `.config`, and keep provenance for later explicit resync
 - **Stage transfer controls** — running stage-only transfers can be refreshed, cancelled, resumed, and failed staging cards can delete their reserved local workflow folders directly from the UI
 - **Result destination policy** — keep results remote-only, copy back locally, or both
 - **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
 - **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
 - **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
+
+### wf-pore-c Status
+
+AGOUTIC now supports the `wf_pore_c` workflow family end to end behind `WF_PORE_C_ENABLED`. Phase 3 is feature-complete across local preview, local execution, remote SLURM staging/submission, Analyzer recognition, automatic summary generation, UI approval/run cards, and backward-compatible conversation/job reconstruction. The flag still defaults to off in both Launchpad and Cortex configs, so existing Dogme behavior remains the default until operators explicitly enable wf-pore-c.
+
+Current validation status:
+- Full closure sweeps passed in both flag states: `1988 passed` with `WF_PORE_C_ENABLED=false` and `1988 passed` with `WF_PORE_C_ENABLED=true` across Cortex, Launchpad, Analyzer, and UI.
+- The identical pass count in both states confirms the flag changes runtime behavior, not test inclusion.
+- Production UI rendering no longer carries the earlier AST-harness fallback branch; missing wf-pore-c helper wiring now fails loudly instead of silently degrading to Dogme metadata.
+- Legacy chats and jobs that only stored `mode` still normalize to `workflow_key="dogme"` on both the slow history-rebuild path and the fast cached-state restore path.
+
+Manual cluster validation is still required before operational rollout. Use these docs for the wf-pore-c validation path:
+- [`docs/wf_pore_c_plan.md`](docs/wf_pore_c_plan.md) — phased implementation record and closure notes
+- [`docs/wf_pore_c_smoke_test.md`](docs/wf_pore_c_smoke_test.md) — local Phase 2 smoke path
+- [`docs/wf_pore_c_remote_smoke_test.md`](docs/wf_pore_c_remote_smoke_test.md) — real-cluster Phase 3 SLURM smoke path
+
+### Import Completed Workflows From Chat
+
+In any existing project, you can import a workflow that Dogme already ran earlier:
+
+- Slash command: `/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote`
+- Natural language: `import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12`
+
+Optional flags:
+
+- `--full-copy` to copy the entire workflow directory instead of the normal result subset
+- `--sample-name`, `--mode`, `--reference`, and `--modifications` if you want to override metadata inferred from the workflow `.config`
+
+Imported workflows are assigned the next `workflowN` folder in the current project. If the source workflow is still incomplete, AGOUTIC keeps a warning on the execution card and you can continue the copy later with `/sync-workflow workflow12`.
 
 Phase 1 limitation: Analyzer operates on local-accessible files only. Remote results must be copied back before downstream analysis.
 
@@ -59,6 +124,7 @@ AGOUTIC is designed to help users:
 - Interpret isoform discovery and transcript structure outputs from long-read workflows
 - Summarize RNA and DNA modification signals from workflow artifacts
 - Review QC metrics across runs and identify quality or completeness issues
+- Read text, markdown, and HTML workflow reports directly from chat or with `/read-file`
 - Inspect gene-level and transcript-level result tables with context
 - Run downstream differential expression and enrichment analysis
 - Compare outputs across samples, conditions, and workflows
@@ -147,6 +213,10 @@ The analysis layer returns:
 - `Summarize the QC for workflow2`
 - `List the important files in workflow1/annot`
 - `Parse the bedMethyl output and summarize methylation patterns`
+- `Haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- `Haplotype mouse sample B6 Cast F1 workflow7`
+- `/haplotype DNA workflow5 /data/family.vcf.gz`
+- `/haplotype RNA workflow7 --vcf-sample B6,CAST`
 - `Show the top expressed genes from this result file`
 - `Run differential expression between control and treatment`
 - `Compare the treated samples treated_1 and treated_2 to the control samples ctrl_1 and ctrl_2`
@@ -155,6 +225,23 @@ The analysis layer returns:
 - `Annotate these Ensembl IDs`
 - `Run GO enrichment on the upregulated genes`
 - `Compare workflow1 and workflow2 outputs`
+
+### Haplotype Reads With A VCF
+
+AGOUTIC can haplotype long-read DNA, RNA, or cDNA workflow BAMs against a VCF through the `haplotype_with_vcf` skill.
+
+- Slash command: `/haplotype RNA workflow7 /data/parents.vcf.gz`
+- Natural language: `haplotype RNA workflow7 with file /data/parents.vcf.gz`
+- Mouse founder-mode natural language: `haplotype mouse sample B6 Cast F1 workflow7`
+- Mouse founder-mode slash command: `/haplotype RNA workflow7 --vcf-sample B6,CAST`
+- Cross-project workflow reference: `haplotype B6CASTF1 RNA mouse sample otherproject:workflow7`
+- DNA workflows resolve mapped BAMs from `bams/`, RNA/cDNA workflows resolve annotated BAMs from `annot/`, and reconcile workflows use root-level `*.annotated.bam` files.
+- Cross-project haplotype requests can target another project's workflow with `project_name:workflowN` while still writing outputs into a new workflow under the active project unless you explicitly override the destination.
+- Plain `.vcf` inputs are compressed to `.vcf.gz` and indexed automatically when AGOUTIC can write beside the source file; `.vcf.gz` inputs missing `.tbi` or `.csi` are auto-indexed.
+- Mouse/mm39 founder-panel requests can omit the VCF. In that case AGOUTIC resolves `mgp_REL2021_snps_founders.vcf.gz` from the same directory as the configured mm39 reference FASTA.
+- Mouse founder aliases are case-insensitive and ignore `/`, `_`, `-`, and spaces. `ref`, `B6`, `C57BL6`, and `C57BL6/J` all resolve to `C57BL_6J`; `CAST`, `CAST/J`, and `CAST_EiJ` resolve to `CAST_EiJ`.
+- Founder-pair restrictions can be written as repeated `--vcf-sample` flags, comma-separated `--vcf-sample B6,CAST`, F1 shorthand such as `B6CastF1` or `B6 Cast F1`, or natural language such as `haplotype mouse between B6 and CAST workflow7`.
+- The approval gate lists the exact BAM names, the selected VCF sample or founder subset, the resolved VCF path, assignment labels, and the destination `workflowN` before execution starts.
 
 ### Visualization Support
 
@@ -183,8 +270,9 @@ AGOUTIC enforces access control at every layer:
 
 - **Authentication**: Google OAuth 2.0 with session cookies (`httponly`, `samesite=lax`, `secure` in production)
 - **Authorization**: Role-based access (owner / editor / viewer) checked on every endpoint via `require_project_access()`. Admins bypass all project-level checks; public projects allow viewer access.
-- **Job ownership**: Each job records the submitting `user_id`. `require_run_uuid_access()` verifies ownership before exposing debug info or analysis results.
-- **File isolation**: User-jailed paths (`AGOUTIC_DATA/users/{username}/{project-slug}/`) with input sanitization and jail-escape guards; legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
+- **Project collaboration**: Shared projects expose conversation history and other project-scoped surfaces to members according to project role. Viewer access is read-only; editor access is required for project mutations such as linking jobs to conversations or writing project files.
+- **Run-level access**: Each job still records the submitting `user_id`, but `require_run_uuid_access()` now authorizes via the job's `project_id` first so shared-project collaborators can inspect project jobs; direct `user_id` ownership remains a fallback for legacy rows.
+- **File isolation**: Project files resolve through the canonical shared project directory, while downloaded/uploaded source files remain in the acting user's central data folder (`AGOUTIC_DATA/users/{username}/data/`). Project `data/` entries are symlinks into that central store, preserving per-user private storage while letting collaborators work in one shared project tree. Legacy `{user_id}/{project_id}` paths are still supported for backward compatibility.
 - **Server-side project IDs**: UUIDs generated server-side via `uuid4()` — clients never control the ID.
 - **Project management**: Full dashboard for browsing projects, viewing stats/files/jobs, renaming, archiving, and permanent deletion with cascading cleanup.
 - **Bootstrap & admin scripts**: Run `python scripts/cortex/init_db.py` for a fresh database bootstrap, `python scripts/cortex/set_usernames.py auto` to derive usernames from email addresses on an existing instance, and `python scripts/cortex/bootstrap_project_tasks.py` to seed persistent project tasks from existing workflow history.
@@ -197,9 +285,21 @@ AGOUTIC enforces access control at every layer:
 # Create environment
 conda env create -f environment.yml
 conda activate agoutic_core
+
+# Or update an existing environment in place
+conda env update -n agoutic_core -f environment.yml --prune
 ```
 
+The environment now includes `htslib` (`bgzip`, `tabix`) and `bcftools` so AGOUTIC can auto-compress and index VCF inputs for haplotyping and operators still have standard VCF command-line tooling available. `bcftools` is resolved from `bioconda`, so one-off manual installs should use `conda-forge` plus `bioconda` with strict channel priority.
+
 ### Run the System
+
+AGOUTIC now supports two UI topologies:
+
+- Hosted Streamlit: Streamlit and Cortex run on the same server or network boundary and the browser uses the existing cookie-based login flow.
+- Local Streamlit against remote Cortex: Streamlit runs on the user's machine, `AGOUTIC_API_URL` points at the remote Cortex server, and login returns to the local Streamlit page so it can exchange a bearer session.
+
+In both modes, the UI talks only to Cortex. End-user UI environments do not need `LAUNCHPAD_REST_URL` or `INTERNAL_API_SECRET`.
 
 ```bash
 # Recommended: start the full backend stack
@@ -225,8 +325,17 @@ uvicorn cortex.app:app --host 0.0.0.0 --port 8000 --reload
 cd ui && streamlit run appUI.py
 ```
 
+For a local UI talking to a remote Cortex server:
+
+```bash
+export AGOUTIC_API_URL=http://remote-cortex-host:8000
+streamlit run ui/appUI.py --server.port 8501
+```
+
+When the UI is running on `localhost` or `127.0.0.1`, the login button automatically requests the local-client auth flow. Cortex redirects back to the local Streamlit URL with a short-lived auth code, and the UI exchanges that code for a bearer session.
+
 Note: running `python ui/appUI.py` directly will not work correctly because the UI
-auth flow depends on Streamlit request context and browser cookies.
+auth flow depends on Streamlit request context plus either browser cookies (hosted mode) or the local auth-code exchange (local mode).
 
 ### Verify Installation
 
@@ -267,7 +376,7 @@ python scripts/cortex/bootstrap_project_tasks.py --project-id <project_id>
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                   AGOUTIC System v3.3.2                     │
+│                   AGOUTIC System v3.7.2                     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │  ┌──────────┐                                               │
@@ -681,6 +790,10 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 | Variable | Default | Description |
 |---|---|---|
 | `AGOUTIC_LOG_FORMAT` | `json` | Set to `dev` for coloured human-readable console output |
+| `AGOUTIC_API_URL` | `http://127.0.0.1:8000` | Cortex base URL used by Streamlit. Set this when running the UI against a remote Cortex server. |
+| `FRONTEND_URL` | `http://localhost:8501` | Hosted Streamlit origin used by Cortex for the browser-cookie login flow. |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:8000/auth/callback` | OAuth callback URL exposed by Cortex. Must match the value registered in Google Cloud. |
+| `LOCAL_UI_ALLOWED_ORIGINS` | unset | Optional comma-separated extra local UI origins allowed for auth-code return targets. Loopback origins (`localhost`, `127.0.0.1`) work without this. |
 
 ## �🚀 Running the System
 
@@ -693,6 +806,15 @@ When servers are started or restarted via `agoutic_servers.sh`, existing log fil
 # Start the UI separately
 streamlit run ui/appUI.py --server.port 8501
 ```
+
+For a local Streamlit client against a remote Cortex deployment:
+
+```bash
+export AGOUTIC_API_URL=http://remote-cortex-host:8000
+streamlit run ui/appUI.py --server.port 8501
+```
+
+The Streamlit UI now proxies remote profile management through Cortex, so the local UI environment does not need direct Launchpad REST credentials.
 
 If you need manual development startup:
 
@@ -886,6 +1008,8 @@ Pre-defined bioinformatics workflows are available in `skills/`:
 - **download_files/SKILL.md** - File download orchestration
 - **differential_expression/SKILL.md** - edgePython DE pipeline (with gene annotation)
 - **enrichment_analysis/SKILL.md** - GO & pathway enrichment analysis
+- **reconcile_bams/SKILL.md** - Cross-workflow annotated BAM reconciliation
+- **haplotype_with_vcf/SKILL.md** - Workflow-aware DNA/RNA/cDNA haplotyping with an indexed VCF
 - **remote_execution/SKILL.md** - Remote execution workflow
 - **shared/SKILL_ROUTING_PATTERN.md** and **shared/DOGME_QUICK_WORKFLOW_GUIDE.md** - Shared reference docs
 
@@ -916,19 +1040,9 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.6.6 — rerun-heavy Streamlit polling paths now close short-lived API responses eagerly, auth helper calls use the same eager-close path, publication controls no longer leak threads or file descriptors on figure-heavy project pages, and projects with saved figures render chats and plots correctly on first visit
+- **Release**: 3.7.6 — adds optional separate rsync transfer hosts for remote SLURM profiles, with automatic fallback to the SLURM host when no transfer host is configured
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+
 - **Nextflow**: >= 23.0
 - **Status**: Active Development
-
-## 🗓️ Development Timeline
-
-- complete: Core infrastructure, dual interface, MCP integration
-- complete: Web UI job monitoring, approval gates, project management
-- complete: Plan-execute-observe-replan, gene annotation, expanded templates
-- complete: Centralized DB, Alembic migrations, enrichment tools in Analyzer
-- complete: Cortex modularisation and DE adapter integration
-- current: Manifest-driven planning, workflow-local annotation, overlap workflows, and remote execution hardening
-- next: Production deployment preparation

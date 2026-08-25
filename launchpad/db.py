@@ -31,17 +31,27 @@ if TYPE_CHECKING:
     from launchpad.backends.staging_worker import StagingTaskState
 
 
+def _effective_workflow_key(value: str | None) -> str:
+    cleaned = str(value or "").strip().lower()
+    return cleaned or "dogme"
+
+
 def job_to_dict(job: DogmeJob) -> dict:
     """Convert DogmeJob row to dictionary."""
+    imported_source_complete = getattr(job, "imported_source_complete", None)
+    workflow_usage_synced_at = getattr(job, "workflow_usage_synced_at", None)
     return {
         "run_uuid": job.run_uuid,
         "project_id": job.project_id,
+        "workflow_key": _effective_workflow_key(getattr(job, "workflow_key", None)),
         "workflow_index": job.workflow_index,
         "workflow_alias": job.workflow_alias,
         "workflow_folder_name": job.workflow_folder_name,
         "workflow_display_name": job.workflow_display_name,
         "sample_name": job.sample_name,
         "mode": job.mode,
+        "input_type": job.input_type,
+        "entry_point": job.entry_point,
         "input_directory": job.input_directory,
         "reference_genome": job.reference_genome,
         "modifications": job.modifications,
@@ -58,6 +68,19 @@ def job_to_dict(job: DogmeJob) -> dict:
         "data_cache_status": job.data_cache_status,
         "reference_cache_path": job.reference_cache_path,
         "data_cache_path": job.data_cache_path,
+        "imported_source_kind": getattr(job, "imported_source_kind", None),
+        "imported_source_path": getattr(job, "imported_source_path", None),
+        "imported_source_run_uuid": getattr(job, "imported_source_run_uuid", None),
+        "imported_config_path": getattr(job, "imported_config_path", None),
+        "imported_copy_mode": getattr(job, "imported_copy_mode", None),
+        "imported_source_complete": imported_source_complete,
+        "workflow_usage": getattr(job, "workflow_usage_json", None),
+        "workflow_usage_synced_at": workflow_usage_synced_at.isoformat() if workflow_usage_synced_at else None,
+        "import_warning_message": (
+            "Imported from a workflow that does not look complete yet. Run /sync-workflow later to pull new outputs."
+            if imported_source_complete is False
+            else None
+        ),
     }
 
 async def create_job(
@@ -65,16 +88,19 @@ async def create_job(
     run_uuid: str,
     project_id: str,
     sample_name: str,
-    mode: str,
+    mode: str | None,
     input_directory: str,
     reference_genome: str | list | None = None,
     modifications: str | None = None,
     parent_block_id: str | None = None,
     user_id: str | None = None,
+    workflow_key: str | None = None,
     workflow_index: int | None = None,
     workflow_alias: str | None = None,
     workflow_folder_name: str | None = None,
     workflow_display_name: str | None = None,
+    input_type: str = "pod5",
+    entry_point: str | None = None,
 ) -> DogmeJob:
     """Create a new job record."""
     import json
@@ -89,12 +115,15 @@ async def create_job(
         run_uuid=run_uuid,
         project_id=project_id,
         user_id=user_id,
+        workflow_key=_effective_workflow_key(workflow_key),
         workflow_index=workflow_index,
         workflow_alias=workflow_alias,
         workflow_folder_name=workflow_folder_name,
         workflow_display_name=workflow_display_name,
         sample_name=sample_name,
         mode=mode,
+        input_type=input_type,
+        entry_point=entry_point,
         input_directory=input_directory,
         reference_genome=reference_genome_str,
         modifications=modifications,
@@ -225,12 +254,103 @@ async def resolve_job_by_workflow_label(
     )
     return result.scalar_one_or_none()
 
+
+async def find_job_by_workflow_path(
+    session: AsyncSession,
+    workflow_path: str,
+) -> DogmeJob | None:
+    """Find the most recent job whose local or remote workflow path matches *workflow_path*."""
+    if not workflow_path:
+        return None
+    result = await session.execute(
+        select(DogmeJob)
+        .where(
+            or_(
+                DogmeJob.nextflow_work_dir == workflow_path,
+                DogmeJob.remote_work_dir == workflow_path,
+                DogmeJob.imported_source_path == workflow_path,
+            )
+        )
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def find_import_duplicate(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    source_kind: str,
+    source_path: str,
+) -> DogmeJob | None:
+    if not project_id or not source_kind or not source_path:
+        return None
+    result = await session.execute(
+        select(DogmeJob)
+        .where(DogmeJob.project_id == project_id)
+        .where(DogmeJob.imported_source_kind == source_kind)
+        .where(DogmeJob.imported_source_path == source_path)
+        .where(DogmeJob.status != "DELETED")
+        .order_by(DogmeJob.submitted_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_default_ssh_profile_id(
+    session: AsyncSession,
+    *,
+    user_id: str,
+    project_id: str | None = None,
+) -> str | None:
+    if not user_id:
+        return None
+
+    if project_id:
+        defaults_result = await session.execute(
+            select(func.max(DogmeJob.ssh_profile_id))
+            .where(DogmeJob.user_id == user_id)
+            .where(DogmeJob.project_id == project_id)
+            .where(DogmeJob.ssh_profile_id.is_not(None))
+        )
+        defaults_value = defaults_result.scalar_one_or_none()
+        if defaults_value:
+            return str(defaults_value)
+
+    from launchpad.models import SlurmDefaults
+
+    defaults_query = select(SlurmDefaults).where(SlurmDefaults.user_id == user_id)
+    if project_id:
+        defaults_query = defaults_query.where(SlurmDefaults.project_id == project_id)
+    else:
+        defaults_query = defaults_query.where(SlurmDefaults.project_id.is_(None))
+    defaults_row = (await session.execute(defaults_query)).scalar_one_or_none()
+    if defaults_row and defaults_row.ssh_profile_id:
+        return str(defaults_row.ssh_profile_id)
+
+    profiles = list(
+        (
+            await session.execute(
+                select(SSHProfile)
+                .where(SSHProfile.user_id == user_id)
+                .where(SSHProfile.is_enabled.is_(True))
+                .order_by(SSHProfile.updated_at.desc())
+            )
+        ).scalars().all()
+    )
+    if len(profiles) == 1:
+        return profiles[0].id
+    return profiles[0].id if profiles else None
+
 async def update_job_status(
     session: AsyncSession,
     run_uuid: str,
     status: str,
     progress: int | None = None,
     error_message: str | None = None,
+    workflow_usage: dict | None = None,
+    workflow_usage_synced_at: datetime | None = None,
 ) -> DogmeJob | None:
     """Update job status and optionally progress."""
     job = await get_job(session, run_uuid)
@@ -240,6 +360,12 @@ async def update_job_status(
             job.progress_percent = progress
         if error_message:
             job.error_message = error_message
+        if workflow_usage is not None:
+            job.workflow_usage_json = workflow_usage
+            job.workflow_usage_synced_at = workflow_usage_synced_at or datetime.utcnow()
+        normalized_status = str(status or "").upper()
+        if normalized_status in {"COMPLETED", "FAILED", "CANCELLED", "STALE"} and getattr(job, "completed_at", None) is None:
+            job.completed_at = datetime.utcnow()
         await session.commit()
         await session.refresh(job)
     return job
@@ -343,6 +469,7 @@ async def get_ssh_profile(profile_id: str, user_id: str | None = None) -> SSHPro
             key_file_path=row.key_file_path,
             local_username=row.local_username,
             remote_base_path=row.remote_base_path,
+            transfer_host=row.transfer_host,
             is_enabled=row.is_enabled,
             default_slurm_account=row.default_slurm_account,
             default_slurm_partition=row.default_slurm_partition,

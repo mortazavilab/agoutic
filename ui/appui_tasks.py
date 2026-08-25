@@ -11,18 +11,43 @@ _PROJECT_TASK_HIDE_STALE_HOURS = float(os.getenv("PROJECT_TASK_HIDE_STALE_HOURS"
 _STAGE_TASK_ACTION_TIMEOUT_SECONDS = float(os.getenv("STAGE_TASK_ACTION_TIMEOUT_SECONDS", "15"))
 
 
-def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
+def get_sanitized_blocks(
+    target_project_id: str,
+    api_url: str,
+    request_fn,
+    *,
+    since_seq: int = 0,
+    before_seq: int = 0,
+    limit: int = 500,
+):
     """
     Fetch blocks from server, but scrub any block that doesn't match the target ID.
 
-    Returns (blocks_list, fetch_ok) so callers can distinguish an empty project
-    from a transient server failure and avoid wiping session-state blocks.
+    Supports incremental streaming via since_seq and backwards pagination via
+    before_seq, allowing large project histories to be loaded on demand.
+
+    Args:
+        target_project_id: The project ID to fetch blocks for.
+        api_url: The API base URL.
+        request_fn: The authenticated request function.
+        since_seq: Only fetch blocks with seq > since_seq (default 0 = fetch all).
+        before_seq: Only fetch blocks with seq < before_seq.
+        limit: Maximum number of blocks to fetch (default 500).
+
+    Returns:
+        Tuple of (blocks_list, fetch_ok, pagination) so callers can distinguish
+        an empty project from a transient server failure and retain history state.
     """
     try:
         resp = request_fn(
             "GET",
             f"{api_url}/blocks",
-            params={"project_id": target_project_id, "since_seq": 0, "limit": 500},
+            params={
+                "project_id": target_project_id,
+                "since_seq": since_seq,
+                "before_seq": before_seq,
+                "limit": limit,
+            },
             timeout=10,
         )
         if resp.status_code == 200:
@@ -30,7 +55,10 @@ def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
             clean_blocks = [
                 b for b in raw_blocks if b.get("project_id") == target_project_id
             ]
-            return clean_blocks, True
+            return clean_blocks, True, {
+                "oldest_seq": int(resp.json().get("oldest_seq") or 0),
+                "has_older": bool(resp.json().get("has_older", False)),
+            }
 
         import logging
 
@@ -39,14 +67,50 @@ def get_sanitized_blocks(target_project_id: str, api_url: str, request_fn):
             resp.status_code,
             target_project_id,
         )
-        return [], False
+        return [], False, {}
     except Exception as exc:
         import logging
 
         logging.getLogger("agoutic.ui").warning(
             "Block fetch failed for project %s: %s", target_project_id, exc
         )
-        return [], False
+        return [], False, {}
+
+
+def get_sanitized_blocks_incremental(target_project_id: str, api_url: str, request_fn):
+    """
+    Fetch blocks incrementally using the latest_seq stored in Session State.
+
+    This is the optimized path for fragment refreshes: it only fetches new blocks
+    since the last successful fetch, avoiding refetching large histories.
+
+    Args:
+        target_project_id: The project ID to fetch blocks for.
+        api_url: The API base URL.
+        request_fn: The authenticated request function.
+
+    Returns:
+        Tuple of (blocks_list, fetch_ok) so callers can distinguish an empty project
+        from a transient server failure and avoid wiping session-state blocks.
+    """
+    import streamlit as st
+    
+    # Get the latest sequence number we've seen for this project
+    seq_key = f"_latest_seq_{target_project_id}"
+    since_seq = int(st.session_state.get(seq_key, 0))
+    
+    # Fetch only new blocks
+    new_blocks, fetch_ok, _pagination = get_sanitized_blocks(
+        target_project_id, api_url, request_fn,
+        since_seq=since_seq, limit=100  # Smaller limit for incremental fetches
+    )
+    
+    if fetch_ok and new_blocks:
+        # Update the latest sequence number
+        latest_seq = max((b.get("seq", 0) for b in new_blocks), default=0)
+        st.session_state[seq_key] = latest_seq
+    
+    return new_blocks, fetch_ok
 
 
 def get_project_tasks(project_id: str, api_url: str, request_fn):

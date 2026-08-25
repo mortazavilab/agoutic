@@ -2,7 +2,9 @@ import asyncio
 import copy
 import datetime
 import json
+import os
 import re
+import tempfile
 import time
 
 from fastapi.concurrency import run_in_threadpool
@@ -11,7 +13,7 @@ from common import MCPHttpClient
 from common.logging_config import get_logger
 from cortex.agent_engine import AgentEngine
 from cortex.analysis_helpers import _build_auto_analysis_context, _build_static_analysis_summary
-from cortex.config import get_service_url
+from cortex.config import WF_PORE_C_ENABLED, get_service_url
 from cortex.db import SessionLocal
 from cortex.db_helpers import _create_block_internal, save_conversation_message
 from cortex.llm_validators import get_block_payload
@@ -22,8 +24,107 @@ from cortex.task_service import sync_project_tasks
 logger = get_logger(__name__)
 
 _TRAILING_PATH_JUNK = re.compile(r'(?:\\n|[^a-zA-Z0-9/_.\-~])+$')
-_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 5.0
+_JOB_STATUS_CACHE_MAX_AGE_SECONDS = 30.0
+_ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
+_TERMINAL_RESULT_SYNC_STATES = {"outputs_downloaded", "transfer_failed", "sync_cancelled", "stale"}
 _latest_job_status_by_run_uuid: dict[str, dict] = {}
+
+
+def _update_parent_batch_status(session, execution_payload: dict, status_data: dict) -> None:
+    """Fold a terminal execution result into its owning DOGME batch, if any."""
+    batch_parent_gate_id = execution_payload.get("batch_parent_gate_id")
+    batch_sample_id = execution_payload.get("batch_sample_id")
+    if not batch_parent_gate_id or not batch_sample_id:
+        return
+
+    batch_gate = session.query(ProjectBlock).filter(ProjectBlock.id == batch_parent_gate_id).first()
+    if batch_gate is None:
+        return
+
+    batch_payload = get_block_payload(batch_gate)
+    batch_samples = batch_payload.get("batch_samples")
+    if not isinstance(batch_samples, list):
+        return
+
+    job_status = str(status_data.get("status") or "UNKNOWN").upper()
+    sample_status = {
+        "COMPLETED": "COMPLETED",
+        "FAILED": "FAILED",
+        "STALE": "FAILED",
+        "CANCELLED": "CANCELLED",
+    }.get(job_status)
+    if sample_status is None:
+        return
+
+    for sample in batch_samples:
+        if not isinstance(sample, dict) or str(sample.get("sample_id")) != str(batch_sample_id):
+            continue
+        sample["status"] = sample_status
+        if status_data.get("message"):
+            sample["error"] = status_data["message"] if sample_status != "COMPLETED" else None
+        break
+
+    terminal_statuses = {"COMPLETED", "FAILED", "CANCELLED", "SKIPPED"}
+    statuses = [str(sample.get("status") or "PENDING").upper() for sample in batch_samples if isinstance(sample, dict)]
+    if statuses and all(status in terminal_statuses for status in statuses):
+        if all(status == "COMPLETED" for status in statuses):
+            batch_payload["batch_status"] = "COMPLETED"
+        elif "COMPLETED" in statuses:
+            batch_payload["batch_status"] = "COMPLETED_WITH_FAILURES"
+        elif "CANCELLED" in statuses:
+            batch_payload["batch_status"] = "CANCELLED"
+        else:
+            batch_payload["batch_status"] = "COMPLETED_WITH_FAILURES"
+    else:
+        batch_payload["batch_status"] = "RUNNING"
+
+    batch_payload["batch_samples"] = batch_samples
+    batch_gate.payload_json = json.dumps(batch_payload)
+    session.commit()
+
+
+def _save_analysis_report(work_directory: str, workflow_ref: str, final_md: str) -> None:
+    """Save the LLM-generated analysis report to the workflow folder.
+
+    Best-effort — never raises. Each call gets a unique timestamped filename
+    so repeated /reanalyze runs accumulate as separate files.
+    """
+    if not work_directory or not final_md:
+        return
+
+    try:
+        wf_dir = os.path.realpath(work_directory)
+        if not os.path.isdir(wf_dir):
+            logger.debug("Work directory not found, skipping analysis report save",
+                         work_directory=work_directory)
+            return
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{workflow_ref}_{timestamp}_analysis.md"
+        filepath = os.path.join(wf_dir, filename)
+
+        # Atomic write: temp file + rename
+        fd, tmp_path = tempfile.mkstemp(dir=wf_dir, suffix=".tmp", prefix="analysis_")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(final_md)
+            os.replace(tmp_path, filepath)
+            logger.info("Analysis report saved to workflow folder",
+                        work_directory=work_directory, filename=filename)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:
+        logger.warning("Failed to save analysis report to workflow folder",
+                       work_directory=work_directory, error=str(exc))
+
+
+def _normalized_workflow_key(value: str | None) -> str:
+    return str(value or "").strip().lower()
 
 
 def _job_status_has_useful_progress(status_data: dict | None) -> bool:
@@ -60,6 +161,50 @@ def _is_transient_scheduler_poll_failure(status_data: dict | None) -> bool:
 def _prefer_richer_job_status(previous_status: dict | None, incoming_status: dict | None) -> dict | None:
     if not isinstance(incoming_status, dict):
         return None
+    if isinstance(previous_status, dict):
+        previous_transfer_state = str(previous_status.get("transfer_state") or "").strip().lower()
+        incoming_transfer_state = str(incoming_status.get("transfer_state") or "").strip().lower()
+        incoming_result_destination = str(incoming_status.get("result_destination") or "").strip().lower()
+        incoming_status_value = str(incoming_status.get("status") or "").upper()
+        if (
+            previous_transfer_state in _ACTIVE_RESULT_SYNC_STATES
+            and incoming_status_value == "COMPLETED"
+            and incoming_transfer_state not in _TERMINAL_RESULT_SYNC_STATES
+        ):
+            preserved = copy.deepcopy(incoming_status)
+            for key in (
+                "transfer_state",
+                "result_destination",
+                "transfer_detail",
+                "imported_source_kind",
+                "import_warning_message",
+                "work_directory",
+            ):
+                if preserved.get(key) in (None, "", [], {}):
+                    value = previous_status.get(key)
+                    if value not in (None, "", [], {}):
+                        preserved[key] = copy.deepcopy(value)
+
+            preserved_transfer_state = str(preserved.get("transfer_state") or "").strip().lower()
+            preserved_result_destination = str(preserved.get("result_destination") or "").strip().lower()
+            if (
+                preserved_transfer_state in _ACTIVE_RESULT_SYNC_STATES
+                and preserved_result_destination in {"local", "both"}
+            ):
+                previous_status_value = str(previous_status.get("status") or "").upper()
+                if previous_status_value in {"RUNNING", "PENDING", "QUEUED"}:
+                    preserved["status"] = previous_status_value
+                try:
+                    preserved["progress_percent"] = max(
+                        int(preserved.get("progress_percent", 0) or 0),
+                        int(previous_status.get("progress_percent", 0) or 0),
+                        95,
+                    )
+                except (TypeError, ValueError):
+                    preserved["progress_percent"] = previous_status.get("progress_percent", 95)
+                if not preserved.get("message"):
+                    preserved["message"] = previous_status.get("message")
+                return preserved
     if _is_transient_scheduler_poll_failure(incoming_status) and _job_status_has_useful_progress(previous_status):
         preserved = copy.deepcopy(previous_status)
         preserved["last_poll_error"] = incoming_status.get("message")
@@ -109,21 +254,25 @@ def _sanitize_work_directory(value: str | None) -> str | None:
     return cleaned or None
 
 
-async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
+async def poll_job_status(
+    project_id: str,
+    block_id: str,
+    run_uuid: str,
+    *,
+    initial_delay_seconds: float | None = None,
+):
     """
     Background task to poll Launchpad for job status via MCP and update the EXECUTION_JOB block.
     Continues until job is completed or failed.
     """
 
-    # Adaptive polling: fast at first (3 s) then slow down to 30 s.
-    # Total coverage: ~10 h, which is enough for the longest pipelines.
+    # Poll execution status at a steady 30-second cadence to avoid hammering
+    # Launchpad and SQLite-backed state while jobs are active.
     _POLL_SCHEDULE = [
-        (120, 3),    # first 6 min  -> every 3 s  (120 polls)
-        (120, 10),   # next 20 min  -> every 10 s
-        (120, 30),   # next 60 min  -> every 30 s
-        (960, 30),   # next ~8 h    -> every 30 s  (960 polls)
+        (1200, 30),  # ~10 h coverage at 30-second intervals
     ]
     _job_done = False
+    _next_delay = initial_delay_seconds
 
     for _batch_polls, _interval in _POLL_SCHEDULE:
         if _job_done:
@@ -131,7 +280,9 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
         for _ in range(_batch_polls):
             if _job_done:
                 break
-            await asyncio.sleep(_interval)
+            delay_seconds = _interval if _next_delay is None else max(0.0, float(_next_delay))
+            _next_delay = None
+            await asyncio.sleep(delay_seconds)
 
             session = SessionLocal()
             try:
@@ -187,10 +338,15 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     # Update block status based on job status
                     job_status = status_data.get("status", "UNKNOWN")
                     completed_ready_for_analysis = _completed_job_results_ready(status_data)
-                    if job_status == "COMPLETED" and completed_ready_for_analysis:
+                    completed_sync_terminal = _completed_job_result_sync_is_terminal(status_data)
+                    if job_status == "COMPLETED" and (completed_ready_for_analysis or completed_sync_terminal):
                         block.status = "DONE"
                     elif job_status == "FAILED":
                         block.status = "FAILED"
+                    elif job_status == "STALE":
+                        block.status = "FAILED"
+                    elif job_status == "CANCELLED":
+                        block.status = "CANCELLED"
                     else:
                         block.status = "RUNNING"
 
@@ -198,12 +354,13 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                     block.payload_json = json.dumps(payload)
                     session.commit()
                     session.refresh(block)
+                    _update_parent_batch_status(session, payload, status_data)
                     sync_project_tasks(session, project_id)
 
                     logger.info("Job status updated", run_uuid=run_uuid, job_status=job_status, progress=status_data.get("progress_percent", 0))
 
                     # Stop polling if job is done
-                    if job_status == "FAILED" or (job_status == "COMPLETED" and completed_ready_for_analysis):
+                    if job_status in {"FAILED", "CANCELLED", "STALE"} or (job_status == "COMPLETED" and (completed_ready_for_analysis or completed_sync_terminal)):
                         logger.info("Job finished", run_uuid=run_uuid, job_status=job_status)
 
                         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
@@ -218,7 +375,10 @@ async def poll_job_status(project_id: str, block_id: str, run_uuid: str):
                                 session,
                                 workflow_block,
                                 run_step_id or "run_dogme",
-                                "COMPLETED" if job_status == "COMPLETED" else "FAILED",
+                                (
+                                    "COMPLETED" if job_status == "COMPLETED"
+                                    else ("CANCELLED" if job_status == "CANCELLED" else "FAILED")
+                                ),
                                 extra={
                                     "run_uuid": run_uuid,
                                     "block_id": block_id,
@@ -283,6 +443,17 @@ def _completed_job_results_ready(status_data: dict | None) -> bool:
     return (status_data.get("transfer_state") or "") == "outputs_downloaded"
 
 
+def _completed_job_result_sync_is_terminal(status_data: dict | None) -> bool:
+    if not isinstance(status_data, dict):
+        return False
+    if status_data.get("status") != "COMPLETED":
+        return False
+    result_destination = (status_data.get("result_destination") or "").strip().lower()
+    if result_destination not in {"local", "both"}:
+        return False
+    return (status_data.get("transfer_state") or "").strip().lower() in _TERMINAL_RESULT_SYNC_STATES
+
+
 def _resolved_job_work_directory(existing_work_directory: str | None, status_data: dict | None) -> str | None:
     sanitized_existing = _sanitize_work_directory(existing_work_directory)
     if isinstance(status_data, dict):
@@ -302,10 +473,17 @@ def _resolved_job_work_directory(existing_work_directory: str | None, status_dat
 
 
 async def _auto_trigger_analysis(
-    project_id: str, run_uuid: str, job_payload: dict, owner_id: str | None
+    project_id: str,
+    run_uuid: str,
+    job_payload: dict,
+    owner_id: str | None,
+    *,
+    request_message: str | None = None,
+    persist_request_message: bool = True,
+    force: bool = False,
 ):
     """
-    Automatically analyse a just-completed Dogme job.
+    Automatically analyse a just-completed workflow.
 
     1. Fetches the analysis summary (file listing) from Analyzer.
     2. Parses key CSV result files (final_stats, qc_summary) via Analyzer MCP.
@@ -313,23 +491,26 @@ async def _auto_trigger_analysis(
     4. Saves the LLM response as an AGENT_PLAN block with token tracking.
 
     Falls back to a static template if the LLM call fails.
+
+    Returns the created AGENT_PLAN block on success, else ``None``.
     """
     sample_name = job_payload.get("sample_name", "Unknown")
     mode = job_payload.get("mode", "DNA")
     model_key = job_payload.get("model", "default")
     work_directory = job_payload.get("work_directory", "")
+    workflow_key = _normalized_workflow_key(job_payload.get("workflow_key"))
 
     logger.info("Auto-triggering analysis", run_uuid=run_uuid,
-                sample_name=sample_name, mode=mode, model=model_key)
+                sample_name=sample_name, mode=mode, workflow_key=workflow_key, model=model_key)
 
     session = SessionLocal()
     try:
         workflow_block = _find_workflow_plan(session, project_id, run_uuid=run_uuid)
         if workflow_block is not None:
             workflow_payload = get_block_payload(workflow_block)
-            if workflow_payload.get("next_step") != "analyze_results":
+            if not force and workflow_payload.get("next_step") != "analyze_results":
                 logger.info("Skipping auto-analysis because analysis is not the next todo", run_uuid=run_uuid)
-                return
+                return None
             _set_workflow_step_status(
                 session,
                 workflow_block,
@@ -338,21 +519,21 @@ async def _auto_trigger_analysis(
                 extra={"run_uuid": run_uuid},
             )
 
-        # 1. Create a system message announcing the transition
-        _create_block_internal(
-            session,
-            project_id,
-            "USER_MESSAGE",
-            {"text": f"Job \"{sample_name}\" completed. Analyze the results."},
-            owner_id=owner_id,
-        )
-
-        # Also save to conversation history so the LLM sees it
-        if owner_id:
-            await save_conversation_message(
-                session, project_id, owner_id, "user",
-                f"Job \"{sample_name}\" completed. Analyze the results."
+        request_text = request_message or f"Job \"{sample_name}\" completed. Analyze the results."
+        if persist_request_message:
+            _create_block_internal(
+                session,
+                project_id,
+                "USER_MESSAGE",
+                {"text": request_text},
+                owner_id=owner_id,
             )
+
+            # Also save to conversation history so the LLM sees it
+            if owner_id:
+                await save_conversation_message(
+                    session, project_id, owner_id, "user", request_text
+                )
 
         # 2. Fetch analysis summary + key CSV data from Analyzer
         summary_data = {}  # structured summary from get_analysis_summary
@@ -368,6 +549,7 @@ async def _auto_trigger_analysis(
                 )
                 if not isinstance(summary_data, dict):
                     summary_data = {}
+                workflow_key = _normalized_workflow_key(summary_data.get("workflow_key") or workflow_key)
 
                 # Parse key CSV files for the LLM
                 # Prioritise small, high-value files: final_stats, qc_summary
@@ -406,17 +588,28 @@ async def _auto_trigger_analysis(
         except Exception as e:
             logger.warning("Failed to fetch analysis summary", run_uuid=run_uuid, error=str(e))
 
-        # 3. Map mode -> Dogme analysis skill
+        # 3. Route auto-analysis by workflow family, with wf-pore-c behind its feature flag.
         mode_skill_map = {
             "DNA": "run_dogme_dna",
             "RNA": "run_dogme_rna",
             "CDNA": "run_dogme_cdna",
         }
-        analysis_skill = mode_skill_map.get(mode.upper(), "analyze_job_results")
+        wf_pore_c_enabled = WF_PORE_C_ENABLED and workflow_key == "wf_pore_c"
+        workflow_family = workflow_key or ""
+        if workflow_family == "wf_pore_c" and not wf_pore_c_enabled:
+            workflow_family = "dogme"
+
+        if workflow_family in {"reconcile_bams", "haplotype_with_vcf", "wf_pore_c"}:
+            analysis_skill = "analyze_job_results"
+        elif workflow_family == "dogme":
+            analysis_skill = mode_skill_map.get(str(mode or "").upper(), "analyze_job_results")
+        else:
+            analysis_skill = "analyze_job_results"
 
         # 4. Build data context string for the LLM
         data_context = _build_auto_analysis_context(
-            sample_name, mode, run_uuid, summary_data, parsed_csvs
+            sample_name, mode, run_uuid, summary_data, parsed_csvs,
+            wf_pore_c_enabled=wf_pore_c_enabled,
         )
 
         # 5. Call the LLM for an intelligent interpretation
@@ -425,15 +618,104 @@ async def _auto_trigger_analysis(
         engine = None
         try:
             engine = AgentEngine(model_key=model_key)
-            user_prompt = (
-                f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
-                f"Work directory: {work_directory}\n\n"
-                f"Here is the analysis summary and key result data:\n\n"
-                f"{data_context}\n\n"
-                f"Provide a concise interpretation of these results. "
-                f"Highlight key metrics, any QC concerns, and suggest "
-                f"next steps the user could explore."
-            )
+            if workflow_family == "wf_pore_c":
+                user_prompt = (
+                    f"A wf-pore-c job for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics, artifact presence, warnings, and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Contact Map Outputs\n"
+                    f"3. pairs.stats.txt Metrics\n"
+                    f"4. Missing Outputs or Warnings\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about requested outputs that are present or missing, mention the revision, reference, cutter, and sample alias when available, "
+                    f"and clearly state when metrics are sparse or incomplete."
+                )
+            elif workflow_family == "reconcile_bams":
+                user_prompt = (
+                    f"A reconcile_bams workflow for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete artifact presence, manifest details, references, warnings, filenames, and numeric counts over generalities.\n"
+                    f"If reconciled_summary.txt metrics are present, you must explicitly summarize them with numbers: transcript / isoform classes such as KNOWN, ISM, NIC, NNC, ANTISENSE, INTERGENIC; novel gene count; novel transcript count; and post-filter totals when available.\n"
+                    f"If reconciled_novelty_by_sample.csv or reconciled_abundance.tsv metrics are present, use them to discuss sample-level novelty totals and the number of genes / isoforms in the reconciled output.\n"
+                    f"Do not invent standard Dogme RNA outputs or mention bedMethyl, modification calling, or Direct RNA modification files unless those artifacts are explicitly present in the supplied analysis data.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Reconcile Outputs\n"
+                    f"3. Transcript and Gene Summary\n"
+                    f"4. Input Manifest Summary\n"
+                    f"5. Warnings or Missing Outputs\n"
+                    f"6. Recommended Next Steps\n"
+                    f"7. Notable Output Files\n\n"
+                    f"Be explicit about how many BAMs were reconciled, whether annotation outputs are present, whether the references or samples look mixed, and what the summary report says numerically about isoform classes and novel models."
+                )
+            elif workflow_family == "haplotype_with_vcf":
+                user_prompt = (
+                    f"A haplotype_with_vcf workflow for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete artifact presence, assignment labels, warnings, and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Haplotyped BAM Outputs\n"
+                    f"3. Haplotype Assignment Summaries\n"
+                    f"4. Warnings or Missing Outputs\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about assignment labels, ambiguous BAM outputs, and which summary TSVs are available for follow-up interpretation."
+                )
+            elif analysis_skill == "analyze_job_results":
+                user_prompt = (
+                    f"A completed workflow for sample \"{sample_name}\" is ready for post-run analysis.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics, artifact presence, warnings, and filenames over generalities.\n"
+                    f"Do not assume the workflow is Dogme, Direct RNA, DNA, or cDNA unless the supplied analysis data explicitly establishes that workflow family.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Key Outputs\n"
+                    f"3. Important Metrics\n"
+                    f"4. Warnings or Missing Outputs\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Be explicit about what is confirmed by the available files and what remains uncertain because the workflow family is not fully identified."
+                )
+            else:
+                user_prompt = (
+                    f"A Dogme {mode} job for sample \"{sample_name}\" just completed.\n"
+                    f"Work directory: {work_directory}\n\n"
+                    f"You are writing the automatic post-run analysis card shown immediately after job completion.\n"
+                    f"This should be a substantive first-pass interpretation, not a terse completion note.\n"
+                    f"Use only the supplied analysis data, and prefer concrete metrics and filenames over generalities.\n\n"
+                    f"Here is the analysis summary and key result data:\n\n"
+                    f"{data_context}\n\n"
+                    f"Write a structured markdown report with these sections when the data support them:\n"
+                    f"1. Overall Assessment\n"
+                    f"2. Key Metrics\n"
+                    f"3. Reference-Specific Findings (separate subsections if multiple genomes are present)\n"
+                    f"4. QC Concerns or Limitations\n"
+                    f"5. Recommended Next Steps\n"
+                    f"6. Notable Output Files\n\n"
+                    f"Call out whether sequencing depth or yield is adequate for downstream interpretation, "
+                    f"name any obvious failure modes, and mention the most relevant QC/statistics files explicitly. "
+                    f"If the data are sparse, say that clearly, but still explain what can and cannot be concluded."
+                )
             llm_md, llm_usage = await run_in_threadpool(
                 engine.think,
                 user_prompt,
@@ -456,33 +738,94 @@ async def _auto_trigger_analysis(
         if llm_md:
             # LLM succeeded -- prepend a header and append exploration hints
             _wf_name = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else ""
-            final_md = (
-                f"### 📊 Analysis: {sample_name}\n"
-                f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
-                f"**Mode:** {mode} &nbsp;|&nbsp; "
-                f"**Status:** COMPLETED\n\n"
-                f"{llm_md}\n\n"
-                f"💡 *You can ask me to dive deeper -- for example:*\n"
-                f"- \"Show me the modification summary\"\n"
-                f"- \"Parse the CSV results\"\n"
-                f"- \"Give me a QC report\"\n"
-            )
+            if workflow_family == "wf_pore_c":
+                workflow_version = ((summary_data.get("workflow_summary") or {}).get("metadata") or {}).get("workflow_version") or "unknown"
+                final_md = (
+                    f"### Contact Map Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** wf_pore_c &nbsp;|&nbsp; "
+                    f"**Revision:** {workflow_version} &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"💡 *You can ask me to dive deeper -- for example:*\n"
+                    f"- \"Show me the pairs stats\"\n"
+                    f"- \"Summarize the contact map outputs\"\n"
+                    f"- \"Which requested outputs are missing?\"\n"
+                )
+            elif workflow_family == "reconcile_bams":
+                final_md = (
+                    f"### Reconcile Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** reconcile_bams &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Show me the reconcile manifest\"\n"
+                    f"- \"Which BAM outputs were produced?\"\n"
+                    f"- \"Summarize the reconcile report\"\n"
+                )
+            elif workflow_family == "haplotype_with_vcf":
+                final_md = (
+                    f"### Haplotype Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** haplotype_with_vcf &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Show me the haplotype summary TSV\"\n"
+                    f"- \"Summarize per-chromosome haplotype counts\"\n"
+                    f"- \"Which BAMs were assigned ambiguously?\"\n"
+                )
+            elif analysis_skill == "analyze_job_results":
+                final_md = (
+                    f"### Workflow Results Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Workflow key:** unknown &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"You can ask me to dive deeper, for example:\n"
+                    f"- \"Summarize the main report\"\n"
+                    f"- \"Which output files matter most?\"\n"
+                    f"- \"What is missing or uncertain here?\"\n"
+                )
+            else:
+                final_md = (
+                    f"### 📊 Analysis: {sample_name}\n"
+                    f"**Workflow:** {_wf_name} &nbsp;|&nbsp; "
+                    f"**Mode:** {mode} &nbsp;|&nbsp; "
+                    f"**Status:** COMPLETED\n\n"
+                    f"{llm_md}\n\n"
+                    f"💡 *You can ask me to dive deeper -- for example:*\n"
+                    f"- \"Show me the modification summary\"\n"
+                    f"- \"Parse the CSV results\"\n"
+                    f"- \"Give me a QC report\"\n"
+                )
             _model_name = engine.model_name if engine else "system"
         else:
             # Fallback: static template (same as before)
             final_md = _build_static_analysis_summary(
                 sample_name, mode, run_uuid, summary_data,
                 work_directory=work_directory,
+                wf_pore_c_enabled=wf_pore_c_enabled,
             )
             _model_name = "system"
             llm_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        # Save analysis report to workflow folder (best-effort)
+        # Strip interactive "dive deeper" suggestions before saving to disk
+        saved_md = final_md
+        dive_idx = final_md.rfind("💡 *You can ask me to dive deeper")
+        if dive_idx != -1:
+            saved_md = final_md[:dive_idx].rstrip() + "\n"
+        _workflow_ref = work_directory.rstrip("/").rsplit("/", 1)[-1] if work_directory else run_uuid or "analysis"
+        _save_analysis_report(work_directory, _workflow_ref, saved_md)
 
         # 7. Create AGENT_PLAN block with the analysis
         _token_payload = {
             **llm_usage,
             "model": _model_name,
         }
-        _create_block_internal(
+        agent_block = _create_block_internal(
             session,
             project_id,
             "AGENT_PLAN",
@@ -517,6 +860,8 @@ async def _auto_trigger_analysis(
                 extra={"run_uuid": run_uuid},
             )
 
+        return agent_block
+
     except Exception as e:
         logger.error("Auto-trigger analysis failed", run_uuid=run_uuid, error=str(e))
         if "workflow_block" in locals() and workflow_block is not None:
@@ -527,6 +872,7 @@ async def _auto_trigger_analysis(
                 "FAILED",
                 extra={"run_uuid": run_uuid, "error": str(e)},
             )
+            return None
     finally:
         session.close()
 

@@ -113,6 +113,43 @@ def test_reference_helper_detects_reference_from_realistic_nextflow_config_token
     assert payload["workflows"][1]["resolution_source"] == "config_token_fallback"
 
 
+def test_reference_helper_detects_mad1_reference(tmp_path: Path):
+    wf1 = tmp_path / "workflow1"
+    wf2 = tmp_path / "workflow2"
+    wf1.mkdir()
+    wf2.mkdir()
+    (wf1 / "nextflow.config").write_text("params.reference_genome = 'mad1'\n", encoding="utf-8")
+    (wf2 / "nextflow.config").write_text("params.reference = 'mad1'\n", encoding="utf-8")
+
+    result = _run_script(HELPER, ["--workflow-dir", str(wf1), "--workflow-dir", str(wf2), "--json"])
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["consensus_reference"] == "mad1"
+
+
+def test_reconcile_helpers_treat_explicit_workflow_output_dir_as_exact_destination(tmp_path: Path):
+    module = _load_reconcile_module()
+
+    output_root, explicit_workflow_dir = module._resolve_output_root(
+        tmp_path,
+        [],
+        str(tmp_path / "workflow7"),
+    )
+
+    assert output_root == tmp_path.resolve()
+    assert explicit_workflow_dir == (tmp_path / "workflow7").resolve()
+
+    workflow_dir = module._ensure_reconcile_workflow_dir(
+        output_root,
+        explicit_workflow_dir=explicit_workflow_dir,
+    )
+
+    assert workflow_dir == (tmp_path / "workflow7").resolve()
+    assert (workflow_dir / "input").is_dir()
+    assert (workflow_dir / "output").is_dir()
+
+
 def test_reference_helper_falls_back_to_annotated_bam_names_when_configs_missing(tmp_path: Path):
     wf1 = tmp_path / "workflow1"
     wf2 = tmp_path / "workflow2"
@@ -168,6 +205,120 @@ def test_reconcile_script_rejects_mixed_bam_references(tmp_path: Path):
     assert result.returncode == 1
     payload = json.loads(result.stdout)
     assert "Mixed BAM references detected" in payload["error"]
+
+
+def test_reconcile_script_preflight_can_split_mixed_references(tmp_path: Path):
+    data_root = tmp_path / "data"
+    human_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    mouse_gtf = data_root / "references" / "mm39" / "IGVFFI4777RDZK.gtf"
+    human_gtf.parent.mkdir(parents=True)
+    mouse_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(human_gtf)
+    _write_minimal_gtf(mouse_gtf)
+
+    bam1 = tmp_path / "sample1.GRCh38.annotated.bam"
+    bam2 = tmp_path / "sample2.mm39.annotated.bam"
+    bam1.write_text("x", encoding="utf-8")
+    bam2.write_text("x", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        ["--input-bam", str(bam1), "--input-bam", str(bam2), "--preflight-only", "--json"],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "split_by_reference"
+    assert [group["reference"] for group in payload["reference_groups"]] == ["GRCh38", "mm39"]
+
+
+def test_reconcile_script_requested_reference_filters_mixed_inputs(tmp_path: Path):
+    data_root = tmp_path / "data"
+    mouse_gtf = data_root / "references" / "mm39" / "IGVFFI4777RDZK.gtf"
+    mouse_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(mouse_gtf)
+
+    bam1 = tmp_path / "sample1.GRCh38.annotated.bam"
+    bam2 = tmp_path / "sample2.mm39.annotated.bam"
+    bam1.write_text("x", encoding="utf-8")
+    bam2.write_text("x", encoding="utf-8")
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        [
+            "--input-bam", str(bam1),
+            "--input-bam", str(bam2),
+            "--reference", "mm39",
+            "--preflight-only",
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "preflight_ready"
+    assert payload["reference"] == "mm39"
+    assert payload["inputs"]["count"] == 1
+
+
+def test_reconcile_script_requested_reference_ignores_other_workflow_gtf_configs(tmp_path: Path):
+    project_root = tmp_path / "project"
+    wf2_annot = project_root / "workflow2" / "annot"
+    wf3_annot = project_root / "workflow3" / "annot"
+    wf2_annot.mkdir(parents=True)
+    wf3_annot.mkdir(parents=True)
+
+    human_bam = wf2_annot / "sample1.GRCh38.annotated.bam"
+    mouse_bam = wf3_annot / "sample2.mm39.annotated.bam"
+    human_bam.write_text("x", encoding="utf-8")
+    mouse_bam.write_text("x", encoding="utf-8")
+
+    data_root = tmp_path / "data"
+    human_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    mouse_gtf = data_root / "references" / "mm39" / "IGVFFI4777RDZK.gtf"
+    human_gtf.parent.mkdir(parents=True)
+    mouse_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(human_gtf)
+    _write_minimal_gtf(mouse_gtf)
+
+    (project_root / "workflow2" / "nextflow.config").write_text(
+        f"params.genome_annot_refs = [[name: 'GRCh38', annot: '{human_gtf}']]\n",
+        encoding="utf-8",
+    )
+    (project_root / "workflow3" / "nextflow.config").write_text(
+        f"params.genome_annot_refs = [[name: 'mm39', annot: '{mouse_gtf}']]\n",
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        [
+            "--workflow-dir", str(project_root / "workflow2"),
+            "--workflow-dir", str(project_root / "workflow3"),
+            "--reference", "mm39",
+            "--preflight-only",
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "preflight_ready"
+    assert payload["reference"] == "mm39"
+    assert payload["gtf"]["path"] == str(mouse_gtf.resolve())
+    assert payload["inputs"]["count"] == 1
 
 
 def test_reconcile_script_uses_default_gtf_and_creates_symlinked_workflow(tmp_path: Path):
@@ -259,6 +410,33 @@ def test_reconcile_script_defaults_output_root_to_workflow_parent_when_omitted(t
     assert Path(payload["workflow"]["directory"]).name == "workflow4"
 
 
+def test_reconcile_script_honors_explicit_workflow_output_directory(tmp_path: Path):
+    data_root = tmp_path / "data"
+    gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(gtf)
+
+    bam = tmp_path / "sample1.GRCh38.annotated.bam"
+    _write_annotated_bam(bam, "sample1")
+    requested_workflow_dir = tmp_path / "workflow7"
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(data_root)
+
+    result = _run_script(
+        RECONCILE,
+        ["--input-bam", str(bam), "--output-dir", str(requested_workflow_dir), "--json"],
+        env=env,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "completed"
+    assert payload["outputs"]["output_root"] == str(tmp_path.resolve())
+    assert payload["workflow"]["directory"] == str(requested_workflow_dir.resolve())
+    assert (requested_workflow_dir / "input").is_dir()
+
+
 def test_reconcile_script_requires_manual_gtf_when_default_missing(tmp_path: Path):
     bam = tmp_path / "sample1.GRCh38.annotated.bam"
     bam.write_text("x", encoding="utf-8")
@@ -324,18 +502,20 @@ def test_reconcile_script_maps_remote_workflow_gtf_to_local_default(tmp_path: Pa
 
     bam1 = wf5 / "sample1.GRCh38.annotated.bam"
     bam2 = wf6 / "sample2.GRCh38.annotated.bam"
-    _write_annotated_bam(bam1, "sample1")
-    _write_annotated_bam(bam2, "sample2")
+    bam1.write_text("x", encoding="utf-8")
+    bam2.write_text("x", encoding="utf-8")
 
     data_root = tmp_path / "data"
     local_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
     local_gtf.parent.mkdir(parents=True)
     _write_minimal_gtf(local_gtf)
 
-    remote_gtf = "/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    remote_gtf = tmp_path / "mounted_remote" / "grch38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    remote_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(remote_gtf)
     config_text = (
         "params.genome_annot_refs = [\\n"
-        f"    [name: 'GRCh38', genome: '/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta', annot: '{remote_gtf}']\\n"
+        f"    [name: 'GRCh38', genome: '{tmp_path / 'mounted_remote' / 'grch38' / 'GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta'}', annot: '{remote_gtf}']\n"
         "]\\n"
     )
     (project_root / "workflow5" / "nextflow.config").write_text(config_text, encoding="utf-8")
@@ -361,21 +541,23 @@ def test_reconcile_script_maps_remote_workflow_gtf_to_local_default(tmp_path: Pa
     assert payload["gtf"]["source"] == "workflow_config"
     assert Path(payload["gtf"]["path"]) == local_gtf.resolve()
     assert payload["annotation_evidence"]
-    assert payload["annotation_evidence"][0]["configured_annotation_gtf"] == remote_gtf
+    assert payload["annotation_evidence"][0]["configured_annotation_gtf"] == str(remote_gtf)
 
 
 def test_reconcile_script_maps_remote_manual_gtf_to_local_default(tmp_path: Path):
     bam = tmp_path / "sample1.GRCh38.annotated.bam"
-    _write_annotated_bam(bam, "sample1")
+    bam.write_text("x", encoding="utf-8")
 
     data_root = tmp_path / "data"
     local_gtf = data_root / "references" / "GRCh38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
     local_gtf.parent.mkdir(parents=True)
     _write_minimal_gtf(local_gtf)
+    remote_gtf = tmp_path / "mounted_remote" / "grch38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    remote_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(remote_gtf)
 
     env = dict(os.environ)
     env["AGOUTIC_DATA"] = str(data_root)
-    remote_gtf = "/share/crsp/lab/seyedam/share/agoutic/elnaz/ref/grch38/gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
 
     result = _run_script(
         RECONCILE,
@@ -395,6 +577,50 @@ def test_reconcile_script_maps_remote_manual_gtf_to_local_default(tmp_path: Path
     assert payload["status"] == "preflight_ready"
     assert payload["gtf"]["source"] == "manual"
     assert Path(payload["gtf"]["path"]) == local_gtf.resolve()
+
+
+def test_reconcile_script_requires_local_reference_for_external_workflow_gtf(tmp_path: Path):
+    project_root = tmp_path / "project"
+    wf5 = project_root / "workflow5" / "annot"
+    wf6 = project_root / "workflow6" / "annot"
+    wf5.mkdir(parents=True)
+    wf6.mkdir(parents=True)
+
+    bam1 = wf5 / "sample1.GRCh38.annotated.bam"
+    bam2 = wf6 / "sample2.GRCh38.annotated.bam"
+    bam1.write_text("x", encoding="utf-8")
+    bam2.write_text("x", encoding="utf-8")
+
+    remote_gtf = tmp_path / "mounted_remote" / "grch38" / "gencode.v29.primary_assembly.annotation_UCSC_names.gtf"
+    remote_gtf.parent.mkdir(parents=True)
+    _write_minimal_gtf(remote_gtf)
+
+    config_text = (
+        "params.genome_annot_refs = [\n"
+        f"    [name: 'GRCh38', annot: '{remote_gtf}']\n"
+        "]\n"
+    )
+    (project_root / "workflow5" / "nextflow.config").write_text(config_text, encoding="utf-8")
+    (project_root / "workflow6" / "nextflow.config").write_text(config_text, encoding="utf-8")
+
+    env = dict(os.environ)
+    env["AGOUTIC_DATA"] = str(tmp_path / "empty_data")
+
+    result = _run_script(
+        RECONCILE,
+        [
+            "--workflow-dir", str(project_root / "workflow5"),
+            "--workflow-dir", str(project_root / "workflow6"),
+            "--preflight-only",
+            "--json",
+        ],
+        env=env,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "error"
+    assert "local GRCh38 reference GTF" in payload["error"]
 
 
 def test_reconcile_command_uses_unbuffered_python():

@@ -273,3 +273,46 @@ def rename_project_dir(username: str, old_slug: str, new_slug: str) -> Path:
         new_dir.rmdir()
     shutil.move(str(old_dir), str(new_dir))
     return new_dir
+
+
+def transfer_project_dir(
+    *,
+    old_username: str | None,
+    new_username: str | None,
+    old_owner_id: str,
+    new_owner_id: str,
+    project_slug: str | None,
+    project_id: str,
+) -> Path:
+    """Move a project directory to a new canonical owner path."""
+    if project_slug and old_username and new_username:
+        _validate_slug(old_username, "old_username")
+        _validate_slug(new_username, "new_username")
+        _validate_slug(project_slug, "project_slug")
+        old_dir = AGOUTIC_DATA / "users" / old_username / project_slug
+        new_dir = AGOUTIC_DATA / "users" / new_username / project_slug
+    else:
+        _validate_id(old_owner_id, "old_owner_id")
+        _validate_id(new_owner_id, "new_owner_id")
+        _validate_id(project_id, "project_id")
+        old_dir = AGOUTIC_DATA / "users" / old_owner_id / project_id
+        new_dir = AGOUTIC_DATA / "users" / new_owner_id / project_id
+
+    _ensure_within_jail(old_dir)
+    _ensure_within_jail(new_dir)
+
+    if not old_dir.exists():
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (new_dir / "data").mkdir(exist_ok=True)
+        return new_dir
+
+    if new_dir.exists() and any(new_dir.iterdir()):
+        raise PermissionError(
+            f"Cannot transfer ownership: target directory {new_dir} already has content"
+        )
+
+    new_dir.parent.mkdir(parents=True, exist_ok=True)
+    if new_dir.exists():
+        new_dir.rmdir()
+    shutil.move(str(old_dir), str(new_dir))
+    return new_dir

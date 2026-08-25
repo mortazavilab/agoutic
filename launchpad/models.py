@@ -20,10 +20,13 @@ class DogmeJob(Base):
     workflow_alias: Mapped[str | None] = mapped_column(String, index=True, nullable=True)
     workflow_folder_name: Mapped[str | None] = mapped_column(String, nullable=True)
     workflow_display_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    workflow_key: Mapped[str] = mapped_column(String, index=True, nullable=False, default="dogme", server_default="dogme")
     sample_name: Mapped[str] = mapped_column(String, nullable=False)
-    mode: Mapped[str] = mapped_column(String, nullable=False)  # DNA, RNA, CDNA
+    mode: Mapped[str | None] = mapped_column(String, nullable=True)  # Dogme-only mode: DNA, RNA, CDNA
     
     # Input data
+    input_type: Mapped[str | None] = mapped_column(String, nullable=True, default="pod5")
+    entry_point: Mapped[str | None] = mapped_column(String, nullable=True)
     input_directory: Mapped[str] = mapped_column(String, nullable=False)
     reference_genome: Mapped[str] = mapped_column(String, nullable=True)
     modifications: Mapped[str] = mapped_column(String, nullable=True)
@@ -72,6 +75,8 @@ class DogmeJob(Base):
     slurm_account: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_partition: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_max_task_cpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_max_task_memory_gb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     slurm_memory_gb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     slurm_walltime: Mapped[str | None] = mapped_column(String, nullable=True)
     slurm_gpus: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -79,13 +84,21 @@ class DogmeJob(Base):
     remote_work_dir: Mapped[str | None] = mapped_column(String, nullable=True)
     remote_output_dir: Mapped[str | None] = mapped_column(String, nullable=True)
     result_destination: Mapped[str | None] = mapped_column(String, nullable=True)  # "remote", "local", "both"
-    transfer_state: Mapped[str | None] = mapped_column(String, nullable=True)  # "none","uploading_inputs","inputs_uploaded","downloading_outputs","outputs_downloaded","transfer_failed"
+    transfer_state: Mapped[str | None] = mapped_column(String, nullable=True)  # "none","uploading_inputs","inputs_uploaded","downloading_outputs","outputs_downloaded","transfer_failed","sync_cancelled","stale"
     run_stage: Mapped[str | None] = mapped_column(String, nullable=True)  # Detailed stage label
     cache_preflight_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     reference_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","refreshed","skipped"
     data_cache_status: Mapped[str | None] = mapped_column(String, nullable=True)  # "reused","staged","skipped"
     reference_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
     data_cache_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_source_kind: Mapped[str | None] = mapped_column(String, nullable=True)  # "local" or "slurm"
+    imported_source_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_source_run_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_config_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    imported_copy_mode: Mapped[str | None] = mapped_column(String, nullable=True)  # "subset" or "full"
+    imported_source_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    workflow_usage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    workflow_usage_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class JobLog(Base):
     """Stores streaming logs from Nextflow execution."""
@@ -118,6 +131,7 @@ class SSHProfile(Base):
     user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
     nickname: Mapped[str | None] = mapped_column(String, nullable=True)
     ssh_host: Mapped[str] = mapped_column(String, nullable=False)
+    transfer_host: Mapped[str | None] = mapped_column(String, nullable=True)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     ssh_username: Mapped[str] = mapped_column(String, nullable=False)
     auth_method: Mapped[str] = mapped_column(String, nullable=False, default="key_file")  # "key_file", "ssh_agent"

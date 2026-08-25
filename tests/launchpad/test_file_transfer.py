@@ -1,6 +1,7 @@
 """Tests for launchpad/backends/file_transfer.py."""
 
 import asyncio
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -105,6 +106,53 @@ async def test_upload_single_file_prefers_active_broker_session_without_trailing
     _, payload = invoke_calls[0]
     assert payload["source"] == str(local_file)
     assert payload["copy_links"] is True
+
+
+@pytest.mark.asyncio
+async def test_upload_uses_transfer_host_for_broker_rsync(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "reads.fastq"
+    local_file.write_text("ACGT")
+    profile = replace(key_file_profile, transfer_host="transfer.example.edu")
+    fake_session = SimpleNamespace(session_id="sess-1")
+    invoke_calls = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, current_profile):
+            return fake_session
+
+        async def invoke(self, session, payload):
+            invoke_calls.append(payload)
+            return {"ok": True, "bytes_transferred": 12}
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+
+    result = await manager.upload_inputs(
+        profile=profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result["ok"] is True
+    assert invoke_calls[0]["dest"] == "seyedam@transfer.example.edu:/scratch/seyedam/agoutic/data/sample"
+    assert invoke_calls[0]["profile"]["transfer_host"] == "transfer.example.edu"
+
+
+@pytest.mark.asyncio
+async def test_download_uses_transfer_host_for_direct_rsync(key_file_profile, tmp_path):
+    manager = FileTransferManager()
+    profile = replace(key_file_profile, transfer_host="transfer.example.edu")
+    manager._rsync_transfer = AsyncMock(return_value={"ok": True, "bytes_transferred": 8})
+
+    result = await manager.download_outputs(
+        profile=profile,
+        remote_path="/scratch/seyedam/agoutic/results",
+        local_path=str(tmp_path / "results"),
+    )
+
+    assert result["ok"] is True
+    kwargs = manager._rsync_transfer.await_args.kwargs
+    assert kwargs["source"] == "seyedam@transfer.example.edu:/scratch/seyedam/agoutic/results/"
 
 
 @pytest.mark.asyncio
@@ -364,6 +412,48 @@ async def test_direct_rsync_retries_without_skip_compress_on_incompatible_option
 
 
 @pytest.mark.asyncio
+async def test_direct_rsync_resumes_after_transient_ssh_disconnect(monkeypatch, tmp_path, key_file_profile):
+    manager = FileTransferManager()
+    local_file = tmp_path / "PAW22048_227a452e_51a78d56_57.pod5"
+    local_file.write_text("POD5")
+    commands = []
+
+    class FakeSessionManager:
+        async def get_active_session(self, profile):
+            return None
+
+    class FakeProcess:
+        def __init__(self, returncode, stdout, stderr):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stderr = stderr
+
+        async def communicate(self):
+            return (self._stdout, self._stderr)
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        commands.append(cmd)
+        if len(commands) == 1:
+            return FakeProcess(255, b"", b"Connection to hpc3.rcic.uci.edu closed by remote host.\nrsync: [sender] write error: Broken pipe (32)\n")
+        return FakeProcess(0, b"total size is 789\n", b"")
+
+    monkeypatch.setattr("launchpad.backends.file_transfer.get_local_auth_session_manager", lambda: FakeSessionManager())
+    monkeypatch.setattr("launchpad.backends.file_transfer.os.access", lambda path, mode: True)
+    monkeypatch.setattr("launchpad.backends.file_transfer.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    result = await manager.upload_inputs(
+        profile=key_file_profile,
+        local_path=str(local_file),
+        remote_path="/scratch/seyedam/agoutic/data/sample",
+    )
+
+    assert result == {"ok": True, "message": "Upload completed", "bytes_transferred": 789}
+    assert len(commands) == 2
+    assert "--partial-dir=.rsync-partial" in commands[0]
+    assert "--partial-dir=.rsync-partial" in commands[1]
+
+
+@pytest.mark.asyncio
 async def test_upload_direct_rsync_times_out_with_actionable_message(monkeypatch, tmp_path, key_file_profile):
     manager = FileTransferManager()
     local_dir = tmp_path / "inputs"
@@ -550,3 +640,5 @@ def test_rsync_ssh_command_uses_fail_fast_publickey_transport(key_file_profile):
     assert "IdentitiesOnly=yes" in command
     assert "ConnectTimeout=600" in command
     assert "ConnectionAttempts=1" in command
+    assert "ServerAliveInterval=30" in command
+    assert "ServerAliveCountMax=3" in command

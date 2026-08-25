@@ -197,12 +197,36 @@ def _should_retry_without_skip_compress(*, exit_code: int | None, stderr_text: s
         "protocol incompatibility",
     )
     return any(marker in lowered for marker in retry_markers)
+
+
+def _should_retry_rsync_transport(*, exit_code: int | None, stderr_text: str) -> bool:
+    if exit_code != 255:
+        return False
+    lowered = stderr_text.lower()
+    non_retryable_markers = (
+        "permission denied",
+        "authentication failed",
+        "host key verification failed",
+    )
+    if any(marker in lowered for marker in non_retryable_markers):
+        return False
+    retryable_markers = (
+        "closed by remote host",
+        "connection reset by peer",
+        "connection unexpectedly closed",
+        "broken pipe",
+        "connection timed out",
+    )
+    return any(marker in lowered for marker in retryable_markers)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 SSH_KNOWN_HOSTS = os.getenv("SSH_KNOWN_HOSTS", "").strip() or None
 SSH_STRICT_HOST_KEY_CHECKING = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "true").strip().lower() not in {"0", "false", "no"}
 SSH_CONNECT_TIMEOUT_SECONDS = int(os.getenv("SSH_CONNECT_TIMEOUT_SECONDS", "600"))
 SSH_CONNECTION_ATTEMPTS = int(os.getenv("SSH_CONNECTION_ATTEMPTS", "1"))
+SSH_SERVER_ALIVE_INTERVAL_SECONDS = int(os.getenv("SSH_SERVER_ALIVE_INTERVAL_SECONDS", "30"))
+SSH_SERVER_ALIVE_COUNT_MAX = int(os.getenv("SSH_SERVER_ALIVE_COUNT_MAX", "3"))
+RSYNC_TRANSPORT_RETRY_ATTEMPTS = int(os.getenv("RSYNC_TRANSPORT_RETRY_ATTEMPTS", "2"))
 
 
 def _resolve_key_file_path(raw_path: str | None) -> str | None:
@@ -224,6 +248,8 @@ def _build_ssh_transport(profile: dict[str, Any]) -> list[str]:
     parts.extend(["-o", "GSSAPIAuthentication=no"])
     parts.extend(["-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT_SECONDS}"])
     parts.extend(["-o", f"ConnectionAttempts={SSH_CONNECTION_ATTEMPTS}"])
+    parts.extend(["-o", f"ServerAliveInterval={SSH_SERVER_ALIVE_INTERVAL_SECONDS}"])
+    parts.extend(["-o", f"ServerAliveCountMax={SSH_SERVER_ALIVE_COUNT_MAX}"])
     parts.extend(["-o", f"StrictHostKeyChecking={'yes' if SSH_STRICT_HOST_KEY_CHECKING else 'no'}"])
     if SSH_KNOWN_HOSTS:
         parts.extend(["-o", f"UserKnownHostsFile={str(Path(SSH_KNOWN_HOSTS).expanduser())}"])
@@ -501,6 +527,33 @@ async def _handle_request(request: dict[str, Any], shutdown_event: asyncio.Event
             stall_message=_rsync_stall_stderr(idle_timeout_seconds),
             timeout_message=_rsync_timeout_stderr(timeout_seconds),
         )
+        retry_count = 0
+        while (
+            retry_count < max(0, RSYNC_TRANSPORT_RETRY_ATTEMPTS)
+            and _should_retry_rsync_transport(
+                exit_code=result.get("exit_status"),
+                stderr_text=result.get("stderr", ""),
+            )
+        ):
+            retry_count += 1
+            logger.warning(
+                "Local auth broker retrying rsync_transfer after transient SSH transport disconnect "
+                "host=%s user=%s retry_attempt=%s retry_limit=%s source=%s dest=%s",
+                profile.get("ssh_host"),
+                profile.get("ssh_username"),
+                retry_count,
+                RSYNC_TRANSPORT_RETRY_ATTEMPTS,
+                source,
+                dest,
+            )
+            result = await _run_subprocess(
+                cmd,
+                timeout_seconds=_remaining_timeout_seconds(deadline),
+                request_id=request_id,
+                idle_timeout_seconds=idle_timeout_seconds,
+                stall_message=_rsync_stall_stderr(idle_timeout_seconds),
+                timeout_message=_rsync_timeout_stderr(timeout_seconds),
+            )
         if _should_retry_without_skip_compress(
             exit_code=result.get("exit_status"),
             stderr_text=result.get("stderr", ""),

@@ -650,34 +650,36 @@ class TestDownloadBackgroundTask:
         # We need to mock the AsyncClient.stream context manager
         with patch("cortex.app.SessionLocal", SL):
             with patch("cortex.app._post_download_suggestions", new_callable=AsyncMock):
-                with patch("httpx.AsyncClient") as mock_client_cls:
-                    mock_client = AsyncMock()
-                    mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
-                    mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+                with patch("cortex.routes.files._find_existing_user_file", return_value=None):
+                    with patch("httpx.AsyncClient") as mock_client_cls:
+                        mock_client = AsyncMock()
+                        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
 
-                    # Mock stream context manager
-                    mock_stream_resp = AsyncMock()
-                    mock_stream_resp.raise_for_status = MagicMock()
-                    mock_stream_resp.headers = {"content-length": "11"}
+                        # Mock stream context manager
+                        mock_stream_resp = AsyncMock()
+                        mock_stream_resp.raise_for_status = MagicMock()
+                        mock_stream_resp.headers = {"content-length": "11"}
 
-                    async def fake_chunks(*args, **kwargs):
-                        yield b"hello world"
+                        async def fake_chunks(*args, **kwargs):
+                            yield b"hello world"
 
-                    mock_stream_resp.aiter_bytes = fake_chunks
+                        mock_stream_resp.aiter_bytes = fake_chunks
 
-                    mock_stream_cm = AsyncMock()
-                    mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_stream_resp)
-                    mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
-                    mock_client.stream = MagicMock(return_value=mock_stream_cm)
+                        mock_stream_cm = AsyncMock()
+                        mock_stream_cm.__aenter__ = AsyncMock(return_value=mock_stream_resp)
+                        mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+                        mock_client.stream = MagicMock(return_value=mock_stream_cm)
 
-                    await _download_files_background(
-                        download_id=download_id,
-                        block_id="dl-block-1",
-                        files=files,
-                        target_dir=target_dir,
-                        project_id="proj-edge",
-                        owner_id="u-edge",
-                    )
+                        await _download_files_background(
+                            download_id=download_id,
+                            block_id="dl-block-1",
+                            files=files,
+                            target_dir=target_dir,
+                            project_dir=tmp_path / "project-links",
+                            project_id="proj-edge",
+                            owner_id="u-edge",
+                        )
 
         # Verify the download wrote the file in a date subfolder
         from datetime import date

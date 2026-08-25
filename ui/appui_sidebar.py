@@ -3,6 +3,91 @@ import datetime
 import streamlit as st
 
 
+@st.cache_data(show_spinner=False)
+def _fetch_model_options(api_url: str, _request_fn) -> list[str]:
+    """Fetch model aliases once per UI runtime and reuse them across reruns."""
+    try:
+        resp = _request_fn("GET", f"{api_url}/config/llm-models", timeout=3)
+        if resp.status_code == 200:
+            payload = resp.json()
+            models = payload.get("models", []) if isinstance(payload, dict) else []
+            keys = [item.get("key", "") for item in models if isinstance(item, dict)]
+            keys = [key for key in keys if isinstance(key, str) and key.strip()]
+            if keys:
+                return keys
+    except Exception:
+        pass
+    return ["default"]
+
+
+def _project_membership_label(project: dict | None) -> str:
+    role = str((project or {}).get("role") or "").strip().lower()
+    if role == "owner":
+        return "Owned by me"
+    if role == "editor":
+        return "Shared with me · Editor"
+    if role == "viewer":
+        return "Shared with me · Viewer"
+    return "Shared with me"
+
+
+def _project_can_mutate(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role in {"owner", "editor"}
+
+
+def _project_can_manage_collaborators(project: dict | None, user: dict | None = None) -> bool:
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    if user_role == "admin":
+        return True
+    role = str((project or {}).get("role") or "").strip().lower()
+    return role == "owner"
+
+
+def _resolve_requested_project_id(
+    requested_id: str | None,
+    active_project_id: str | None,
+    cached_projects: list[dict] | None,
+) -> tuple[str, bool]:
+    requested = str(requested_id or "").strip()
+    active = str(active_project_id or "").strip()
+    if not requested:
+        return active, False
+    if requested == active:
+        return active, True
+
+    available_ids = {
+        str(project.get("id") or "").strip()
+        for project in (cached_projects or [])
+        if str(project.get("id") or "").strip()
+    }
+    if requested in available_ids:
+        return requested, True
+    return active, False
+
+
+def _render_token_usage_chart(daily: list[dict] | None) -> None:
+    if not isinstance(daily, list) or len(daily) <= 1:
+        return
+
+    try:
+        import pandas as _pd
+
+        _df_tok = _pd.DataFrame(daily)
+        if "date" not in _df_tok or "total_tokens" not in _df_tok:
+            return
+        _df_tok["date"] = _pd.to_datetime(_df_tok["date"], errors="coerce")
+        _df_tok = _df_tok.dropna(subset=["date"]).set_index("date")
+        if _df_tok.empty:
+            return
+        st.line_chart(_df_tok["total_tokens"], width="stretch")
+    except (ImportError, OSError, ValueError, TypeError):
+        st.caption("Token history chart unavailable in this environment.")
+
+
 def render_sidebar(
     *,
     user: dict,
@@ -14,7 +99,15 @@ def render_sidebar(
     slugify_project_name,
 ):
     """Render the sidebar and return runtime UI control values."""
+    model_options = _fetch_model_options(api_url, request_fn)
+    default_index = model_options.index("default") if "default" in model_options else 0
+
     with st.sidebar:
+        active_project_id = st.session_state.get("active_project_id")
+        active_project = next(
+            (project for project in st.session_state.get("_cached_projects", []) if project.get("id") == active_project_id),
+            None,
+        )
         st.title("🧬 AGOUTIC")
         st.caption(f"v{agoutic_version}")
 
@@ -23,12 +116,42 @@ def render_sidebar(
             st.caption("🔑 Admin")
 
         with st.expander("❓ Help", expanded=False):
+            st.caption("Use `/commands` to list all slash commands by category and `/help <topic>` for prompt recipes.")
+            st.caption("**Prompt Coach**")
+            if st.button("/help", key="help_prompt_help_command", width="stretch"):
+                st.session_state["_help_prompt"] = "/help"
+                st.rerun()
+            if st.button("/help remote slurm", key="help_prompt_help_remote_slurm", width="stretch"):
+                st.session_state["_help_prompt"] = "/help remote slurm"
+                st.rerun()
+            if st.button("/help /haplotype", key="help_prompt_help_haplotype", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /haplotype"
+                st.rerun()
+            if st.button("/help /list files", key="help_prompt_help_list_files", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /list files"
+                st.rerun()
+            if st.button("/help /clean", key="help_prompt_help_clean", width="stretch"):
+                st.session_state["_help_prompt"] = "/help /clean"
+                st.rerun()
+            st.caption("Ask naturally too: `How do I stage a sample on hpc3?`, `How do I run Dogme with a staged sample?`, `How do I sync workflow12?`, `How do I haplotype workflow7 with a VCF?`, `How do I haplotype mouse workflow7 without typing the founder VCF path?`")
+            st.caption("**Inventory**")
+            if st.button("/list samples", key="help_prompt_list_samples", width="stretch"):
+                st.session_state["_help_prompt"] = "/list samples"
+                st.rerun()
+            if st.button("/list staged", key="help_prompt_list_staged", width="stretch"):
+                st.session_state["_help_prompt"] = "/list staged"
+                st.rerun()
+            if st.button("/list imported", key="help_prompt_list_imported", width="stretch"):
+                st.session_state["_help_prompt"] = "/list imported"
+                st.rerun()
+            st.caption("`/list workflows`  ·  `/list files`  ·  `/list dfs`")
+            st.caption("Natural language also works: `show my samples`, `show staged samples on hpc3`, `show workflows in this project`")
             st.caption("**Workflows**")
             if st.button("help", key="help_prompt_help", width="stretch"):
                 st.session_state["_help_prompt"] = "help"
                 st.rerun()
-            if st.button("show commands", key="help_prompt_commands", width="stretch"):
-                st.session_state["_help_prompt"] = "show commands"
+            if st.button("/commands", key="help_prompt_commands", width="stretch"):
+                st.session_state["_help_prompt"] = "/commands"
                 st.rerun()
             if st.button("what can you do", key="help_prompt_capabilities", width="stretch"):
                 st.session_state["_help_prompt"] = "what can you do"
@@ -39,14 +162,30 @@ def render_sidebar(
             if st.button("how do I use remote slurm", key="help_prompt_slurm", width="stretch"):
                 st.session_state["_help_prompt"] = "how do i use remote slurm"
                 st.rerun()
+            if st.button("how do I haplotype with a VCF", key="help_prompt_haplotype_workflow", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i haplotype workflow7 with a vcf"
+                st.rerun()
+            if st.button("how do I stage on hpc3", key="help_prompt_stage_hpc3", width="stretch"):
+                st.session_state["_help_prompt"] = "how do i stage a sample on hpc3"
+                st.rerun()
             st.caption("**Skills**")
             if st.button("/skills", key="help_prompt_skills", width="stretch"):
                 st.session_state["_help_prompt"] = "/skills"
                 st.rerun()
+            st.caption("**Project Sharing**")
+            if st.button("list users", key="help_prompt_list_users", width="stretch"):
+                st.session_state["_help_prompt"] = "list users"
+                st.rerun()
             st.caption("`/skill <skill_key>`  ·  `/use-skill <skill_key>`")
             st.caption("**Workflow Slash Commands**")
-            st.caption("`/use <workflow>`  ·  `/rerun <workflow>`")
-            st.caption("`/rename <workflow> <new_name>`  ·  `/delete <workflow>`")
+            st.caption("`/use <workflow>`  ·  `/reanalyze [workflow[, workflow2, ...]]`")
+            st.caption("`/rerun [workflow[, workflow2, ...]]`  ·  `/sync-workflow [workflow[, workflow2, ...]]`")
+            st.caption("`/rename <workflow> <new_name>`  ·  `/delete [workflow[, workflow2, ...]]`")
+            st.caption("`/clean [remote] [workflow[, workflow2, ...]]`  ·  `/clean workflows`")
+            st.caption("omit the workflow to use the active workflow for `reanalyze`, `rerun`, `delete`, `clean`, and `sync-workflow`")
+            st.caption("`/clean` runs in the background for both local and remote workflows. Watch job status/logs for `CLEANING_LOCAL`, `CLEANING_REMOTE`, `CLEANED_LOCAL`, `CLEANED_REMOTE`, or `CLEAN_FAILED`.")
+            st.caption("`/import-workflow <path> --remote`  ·  `--full-copy` optional")
+            st.caption("`/haplotype RNA workflow7 /data/parents.vcf.gz`  ·  `haplotype RNA workflow7 with file /data/parents.vcf.gz`")
             st.caption("**Dataframes**")
             if st.button("list dfs", key="help_prompt_list_dfs", width="stretch"):
                 st.session_state["_help_prompt"] = "list dfs"
@@ -82,38 +221,67 @@ def render_sidebar(
 
         st.divider()
         with st.expander("✨ New Project", expanded=False):
-            _default_slug = f"project-{datetime.datetime.now().strftime('%Y-%m-%d')}"
+            _default_name = f"Project {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}"
             _new_name = st.text_input(
                 "Project name",
-                value=_default_slug,
+                value=_default_name,
                 key="_new_project_name_input",
                 max_chars=40,
-                help="Lowercase letters, numbers, hyphens. Will be auto-slugified.",
+                help="Display name for the project. A filesystem-safe slug is generated automatically.",
             )
+            if st.session_state.get("_project_creation_error"):
+                st.warning(st.session_state.get("_project_creation_error"))
             if st.button("Create", key="_create_project_btn", width="stretch"):
-                _slug = slugify_project_name(_new_name or _default_slug)
-                st.session_state["_create_new_project"] = _slug
+                _clean_name = str(_new_name or "").strip() or _default_name
+                st.session_state.pop("_project_creation_error", None)
+                st.session_state["_create_new_project"] = _clean_name
                 st.rerun()
 
         if "_project_id_input" not in st.session_state:
             st.session_state["_project_id_input"] = st.session_state.active_project_id
 
         def _on_project_id_change():
-            new_val = st.session_state.get("_project_id_input", "")
-            if new_val and new_val != st.session_state.get("active_project_id"):
-                st.session_state["_project_switch_loading_for"] = new_val
-                st.session_state.active_project_id = new_val
+            requested_id = st.session_state.get("_project_id_input", "")
+            resolved_id, is_valid = _resolve_requested_project_id(
+                requested_id,
+                st.session_state.get("active_project_id"),
+                st.session_state.get("_cached_projects", []),
+            )
+            if not is_valid:
+                st.session_state["_project_id_input"] = resolved_id
+                if str(requested_id or "").strip():
+                    st.session_state["_project_id_input_error"] = (
+                        "Project IDs must already exist in your accessible project list. "
+                        "Use New Project above to create one."
+                    )
+                return
+
+            st.session_state.pop("_project_id_input_error", None)
+            if resolved_id != st.session_state.get("active_project_id"):
+                st.session_state["_project_switch_loading_for"] = resolved_id
+                st.session_state.active_project_id = resolved_id
+                st.session_state.pop("_page_project_name", None)
                 st.session_state.blocks = []
-                st.session_state._last_rendered_project = new_val
+                st.session_state._last_rendered_project = resolved_id
                 st.session_state.pop("_welcome_sent_for", None)
 
-        st.text_input("Project ID", key="_project_id_input", on_change=_on_project_id_change)
+        st.text_input(
+            "Open Project ID",
+            key="_project_id_input",
+            on_change=_on_project_id_change,
+            help="Switch to an existing accessible project. Use New Project above to create a new one.",
+        )
+        if st.session_state.get("_project_id_input_error"):
+            st.caption(st.session_state.get("_project_id_input_error"))
 
         st.divider()
 
         col_clear, col_refresh = st.columns(2)
         with col_clear:
-            if st.button("🗑️ Clear Chat", width="stretch"):
+            current_project = active_project or {"id": active_project_id}
+            can_mutate_current = _project_can_mutate(current_project, user)
+            clear_help = "Clear the current project's chat history" if can_mutate_current else "Viewer access is read-only for this shared project."
+            if st.button("🗑️ Clear Chat", width="stretch", disabled=not can_mutate_current, help=clear_help):
                 try:
                     resp = request_fn(
                         "DELETE",
@@ -142,6 +310,10 @@ def render_sidebar(
                 if proj_resp.status_code == 200:
                     user_projects = proj_resp.json().get("projects", [])
                     st.session_state["_cached_projects"] = user_projects
+                    active_project = next(
+                        (project for project in user_projects if project.get("id") == active_project_id),
+                        None,
+                    )
                     if user_projects:
                         st.caption(f"{len(user_projects)} project(s)")
 
@@ -166,6 +338,8 @@ def render_sidebar(
                             proj_slug = proj.get("slug", "")
                             is_current = proj_id == st.session_state.active_project_id
                             archive_confirm_id = st.session_state.get("_confirm_archive_project_id")
+                            access_label = _project_membership_label(proj)
+                            can_manage_project = _project_can_manage_collaborators(proj, user)
 
                             job_count = proj.get("job_count")
                             label_extra = f" · {job_count} job{'s' if job_count != 1 else ''}" if job_count else ""
@@ -176,15 +350,16 @@ def render_sidebar(
                                 slug_hint = f" `({proj_slug})`"
 
                             if is_current:
-                                st.info(f"📌 **{proj_name}**{slug_hint}{label_extra}")
+                                st.info(f"📌 **{proj_name}** · {access_label}{slug_hint}{label_extra}")
                             else:
                                 col_name, col_archive = st.columns([5, 1])
                                 with col_name:
                                     if archive_confirm_id == proj_id:
                                         st.warning(f"Archive {proj_name}?")
-                                    elif st.button(f"📂 {proj_name}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
+                                    elif st.button(f"📂 {proj_name} · {access_label}{slug_hint}{label_extra}", key=f"proj_{proj_id}", width="stretch"):
                                         st.session_state["_project_switch_loading_for"] = proj_id
                                         st.session_state.active_project_id = proj_id
+                                        st.session_state["_page_project_name"] = proj.get("name", "")
                                         st.session_state.blocks = []
                                         st.session_state._last_rendered_project = proj_id
                                         st.session_state["_project_id_input"] = proj_id
@@ -200,7 +375,7 @@ def render_sidebar(
                                             pass
                                         st.rerun()
                                 with col_archive:
-                                    if archive_confirm_id == proj_id:
+                                    if archive_confirm_id == proj_id and can_manage_project:
                                         if st.button("✅", key=f"arch_yes_{proj_id}", help=f"Confirm archive '{proj_name}'"):
                                             pause_auto_refresh(4)
                                             try:
@@ -216,7 +391,7 @@ def render_sidebar(
                                         if st.button("✖", key=f"arch_no_{proj_id}", help="Cancel archive"):
                                             st.session_state.pop("_confirm_archive_project_id", None)
                                             st.rerun()
-                                    elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'"):
+                                    elif st.button("🗑", key=f"arch_{proj_id}", help=f"Archive '{proj_name}'", disabled=not can_manage_project):
                                         st.session_state["_confirm_archive_project_id"] = proj_id
                                         pause_auto_refresh(4)
                                         st.rerun()
@@ -339,14 +514,7 @@ def render_sidebar(
                     tcol1, tcol2 = st.columns(2)
                     tcol1.metric("Total", f"{_tok_total:,}")
                     tcol2.metric("Completion", f"{_lt.get('completion_tokens', 0):,}")
-                _daily = _tok_data.get("daily", [])
-                if len(_daily) > 1:
-                    import pandas as _pd
-
-                    _df_tok = _pd.DataFrame(_daily)
-                    _df_tok["date"] = _pd.to_datetime(_df_tok["date"])
-                    _df_tok = _df_tok.set_index("date")
-                    st.line_chart(_df_tok["total_tokens"], width="stretch")
+                _render_token_usage_chart(_tok_data.get("daily", []))
                 _since = _tok_data.get("tracking_since")
                 if _since:
                     st.caption(f"Tracking since {_since[:10]}")
@@ -355,9 +523,9 @@ def render_sidebar(
 
         st.divider()
 
-        model_choice = st.selectbox("Brain Model", ["default", "fast", "smart"], index=0)
+        model_choice = st.selectbox("Brain Model", model_options, index=default_index)
         auto_refresh = st.toggle("Live Stream", value=True)
-        poll_seconds = st.slider("Poll interval (sec)", 1, 5, 2)
+        poll_seconds = st.slider("Poll interval (sec)", 5, 60, 30)
         st.caption("Live Stream controls automatic project-page monitoring. Turn it off if a figure-heavy page becomes unstable.")
         debug_mode = st.toggle("🐛 Debug", value=False)
         st.session_state["_debug_mode"] = debug_mode

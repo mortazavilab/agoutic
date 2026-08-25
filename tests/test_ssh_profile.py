@@ -13,6 +13,7 @@ class TestSSHProfileCreate:
         profile = SSHProfileCreate(
             user_id="user1",
             ssh_host="hpc3.example.edu",
+            transfer_host="transfer.example.edu",
             ssh_username="jdoe",
             auth_method="key_file",
             key_file_path="/home/jdoe/.ssh/id_rsa",
@@ -21,6 +22,7 @@ class TestSSHProfileCreate:
         )
         assert profile.auth_method == "key_file"
         assert profile.ssh_port == 22
+        assert profile.transfer_host == "transfer.example.edu"
         assert profile.default_slurm_account == "cpu-acct"
 
     def test_valid_ssh_agent_profile(self):
@@ -61,6 +63,7 @@ class TestSSHProfileUpdate:
         update = SSHProfileUpdate(
             nickname="new-name",
             ssh_host="new-host.edu",
+            transfer_host="transfer.new-host.edu",
             ssh_port=2222,
             ssh_username="newuser",
             auth_method="ssh_agent",
@@ -70,6 +73,7 @@ class TestSSHProfileUpdate:
             is_enabled=False,
         )
         assert update.ssh_port == 2222
+        assert update.transfer_host == "transfer.new-host.edu"
         assert update.is_enabled is False
         assert update.default_slurm_partition == "cpu-part"
 
@@ -88,6 +92,7 @@ class TestSSHProfileOut:
             id="prof_1",
             user_id="user1",
             ssh_host="hpc3.example.edu",
+            transfer_host="transfer.example.edu",
             ssh_port=22,
             ssh_username="jdoe",
             auth_method="key_file",
@@ -99,6 +104,7 @@ class TestSSHProfileOut:
             updated_at="2024-01-01T00:00:00",
         )
         assert profile.has_key_file is True
+        assert profile.transfer_host == "transfer.example.edu"
         assert profile.key_file_path == "/home/jdoe/.ssh/id_rsa"
         assert profile.default_slurm_gpu_account == "gpu-acct"
 

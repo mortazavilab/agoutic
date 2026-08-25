@@ -1,0 +1,48 @@
+{
+  "result_sync_spec": {
+    "expected_outputs": [
+      "wf-pore-c-report.html",
+      "pairs/{alias}.pairs.gz",
+      "cooler/{alias}.mcool"
+    ],
+    "report_filename": "wf-pore-c-report.html",
+    "workflow_key": "wf_pore_c"
+  },
+  "summary_contract": {
+    "output_flags": {
+      "bed": false,
+      "chromunity": false,
+      "coverage": false,
+      "hi_c": false,
+      "mcool": true,
+      "paired_end": false,
+      "pairs": true
+    },
+    "report_filename": "wf-pore-c-report.html",
+    "sample_name": "POREC_SMOKE",
+    "workflow_key": "wf_pore_c",
+    "workflow_version": "v1.3.1"
+  },
+  "validated_inputs": {
+    "cutter": "NlaIII",
+    "input_path": "/Users/eli/code/agoutic/data/users/eli/wf-pore-c-smoke/data/sample.fastq",
+    "input_type": "fastq",
+    "output_flags": {
+      "bed": false,
+      "chromunity": false,
+      "coverage": false,
+      "hi_c": false,
+      "mcool": true,
+      "paired_end": false,
+      "pairs": true
+    },
+    "reference_fasta": "/Users/eli/code/agoutic/data/users/eli/wf-pore-c-smoke/refs/reference.fa",
+    "report_filename": "wf-pore-c-report.html",
+    "sample_name": "POREC_SMOKE",
+    "sample_sheet": null,
+    "vcf": null,
+    "workflow_repo": "epi2me-labs/wf-pore-c",
+    "workflow_version": "v1.3.1"
+  },
+  "workflow_key": "wf_pore_c"
+}

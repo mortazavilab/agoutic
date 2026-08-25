@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 
 from common.logging_config import get_logger
-from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus, LogEntry
+from launchpad.backends.base import ExecutionBackend, SubmitParams, JobStatus as BackendJobStatus, LogEntry
 from launchpad.backends.ssh_manager import SSHConnectionManager, SSHProfileData
 from launchpad.backends.sbatch_generator import generate_sbatch_script
 from launchpad.backends.slurm_states import map_slurm_state, explain_pending_reason, explain_failure
@@ -23,12 +23,16 @@ from launchpad.backends.stage_machine import RunStage
 from launchpad.backends.resource_validator import validate_resources
 from launchpad.backends.path_validator import validate_remote_paths, check_all_paths_ok
 from launchpad.backends.file_transfer import FileTransferManager
-from launchpad.config import REFERENCE_GENOMES, DogmeMode
-from launchpad.nextflow_executor import (
-    NextflowConfig,
-    resolve_dogme_profile_content,
-    resolve_dogme_profile_task_runtime_exports,
+from launchpad.config import REFERENCE_GENOMES, JobStatus as PersistedJobStatus
+from launchpad.import_workflows import (
+    RESULT_SYNC_DIRS,
+    RESULT_SYNC_FILE_PATTERNS,
+    result_sync_dirs_for_workflow,
+    result_sync_file_patterns_for_workflow,
 )
+from launchpad.nextflow_executor import resolve_slurm_cpu_memory_gb
+from launchpad.workflow_accounting import collect_nextflow_trace_native_ids, normalize_slurm_job_id, summarize_slurm_workflow_usage
+from launchpad.workflow_executors import get_workflow_executor
 
 logger = get_logger(__name__)
 
@@ -38,30 +42,11 @@ class SlurmBackend:
 
     _result_sync_tasks: dict[str, asyncio.Task] = {}
     _transfer_progress: dict[str, dict] = {}
+    _ACTIVE_RESULT_SYNC_STATES = {"pending_import", "downloading_outputs"}
+    _ACTIVE_WORKFLOW_USAGE_CACHE_SECONDS = 600.0
     _RSYNC_PARTIAL_DIR = ".rsync-partial"
-    _RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
-    _RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
-    _OPENCHROMATIN_WRAPPER_DIRNAME = ".agoutic-openchrom-bin"
-    _OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS = (
-        (
-            "/lib64/libgomp.so.1",
-            "/usr/lib64/libgomp.so.1",
-            "/lib/x86_64-linux-gnu/libgomp.so.1",
-            "/usr/lib/x86_64-linux-gnu/libgomp.so.1",
-        ),
-        (
-            "/lib64/libstdc++.so.6",
-            "/usr/lib64/libstdc++.so.6",
-            "/lib/x86_64-linux-gnu/libstdc++.so.6",
-            "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
-        ),
-        (
-            "/lib64/libgcc_s.so.1",
-            "/usr/lib64/libgcc_s.so.1",
-            "/lib/x86_64-linux-gnu/libgcc_s.so.1",
-            "/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
-        ),
-    )
+    _RESULT_SYNC_DIRS = RESULT_SYNC_DIRS
+    _RESULT_SYNC_FILE_PATTERNS = RESULT_SYNC_FILE_PATTERNS
 
     @staticmethod
     def _effective_work_directory(job) -> str | None:
@@ -72,81 +57,51 @@ class SlurmBackend:
             return local_work_dir
         return remote_work_dir or local_work_dir
 
-    @classmethod
-    def _is_openchromatin_runtime_library_input(cls, bind_path: str) -> bool:
-        cleaned = str(bind_path or "").strip()
-        return any(cleaned in candidate_group for candidate_group in cls._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS)
-
-    async def _resolve_openchromatin_runtime_library_paths(self, *, conn) -> list[str] | None:
-        resolved_paths: list[str] = []
-
-        for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
-            resolved_candidate = None
-            for candidate in candidate_group:
-                if await conn.path_exists(candidate):
-                    resolved_candidate = candidate
-                    break
-            if not resolved_candidate:
-                return None
-            resolved_paths.append(resolved_candidate)
-
-        return resolved_paths
-
     def __init__(self):
         self._ssh_manager = SSHConnectionManager()
         self._transfer_manager = FileTransferManager()
 
-    @classmethod
-    def _build_openchromatin_wrapper_runtime_exports(
-        cls,
-        *,
-        runtime_exports: list[str],
-        remote_work: str,
-    ) -> list[str]:
-        wrapper_dir = f"{str(remote_work).rstrip('/')}/{cls._OPENCHROMATIN_WRAPPER_DIRNAME}"
-        resolved_exports = [str(command or "").strip() for command in runtime_exports if str(command or "").strip()]
-        resolved_exports.append(f"export PATH={wrapper_dir}:${{PATH}}")
-        return resolved_exports
+    @staticmethod
+    def _workflow_usage_synced_at_datetime(raw_value) -> datetime | None:
+        if raw_value in (None, ""):
+            return None
+        parsed = raw_value
+        if isinstance(raw_value, str):
+            cleaned = str(raw_value).strip()
+            if not cleaned:
+                return None
+            try:
+                parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(parsed, datetime):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @classmethod
-    def _openchromatin_wrapper_script_content(cls) -> str:
-        return (
-            "#!/bin/bash\n"
-            "set -e\n"
-            "wrapper_dir=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\n"
-            "clean_path=\"${PATH#${wrapper_dir}:}\"\n"
-            "real_modkit=\"$(PATH=\"$clean_path\" command -v modkit || true)\"\n"
-            "if [[ -z \"$real_modkit\" ]]; then\n"
-            "  echo 'Failed to locate the real modkit binary behind the AGOUTIC OpenChromatin wrapper.' >&2\n"
-            "  exit 127\n"
-            "fi\n"
-            "if [[ \"${1:-}\" == \"open-chromatin\" && \"${2:-}\" == \"predict\" ]]; then\n"
-            "  has_device=0\n"
-            "  for arg in \"$@\"; do\n"
-            "    if [[ \"$arg\" == \"--device\" || \"$arg\" == --device=* ]]; then\n"
-            "      has_device=1\n"
-            "      break\n"
-            "    fi\n"
-            "  done\n"
-            "  if [[ $has_device -eq 0 ]]; then\n"
-            "    exec \"$real_modkit\" open-chromatin predict --device 0 \"${@:3}\"\n"
-            "  fi\n"
-            "fi\n"
-            "exec \"$real_modkit\" \"$@\"\n"
-        )
+    def _workflow_usage_synced_at_iso(cls, raw_value) -> str | None:
+        parsed = cls._workflow_usage_synced_at_datetime(raw_value)
+        return parsed.isoformat() if parsed is not None else None
 
-    async def _stage_openchromatin_wrapper(self, *, conn, remote_work: str) -> str:
-        wrapper_dir = f"{str(remote_work).rstrip('/')}/{self._OPENCHROMATIN_WRAPPER_DIRNAME}"
-        wrapper_path = f"{wrapper_dir}/modkit"
-        await conn.mkdir_p(wrapper_dir)
-        await conn.run(
-            f"cat > {shlex.quote(wrapper_path)} << 'AGOUTIC_EOF'\n"
-            f"{self._openchromatin_wrapper_script_content()}"
-            "AGOUTIC_EOF",
-            check=True,
-        )
-        await conn.run(f"chmod 755 {shlex.quote(wrapper_path)}", check=True)
-        return wrapper_dir
+    @classmethod
+    def _can_reuse_live_workflow_usage(cls, *, job, scheduler_status: str) -> bool:
+        if str(scheduler_status or "").upper() not in {"RUNNING", "PENDING", "QUEUED"}:
+            return False
+        cached_usage = getattr(job, "workflow_usage_json", None)
+        if not isinstance(cached_usage, dict) or not cached_usage:
+            return False
+        synced_at = cls._workflow_usage_synced_at_datetime(getattr(job, "workflow_usage_synced_at", None))
+        if synced_at is None:
+            return False
+        age_seconds = (datetime.now(timezone.utc) - synced_at).total_seconds()
+        return age_seconds <= cls._ACTIVE_WORKFLOW_USAGE_CACHE_SECONDS
+
+    @classmethod
+    def is_result_sync_active(cls, run_uuid: str) -> bool:
+        task = cls._result_sync_tasks.get(run_uuid)
+        return bool(task and not task.done())
 
     @staticmethod
     def _parse_scheduler_queue_text(
@@ -358,6 +313,9 @@ class SlurmBackend:
         Flow: validate resources → connect SSH → validate paths →
               transfer inputs (if needed) → generate sbatch → submit
         """
+        workflow_executor = self._resolve_workflow_executor(params)
+        workflow_executor.remote_validate_submission(request=params)
+
         # 1. Validate SLURM resources
         errors = validate_resources(
             cpus=params.slurm_cpus,
@@ -375,6 +333,8 @@ class SlurmBackend:
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
         controller_account, controller_partition = self._resolve_controller_resources(params, profile)
         remote_paths = self._derive_remote_paths(params, profile)
+        params.remote_work_dir = remote_paths["remote_work"]
+        params.remote_output_dir = remote_paths["remote_output"]
 
         # 3. Connect and validate
         await self._update_job_stage(run_uuid, RunStage.VALIDATING_CONNECTION)
@@ -438,32 +398,62 @@ class SlurmBackend:
             detected_input_type = str(cache_resolution.get("detected_input_type") or "").strip().lower()
             if detected_input_type:
                 params.input_type = detected_input_type
-
-            # Ensure workflow-local input folders point at staged cache paths.
-            await self._ensure_workflow_input_links(
-                conn=conn,
+            params.reference_cache_path = cache_resolution.get("reference_cache_path")
+            params.data_cache_path = cache_resolution.get("data_cache_path") or remote_input
+            cache_resolution["remote_nextflow_work_dir"] = workflow_executor.remote_work_dir_path(
+                request=params,
                 params=params,
-                remote_work=remote_work,
-                remote_input=remote_input,
+                remote_paths=remote_paths,
             )
+            params.remote_nextflow_work_dir = cache_resolution["remote_nextflow_work_dir"]
+            workflow_stage_inputs = await workflow_executor.remote_stage_inputs(
+                request=params,
+                params=params,
+                profile=profile,
+                conn=conn,
+                run_uuid=run_uuid,
+            )
+            if workflow_stage_inputs:
+                cache_resolution.update(workflow_stage_inputs)
+            workflow_reference_assets = await workflow_executor.remote_reference_assets(
+                request=params,
+                params=params,
+                profile=profile,
+                conn=conn,
+                staged_inputs=cache_resolution,
+                run_uuid=run_uuid,
+            )
+            reference_assets = {
+                "reference_asset_evidence": reference_asset_evidence,
+                **workflow_reference_assets,
+            }
 
             # Build and write nextflow.config in remote workflow dir.
-            remote_config = await self._write_remote_nextflow_config(
+            rendered_files = await self._write_remote_workflow_artifacts(
                 params=params,
                 profile=profile,
                 conn=conn,
                 remote_work=remote_work,
-                cache_resolution=cache_resolution,
+                staged_inputs=cache_resolution,
+                reference_assets=reference_assets,
             )
             # Build the nextflow command for the batch script
-            nf_cmd = self._build_nextflow_command(params, remote_input, remote_output, remote_config)
+            nf_cmd = workflow_executor.remote_build_command(
+                request=params,
+                params=params,
+                remote_work=remote_work,
+                remote_output=remote_output,
+                staged_inputs=cache_resolution,
+                reference_assets=reference_assets,
+                rendered_files=rendered_files,
+            )
 
             script = generate_sbatch_script(
                 job_name=f"agoutic-{params.sample_name}-{run_uuid[:8]}",
                 account=controller_account,
                 partition=controller_partition,
                 cpus=params.slurm_cpus or 12,
-                memory_gb=params.slurm_memory_gb or 64,
+                memory_gb=resolve_slurm_cpu_memory_gb(params.slurm_memory_gb),
                 walltime=params.slurm_walltime or "48:00:00",
                 gpus=0,
                 gpu_type=None,
@@ -505,7 +495,7 @@ class SlurmBackend:
         local_work_dir: str | None = None,
         archive_sample_names: list[str] | None = None,
     ) -> str:
-        """Rerun an existing remote workflow directory in place with Nextflow -rerun."""
+        """Rerun an existing remote workflow directory in place with Nextflow -resume."""
         profile = await self._load_profile(params.ssh_profile_id, params.user_id)
         controller_account, controller_partition = self._resolve_controller_resources(params, profile)
 
@@ -528,11 +518,18 @@ class SlurmBackend:
                 raise FileNotFoundError(f"Remote nextflow.config not found: {remote_config}")
 
             remote_input = str(params.data_cache_path or "").strip() or self._workflow_input_link_path(params, remote_work)
-            nf_cmd = self._build_nextflow_command(
-                params,
-                remote_input,
-                remote_output,
-                remote_config,
+            workflow_executor = self._resolve_workflow_executor(params)
+            nf_cmd = workflow_executor.remote_build_command(
+                request=params,
+                params=params,
+                remote_work=remote_work,
+                remote_output=remote_output,
+                staged_inputs={
+                    "remote_input": remote_input,
+                    "remote_nextflow_work_dir": remote_work,
+                },
+                reference_assets={},
+                rendered_files={"nextflow.config": remote_config},
                 rerun_in_place=True,
             )
 
@@ -542,7 +539,7 @@ class SlurmBackend:
                 account=controller_account,
                 partition=controller_partition,
                 cpus=params.slurm_cpus or 12,
-                memory_gb=params.slurm_memory_gb or 64,
+                memory_gb=resolve_slurm_cpu_memory_gb(params.slurm_memory_gb),
                 walltime=params.slurm_walltime or "48:00:00",
                 gpus=0,
                 gpu_type=None,
@@ -598,15 +595,15 @@ class SlurmBackend:
         finally:
             await conn.close()
 
-    async def check_status(self, run_uuid: str) -> JobStatus:
+    async def check_status(self, run_uuid: str) -> BackendJobStatus:
         """Check SLURM job status via sacct/squeue."""
         from launchpad.db import get_job_by_uuid as get_job
         job = await get_job(run_uuid)
         if not job:
-            return JobStatus(run_uuid=run_uuid, status="UNKNOWN", message="Job not found")
+            return BackendJobStatus(run_uuid=run_uuid, status="UNKNOWN", message="Job not found")
 
         if not job.slurm_job_id:
-            return JobStatus(
+            return BackendJobStatus(
                 run_uuid=run_uuid,
                 status=job.status,
                 execution_mode="slurm",
@@ -656,6 +653,8 @@ class SlurmBackend:
 
                 progress_percent = 100 if agoutic_status == "COMPLETED" else 0
                 tasks: dict | None = None
+                workflow_usage: dict | None = None
+                workflow_usage_synced_at: str | None = None
                 remote_work_dir = getattr(job, "remote_work_dir", None)
                 if remote_work_dir:
                     progress_percent, tasks, task_message = await self._read_remote_task_status(
@@ -681,6 +680,13 @@ class SlurmBackend:
                         message = task_message
                     elif task_message and agoutic_status == "FAILED":
                         message = f"{message} — {task_message}"
+                    workflow_usage, workflow_usage_synced_at = await self._get_live_workflow_usage(
+                        job=job,
+                        conn=conn,
+                        remote_work=remote_work_dir,
+                        slurm_job_id=str(job.slurm_job_id),
+                        scheduler_status=agoutic_status,
+                    )
 
                 if agoutic_status == "COMPLETED":
                     agoutic_status, copyback_message = await self._ensure_local_results_ready(
@@ -703,7 +709,7 @@ class SlurmBackend:
                     error_message=message if agoutic_status in {"FAILED", "CANCELLED"} else None,
                 )
 
-                return JobStatus(
+                return BackendJobStatus(
                     run_uuid=run_uuid,
                     status=agoutic_status,
                     progress_percent=progress_percent,
@@ -718,13 +724,43 @@ class SlurmBackend:
                     message=message,
                     ssh_profile_nickname=profile.nickname,
                     work_directory=self._effective_work_directory(job),
+                    workflow_usage=workflow_usage,
+                    workflow_usage_synced_at=workflow_usage_synced_at,
                 )
             finally:
                 await conn.close()
 
         except Exception as e:
             logger.warning(f"Failed to poll SLURM status for {run_uuid}: {e}")
-            return JobStatus(
+            transfer_state = (getattr(job, "transfer_state", "") or "").strip().lower()
+            if transfer_state in self._ACTIVE_RESULT_SYNC_STATES and self._needs_local_result_copy(job):
+                transfer_detail = self.get_transfer_detail(run_uuid)
+                synced_at = getattr(job, "workflow_usage_synced_at", None)
+                workflow_usage_synced_at = synced_at.isoformat() if isinstance(synced_at, datetime) else None
+                if transfer_state == "downloading_outputs":
+                    message = transfer_detail or "Copying results back to the local workflow..."
+                    progress_percent = max(int(getattr(job, "progress_percent", 0) or 0), 95)
+                else:
+                    message = transfer_detail or "Preparing to copy results back to the local workflow..."
+                    progress_percent = max(int(getattr(job, "progress_percent", 0) or 0), 90)
+                return BackendJobStatus(
+                    run_uuid=run_uuid,
+                    status="RUNNING",
+                    progress_percent=progress_percent,
+                    execution_mode="slurm",
+                    run_stage=job.run_stage,
+                    slurm_job_id=job.slurm_job_id,
+                    slurm_state=job.slurm_state,
+                    transfer_state=getattr(job, "transfer_state", None),
+                    transfer_detail=transfer_detail,
+                    result_destination=job.result_destination,
+                    ssh_profile_nickname=profile.nickname,
+                    message=message,
+                    work_directory=self._effective_work_directory(job),
+                    workflow_usage=getattr(job, "workflow_usage_json", None),
+                    workflow_usage_synced_at=workflow_usage_synced_at,
+                )
+            return BackendJobStatus(
                 run_uuid=run_uuid,
                 status=job.status,
                 progress_percent=getattr(job, "progress_percent", 0),
@@ -785,6 +821,122 @@ class SlurmBackend:
         )
 
     @staticmethod
+    def _chunk_job_ids(job_ids: list[str], *, max_chars: int = 3000) -> list[list[str]]:
+        chunks: list[list[str]] = []
+        current_chunk: list[str] = []
+        current_size = 0
+        for job_id in job_ids:
+            addition = len(job_id) + (1 if current_chunk else 0)
+            if current_chunk and current_size + addition > max_chars:
+                chunks.append(current_chunk)
+                current_chunk = [job_id]
+                current_size = len(job_id)
+                continue
+            current_chunk.append(job_id)
+            current_size += addition
+        if current_chunk:
+            chunks.append(current_chunk)
+        return chunks
+
+    async def _read_remote_workflow_usage(
+        self,
+        *,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+    ) -> dict | None:
+        try:
+            trace_path, trace_content = await self._read_remote_workflow_trace(conn=conn, remote_work=remote_work)
+            if not trace_content.strip():
+                return None
+            native_ids = collect_nextflow_trace_native_ids(trace_content)
+            sacct_text = await self._read_remote_sacct_usage(
+                conn=conn,
+                native_ids=native_ids,
+                launcher_job_id=slurm_job_id,
+            )
+            return summarize_slurm_workflow_usage(
+                trace_text=trace_content,
+                sacct_text=sacct_text,
+                trace_path=trace_path,
+                launcher_job_id=slurm_job_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to collect remote workflow usage",
+                remote_work=remote_work,
+                error=str(exc),
+            )
+            return None
+
+    async def _get_live_workflow_usage(
+        self,
+        *,
+        job,
+        conn,
+        remote_work: str,
+        slurm_job_id: str,
+        scheduler_status: str,
+    ) -> tuple[dict | None, str | None]:
+        cached_usage = getattr(job, "workflow_usage_json", None)
+        cached_synced_at = self._workflow_usage_synced_at_iso(getattr(job, "workflow_usage_synced_at", None))
+        if self._can_reuse_live_workflow_usage(job=job, scheduler_status=scheduler_status):
+            return cached_usage, cached_synced_at
+
+        workflow_usage = await self._read_remote_workflow_usage(
+            conn=conn,
+            remote_work=remote_work,
+            slurm_job_id=slurm_job_id,
+        )
+        if workflow_usage is None:
+            return cached_usage, cached_synced_at
+        return workflow_usage, datetime.now(timezone.utc).isoformat()
+
+    async def _read_remote_workflow_trace(self, *, conn, remote_work: str) -> tuple[str | None, str]:
+        quoted_remote_work = shlex.quote(remote_work)
+        result = await conn.run(
+            f"trace_file=$(ls -1 {quoted_remote_work}/*_trace.txt 2>/dev/null | head -1); "
+            f"if [ -z \"$trace_file\" ] && [ -f {quoted_remote_work}/trace.txt ]; then trace_file={quoted_remote_work}/trace.txt; fi; "
+            "if [ -n \"$trace_file\" ]; then printf '__AGOUTIC_TRACE_PATH__:%s\\n' \"$trace_file\"; cat \"$trace_file\"; fi"
+        )
+        output = result.stdout or ""
+        prefix = "__AGOUTIC_TRACE_PATH__:"
+        if output.startswith(prefix):
+            first_line, _, remainder = output.partition("\n")
+            trace_path = first_line[len(prefix):].strip() or None
+            return trace_path, remainder
+        return None, output
+
+    async def _read_remote_sacct_usage(
+        self,
+        *,
+        conn,
+        native_ids: list[str],
+        launcher_job_id: str | None = None,
+    ) -> str:
+        job_ids: list[str] = []
+        seen_job_ids: set[str] = set()
+        for raw_job_id in [*native_ids, launcher_job_id]:
+            normalized_job_id = normalize_slurm_job_id(raw_job_id)
+            if not normalized_job_id or normalized_job_id in seen_job_ids:
+                continue
+            seen_job_ids.add(normalized_job_id)
+            job_ids.append(normalized_job_id)
+
+        if not job_ids:
+            return ""
+        outputs: list[str] = []
+        for chunk in self._chunk_job_ids(job_ids):
+            result = await conn.run(
+                f"sacct -X -j {shlex.quote(','.join(chunk))} "
+                "--format=JobIDRaw,Account,State,ElapsedRaw,TotalCPU,MaxRSS,AllocTRES "
+                "--noheader --parsable2 2>/dev/null || true"
+            )
+            if result.stdout:
+                outputs.append(result.stdout)
+        return "".join(outputs)
+
+    @staticmethod
     def _parse_task_status_texts(
         *,
         trace_content: str,
@@ -804,7 +956,7 @@ class SlurmBackend:
                 return []
 
             segments: list[str] = []
-            for match in re.finditer(r"(\[[^\]]+\]\s+.*?)(?=\s+\[[^\]]+\]\s+|$)", stripped):
+            for match in re.finditer(r"(\[[^\]/\s]+/[^\]\s]+\]\s+.*?)(?=\s+\[[^\]/\s]+/[^\]\s]+\]\s+|$)", stripped):
                 segment = match.group(1).strip()
                 if "]" not in segment:
                     continue
@@ -1036,8 +1188,10 @@ class SlurmBackend:
         return progress, tasks, message
 
     @classmethod
-    def _build_result_sync_include_patterns(cls) -> list[str]:
-        return [*(f"{name}/***" for name in cls._RESULT_SYNC_DIRS), *cls._RESULT_SYNC_FILE_PATTERNS]
+    def _build_result_sync_include_patterns(cls, workflow_key: str | None = None) -> list[str]:
+        sync_dirs = result_sync_dirs_for_workflow(workflow_key)
+        sync_file_patterns = result_sync_file_patterns_for_workflow(workflow_key)
+        return [*(f"{name}/***" for name in sync_dirs), *sync_file_patterns]
 
     @staticmethod
     def _needs_local_result_copy(job) -> bool:
@@ -1064,14 +1218,20 @@ class SlurmBackend:
         transfer_state = (getattr(current_job, "transfer_state", "") or "").strip().lower()
         if transfer_state == "outputs_downloaded":
             return "COMPLETED", None
+        if transfer_state == "sync_cancelled":
+            return "CANCELLED", "Result synchronization cancelled. Run sync again to resume copying outputs."
         if transfer_state == "transfer_failed":
             return "FAILED", "Remote job completed, but copying results back to the local workflow failed."
+        if transfer_state == "stale":
+            return "FAILED", "Result synchronization was marked stale by maintenance cleanup. Run sync again to retry copy-back."
 
         task = self._result_sync_tasks.get(run_uuid)
         if task is None or task.done():
             if task is not None:
                 try:
                     task.result()
+                except asyncio.CancelledError:
+                    logger.info("Background result sync task was cancelled", run_uuid=run_uuid)
                 except Exception as exc:  # pragma: no cover - defensive task cleanup
                     logger.warning("Background result sync task ended with error", run_uuid=run_uuid, error=str(exc))
             self._result_sync_tasks[run_uuid] = asyncio.create_task(
@@ -1114,11 +1274,13 @@ class SlurmBackend:
         local_work_dir = getattr(job, "nextflow_work_dir", None)
         remote_work_dir = getattr(job, "remote_work_dir", None)
         input_directory = getattr(job, "input_directory", None)
+        full_copy = str(getattr(job, "imported_copy_mode", "subset") or "subset").strip().lower() == "full"
         # Nextflow writes results to remote_output_dir (remote_work_dir/output).
         # Pre-migration jobs may have NULL remote_output_dir; derive from remote_work_dir.
         remote_output_dir = getattr(job, "remote_output_dir", None) or (
             str(PurePosixPath(remote_work_dir) / "output") if remote_work_dir else None
         )
+        workflow_key = getattr(job, "workflow_key", None)
         try:
             if not local_work_dir or not remote_work_dir:
                 raise RuntimeError("Missing local or remote workflow directory for result copy-back")
@@ -1131,10 +1293,59 @@ class SlurmBackend:
                 "done_folders": [],
                 "current_file": "",
             }
+
+            def _on_rsync_progress(info: dict) -> None:
+                current = self._transfer_progress.get(run_uuid, {})
+                if "current_file" in info:
+                    current["current_file"] = info["current_file"]
+                if "files_transferred" in info:
+                    current["files_transferred"] = info["files_transferred"]
+                    current["files_total"] = info.get("files_total", current.get("files_total"))
+                if "speed" in info:
+                    current["speed"] = info["speed"]
+                self._transfer_progress[run_uuid] = current
+
+            if full_copy:
+                self._transfer_progress[run_uuid] = {
+                    "current_folder": "full workflow",
+                    "folders_done": 0,
+                    "folders_total": 1,
+                    "done_folders": [],
+                    "current_file": "",
+                }
+                transfer = await self._transfer_manager.download_outputs(
+                    profile=profile,
+                    remote_path=remote_work_dir,
+                    local_path=local_work_dir,
+                    on_progress=_on_rsync_progress,
+                )
+                if not transfer.get("ok"):
+                    raise RuntimeError(transfer.get("message", "full workflow transfer failed"))
+                copied_directories = [
+                    child.name
+                    for child in Path(local_work_dir).iterdir()
+                    if child.is_dir() and child.name != self._RSYNC_PARTIAL_DIR
+                ]
+                self._resolve_local_symlinks(
+                    local_work_dir=local_work_dir,
+                    input_directory=input_directory,
+                    directories=copied_directories,
+                )
+                await self._update_job_transfer_state(run_uuid, "outputs_downloaded")
+                return {
+                    "success": True,
+                    "status": "outputs_downloaded",
+                    "message": "Remote workflow synchronized to local workflow directory.",
+                    "run_uuid": run_uuid,
+                    "remote_work_dir": remote_work_dir,
+                    "local_work_dir": local_work_dir,
+                }
+
             artifact_root = remote_output_dir
             artifacts = await self._discover_remote_result_artifacts(
                 profile=profile,
                 remote_output_dir=remote_output_dir,
+                workflow_key=workflow_key,
             )
             if (
                 not artifacts.get("directories")
@@ -1159,6 +1370,7 @@ class SlurmBackend:
                 fallback_artifacts = await self._discover_remote_result_artifacts(
                     profile=profile,
                     remote_output_dir=remote_work_dir,
+                    workflow_key=workflow_key,
                 )
                 if fallback_artifacts.get("directories") or fallback_artifacts.get("files"):
                     artifacts = fallback_artifacts
@@ -1181,17 +1393,6 @@ class SlurmBackend:
                 local_work_dir=local_work_dir,
                 remote_artifacts=artifacts,
             )
-
-            def _on_rsync_progress(info: dict) -> None:
-                current = self._transfer_progress.get(run_uuid, {})
-                if "current_file" in info:
-                    current["current_file"] = info["current_file"]
-                if "files_transferred" in info:
-                    current["files_transferred"] = info["files_transferred"]
-                    current["files_total"] = info.get("files_total", current.get("files_total"))
-                if "speed" in info:
-                    current["speed"] = info["speed"]
-                self._transfer_progress[run_uuid] = current
 
             total_bytes = 0
             errors: list[str] = []
@@ -1241,7 +1442,7 @@ class SlurmBackend:
                     profile=profile,
                     remote_path=artifact_root,
                     local_path=local_work_dir,
-                    include_patterns=list(self._RESULT_SYNC_FILE_PATTERNS),
+                    include_patterns=list(result_sync_file_patterns_for_workflow(workflow_key)),
                     exclude_patterns=["*"],
                     on_progress=_on_rsync_progress,
                 )
@@ -1305,7 +1506,7 @@ class SlurmBackend:
 
     async def sync_results_to_local(self, *, run_uuid: str, force: bool = False) -> dict:
         """Manually trigger remote->local result synchronization for a SLURM run."""
-        from launchpad.db import get_job_by_uuid as get_job
+        from launchpad.db import get_job_by_uuid as get_job, update_job_fields
 
         job = await get_job(run_uuid)
         if not job:
@@ -1335,21 +1536,36 @@ class SlurmBackend:
             }
 
         running_task = self._result_sync_tasks.get(run_uuid)
-        if running_task and not running_task.done() and not force:
+        if running_task and not running_task.done():
+            message = "A result synchronization task is already in progress for this run."
+            if force:
+                message = (
+                    "A result synchronization task is already in progress for this run. "
+                    "Wait for the current copy to finish before retrying."
+                )
             return {
                 "success": False,
                 "status": "sync_in_progress",
-                "message": "A result synchronization task is already in progress for this run.",
+                "message": message,
                 "run_uuid": run_uuid,
                 "remote_work_dir": getattr(job, "remote_work_dir", None),
                 "local_work_dir": getattr(job, "nextflow_work_dir", None),
                 "transfer_state": transfer_state,
             }
 
-        if running_task and not running_task.done() and force:
-            running_task.cancel()
-
         profile = await self._load_profile(job.ssh_profile_id, job.user_id)
+
+        updated_fields = {
+            "transfer_state": "downloading_outputs",
+            "error_message": None,
+        }
+        if str(getattr(job, "status", "") or "").strip().upper() in {"CANCELLED", "FAILED"}:
+            updated_fields["status"] = PersistedJobStatus.COMPLETED
+        await update_job_fields(run_uuid, updated_fields)
+        if "status" in updated_fields:
+            job.status = PersistedJobStatus.COMPLETED
+        job.transfer_state = "downloading_outputs"
+        job.error_message = None
 
         # Fire the sync as a background task and return immediately.
         # Large result sets (e.g. BAM runs) can take many minutes; keeping
@@ -1370,15 +1586,78 @@ class SlurmBackend:
             "transfer_state": "downloading_outputs",
         }
 
-    async def _discover_remote_result_artifacts(self, *, profile: SSHProfileData, remote_output_dir: str) -> dict[str, list[str]]:
+    async def cancel_result_sync(self, *, run_uuid: str) -> dict:
+        """Cancel an active remote->local result synchronization task."""
+        from launchpad.db import get_job_by_uuid as get_job, update_job_fields
+
+        job = await get_job(run_uuid)
+        if not job:
+            raise ValueError(f"Job not found: {run_uuid}")
+
+        task = self._result_sync_tasks.get(run_uuid)
+        if task is None or task.done():
+            if task is not None:
+                try:
+                    task.result()
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    logger.warning("Finished sync task raised during cancel cleanup", run_uuid=run_uuid, error=str(exc))
+            return {
+                "success": False,
+                "status": "not_syncing",
+                "message": "No result synchronization task is currently running for this run.",
+                "run_uuid": run_uuid,
+                "remote_work_dir": getattr(job, "remote_work_dir", None),
+                "local_work_dir": getattr(job, "nextflow_work_dir", None),
+                "transfer_state": getattr(job, "transfer_state", None),
+            }
+
+        cancel_message = "Result synchronization cancelled. Run sync again to resume copying outputs."
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # pragma: no cover - defensive cleanup
+            logger.warning("Result sync task raised during cancellation", run_uuid=run_uuid, error=str(exc))
+
+        await update_job_fields(
+            run_uuid,
+            {
+                "status": PersistedJobStatus.CANCELLED,
+                "transfer_state": "sync_cancelled",
+                "error_message": cancel_message,
+            },
+        )
+        logger.info("Cancelled remote result sync", run_uuid=run_uuid)
+        return {
+            "success": True,
+            "status": "sync_cancelled",
+            "message": cancel_message,
+            "run_uuid": run_uuid,
+            "remote_work_dir": getattr(job, "remote_work_dir", None),
+            "local_work_dir": getattr(job, "nextflow_work_dir", None),
+            "transfer_state": "sync_cancelled",
+        }
+
+    async def _discover_remote_result_artifacts(
+        self,
+        *,
+        profile: SSHProfileData,
+        remote_output_dir: str,
+        workflow_key: str | None = None,
+    ) -> dict[str, list[str]]:
         conn = await self._ssh_manager.connect(profile)
         try:
             existing_dirs: list[str] = []
-            for dirname in self._RESULT_SYNC_DIRS:
+            for dirname in result_sync_dirs_for_workflow(workflow_key):
                 if await conn.path_exists(str(PurePosixPath(remote_output_dir) / dirname)):
                     existing_dirs.append(dirname)
 
-            file_predicate = " -o ".join(f"-name {shlex.quote(pattern)}" for pattern in self._RESULT_SYNC_FILE_PATTERNS)
+            file_predicate = " -o ".join(
+                f"-name {shlex.quote(pattern)}" for pattern in result_sync_file_patterns_for_workflow(workflow_key)
+            )
             file_cmd = (
                 f"find {shlex.quote(remote_output_dir)} -maxdepth 1 -type f \\( {file_predicate} \\) "
                 "-exec basename {} \\; | sort"
@@ -1577,6 +1856,49 @@ class SlurmBackend:
             raise ValueError(f"SSH profile not found: {profile_id}")
         return profile
 
+    @staticmethod
+    def _resolve_workflow_executor(params: SubmitParams):
+        executor = params.workflow_executor
+        if executor is not None:
+            return executor
+        executor = get_workflow_executor(params.workflow_key)
+        params.workflow_executor = executor
+        return executor
+
+    async def _write_remote_workflow_artifacts(
+        self,
+        *,
+        params: SubmitParams,
+        profile: SSHProfileData,
+        conn,
+        remote_work: str,
+        staged_inputs: dict,
+        reference_assets: dict,
+    ) -> dict[str, str]:
+        workflow_executor = self._resolve_workflow_executor(params)
+        rendered_files = await workflow_executor.remote_config_artifacts(
+            request=params,
+            params=params,
+            profile=profile,
+            conn=conn,
+            remote_work=remote_work,
+            staged_inputs=staged_inputs,
+            reference_assets=reference_assets,
+        )
+        written_files: dict[str, str] = {}
+        await conn.mkdir_p(remote_work)
+        for relative_path, content in rendered_files.items():
+            remote_path = str(PurePosixPath(remote_work) / relative_path)
+            parent_dir = str(PurePosixPath(remote_path).parent)
+            await conn.mkdir_p(parent_dir)
+            payload = content if content.endswith("\n") else f"{content}\n"
+            await conn.run(
+                f"cat > {shlex.quote(remote_path)} << 'AGOUTIC_EOF'\n{payload}AGOUTIC_EOF",
+                check=True,
+            )
+            written_files[relative_path] = remote_path
+        return written_files
+
     def _build_nextflow_command(
         self,
         params: SubmitParams,
@@ -1586,24 +1908,18 @@ class SlurmBackend:
         *,
         rerun_in_place: bool = False,
     ) -> str:
-        """Build the Nextflow command line for the sbatch script."""
-        genome_list = ",".join(params.reference_genome)
-        cmd_parts = [
-            '"${AGOUTIC_NEXTFLOW_BIN:-nextflow}" run mortazavilab/dogme',
-            f"--sample_name {shlex.quote(params.sample_name)}",
-            f"--mode {shlex.quote(params.mode)}",
-            f"--input {shlex.quote(remote_input)}",
-            f"--outdir {shlex.quote(remote_output)}",
-            f"--reference_genome {shlex.quote(genome_list)}",
-            f"-c {shlex.quote(config_path)}",
-        ]
-        if params.modifications:
-            cmd_parts.append(f"--modifications {shlex.quote(params.modifications)}")
-        if params.entry_point:
-            cmd_parts.append(f"-entry {shlex.quote(params.entry_point)}")
-        if rerun_in_place:
-            cmd_parts.append("-rerun")
-        return " \\\n    ".join(cmd_parts)
+        """Build the Nextflow command line via the workflow executor."""
+        workflow_executor = self._resolve_workflow_executor(params)
+        return workflow_executor.remote_build_command(
+            request=params,
+            params=params,
+            remote_work=str(PurePosixPath(config_path).parent),
+            remote_output=remote_output,
+            staged_inputs={"remote_input": remote_input},
+            reference_assets={},
+            rendered_files={"nextflow.config": config_path},
+            rerun_in_place=rerun_in_place,
+        )
 
     @staticmethod
     def _workflow_input_link_path(params: SubmitParams, remote_work: str) -> str:
@@ -1692,66 +2008,9 @@ class SlurmBackend:
         The controller only orchestrates the workflow; GPU requests belong to
         the individual pipeline tasks configured in nextflow.config.
         """
-        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip() or "default"
-        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip() or "standard"
+        cpu_account = (profile.default_slurm_account or params.slurm_account or "default").strip() or "default"
+        cpu_partition = (profile.default_slurm_partition or params.slurm_partition or "standard").strip() or "standard"
         return cpu_account, cpu_partition
-
-    async def _resolve_custom_dogme_bind_paths(
-        self,
-        *,
-        conn,
-        extra_bind_paths: list[str] | None,
-    ) -> list[str]:
-        resolved_paths: list[str] = []
-
-        for extra_bind_path in extra_bind_paths or []:
-            cleaned = str(extra_bind_path or "").strip()
-            if not cleaned:
-                continue
-
-            is_runtime_library_input = self._is_openchromatin_runtime_library_input(cleaned)
-            if cleaned == "/lib64" or is_runtime_library_input:
-                runtime_library_paths = await self._resolve_openchromatin_runtime_library_paths(conn=conn)
-                if runtime_library_paths:
-                    for runtime_library_path in runtime_library_paths:
-                        if runtime_library_path not in resolved_paths:
-                            resolved_paths.append(runtime_library_path)
-                    continue
-
-                if cleaned == "/lib64":
-                    logger.warning(
-                        "Falling back to broad /lib64 bind for custom OpenChromatin runtime because the host GCC runtime libraries were not all found"
-                    )
-                else:
-                    # Preserve backward compatibility for saved runs that listed only one runtime library path.
-                    # When the full host runtime set cannot be resolved, keep the specific requested file.
-                    for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
-                        if cleaned not in candidate_group:
-                            continue
-                        for candidate in candidate_group:
-                            if await conn.path_exists(candidate):
-                                cleaned = candidate
-                                break
-                        break
-
-            if not is_runtime_library_input:
-                for candidate_group in self._OPENCHROMATIN_RUNTIME_LIBRARY_CANDIDATE_GROUPS:
-                    if cleaned not in candidate_group:
-                        continue
-                    for candidate in candidate_group:
-                        if await conn.path_exists(candidate):
-                            cleaned = candidate
-                            break
-                    break
-
-            if not await conn.path_exists(cleaned):
-                raise FileNotFoundError(
-                    f"Custom Dogme bind path does not exist on the remote host: {cleaned}"
-                )
-            if cleaned not in resolved_paths:
-                resolved_paths.append(cleaned)
-
-        return resolved_paths
 
     async def _write_remote_nextflow_config(
         self,
@@ -1762,149 +2021,20 @@ class SlurmBackend:
         remote_work: str,
         cache_resolution: dict,
     ) -> str:
-        """Generate and write Nextflow config in the remote workflow directory."""
-        cpu_account = (params.slurm_account or profile.default_slurm_account or "default").strip() or "default"
-        cpu_partition = (params.slurm_partition or profile.default_slurm_partition or "standard").strip() or "standard"
-        gpu_account = (params.slurm_gpu_account or profile.default_slurm_gpu_account or cpu_account).strip() or cpu_account
-        gpu_partition = (params.slurm_gpu_partition or profile.default_slurm_gpu_partition or cpu_partition).strip() or cpu_partition
-
-        # Prefer staged remote reference cache paths so config does not point at local host paths.
-        ref_overrides: dict[str, dict[str, str]] = {}
-        remote_reference_paths = {
-            str(k).strip().lower(): str(v)
-            for k, v in (cache_resolution.get("remote_reference_paths") or {}).items()
-            if k and v
-        }
-        logger.info(
-            "Building reference overrides",
-            cache_resolution_keys=list(cache_resolution.keys()) if cache_resolution else None,
-            remote_reference_paths=remote_reference_paths,
-            requested_genomes=params.reference_genome,
+        """Generate and write workflow config artifacts in the remote workflow directory."""
+        rendered_files = await self._write_remote_workflow_artifacts(
+            params=params,
+            profile=profile,
+            conn=conn,
+            remote_work=remote_work,
+            staged_inputs=cache_resolution,
+            reference_assets={
+                "reference_asset_evidence": cache_resolution.get("reference_asset_evidence") or {},
+            },
         )
-        
-        if not remote_reference_paths and params.reference_cache_path and params.reference_genome:
-            first_ref = self._normalize_reference_id((params.reference_genome or ["default"])[0])
-            remote_reference_paths[first_ref] = params.reference_cache_path
-            logger.info(f"Using fallback reference_cache_path for {first_ref}: {params.reference_cache_path}")
-
-        # Final safety net: derive reference roots from remote base path when cache metadata is absent.
-        if not remote_reference_paths and params.reference_genome:
-            derived_ref_root = self._derive_remote_roots(params, profile)["ref_root"]
-            for genome_name in params.reference_genome or []:
-                ref_id = self._normalize_reference_id(genome_name)
-                remote_reference_paths[ref_id] = str(PurePosixPath(derived_ref_root) / ref_id)
-            logger.info(
-                "Derived remote reference paths from remote base root",
-                remote_reference_paths=remote_reference_paths,
-            )
-
-        lower_map = {k.lower(): k for k in REFERENCE_GENOMES.keys()}
-        for genome_name in params.reference_genome or []:
-            ref_id = self._normalize_reference_id(genome_name)
-            remote_ref_root = remote_reference_paths.get(ref_id)
-            if not remote_ref_root:
-                logger.warning(f"No remote reference path found for {genome_name} (normalized: {ref_id}); will use defaults")
-                continue
-
-            canonical_name = lower_map.get(str(genome_name).lower(), genome_name)
-            ref_cfg = REFERENCE_GENOMES.get(canonical_name, REFERENCE_GENOMES.get("mm39", {}))
-            fasta_src = ref_cfg.get("fasta")
-            gtf_src = ref_cfg.get("gtf")
-            if not fasta_src or not gtf_src:
-                continue
-
-            ref_overrides[str(genome_name)] = {
-                "fasta": str(PurePosixPath(remote_ref_root) / Path(fasta_src).name),
-                "gtf": str(PurePosixPath(remote_ref_root) / Path(gtf_src).name),
-            }
-            kallisto_src = ref_cfg.get("kallisto_index")
-            t2g_src = ref_cfg.get("kallisto_t2g")
-            if kallisto_src:
-                ref_overrides[str(genome_name)]["kallisto_index"] = str(
-                    PurePosixPath(remote_ref_root) / Path(kallisto_src).name
-                )
-            if t2g_src:
-                ref_overrides[str(genome_name)]["kallisto_t2g"] = str(
-                    PurePosixPath(remote_ref_root) / Path(t2g_src).name
-                )
-            logger.info(
-                f"Override reference paths for {genome_name}",
-                override=ref_overrides[str(genome_name)],
-            )
-
-        logger.info(
-            "Final reference_overrides passed to config generator",
-            reference_overrides=ref_overrides,
-        )
-        remote_roots = self._derive_remote_roots(params, profile)
-
-        bind_paths: list[str] = [remote_work]
-        modkit_bind_paths: list[str] = list(bind_paths)
-        remote_input = str(cache_resolution.get("remote_input") or "").strip()
-        if remote_input:
-            bind_paths.append(remote_input)
-            modkit_bind_paths.append(remote_input)
-        for remote_ref_root in remote_reference_paths.values():
-            cleaned = str(remote_ref_root or "").strip()
-            if cleaned:
-                bind_paths.append(cleaned)
-                modkit_bind_paths.append(cleaned)
-        if str(params.mode or "").strip().upper() == DogmeMode.DNA.value:
-            modkit_bind_paths.extend(
-                await self._resolve_custom_dogme_bind_paths(
-                    conn=conn,
-                    extra_bind_paths=params.custom_dogme_bind_paths,
-                )
-            )
-
-        task_runtime_exports = resolve_dogme_profile_task_runtime_exports(
-            params.mode,
-            custom_profile=params.custom_dogme_profile,
-        )
-        if str(params.mode or "").strip().upper() == DogmeMode.DNA.value:
-            await self._stage_openchromatin_wrapper(conn=conn, remote_work=remote_work)
-            task_runtime_exports = self._build_openchromatin_wrapper_runtime_exports(
-                runtime_exports=task_runtime_exports,
-                remote_work=remote_work,
-            )
-
-        config = NextflowConfig.generate_config(
-            sample_name=params.sample_name,
-            mode=params.mode,
-            input_dir=params.input_directory,
-            reference_genome=params.reference_genome,
-            reference_overrides=ref_overrides,
-            modifications=params.modifications,
-            modkit_filter_threshold=params.modkit_filter_threshold,
-            min_cov=params.min_cov,
-            per_mod=params.per_mod,
-            accuracy=params.accuracy,
-            max_gpu_tasks=params.max_gpu_tasks,
-            execution_mode="slurm",
-            slurm_cpu_partition=cpu_partition,
-            slurm_gpu_partition=gpu_partition,
-            slurm_cpu_account=cpu_account,
-            slurm_gpu_account=gpu_account,
-            slurm_cpus=params.slurm_cpus,
-            slurm_memory_gb=params.slurm_memory_gb,
-            slurm_walltime=params.slurm_walltime,
-            slurm_bind_paths=bind_paths,
-            modkit_task_runtime_exports=task_runtime_exports,
-            slurm_modkit_bind_paths=modkit_bind_paths,
-            apptainer_cache_dir=f"{remote_roots['remote_base_path']}/.nxf-apptainer-cache",
-        )
-
-        config_path = f"{remote_work}/nextflow.config"
-        quoted_config_path = shlex.quote(config_path)
-        profile_path = f"{remote_work}/dogme.profile"
-        quoted_profile_path = shlex.quote(profile_path)
-        profile_content = resolve_dogme_profile_content(
-            params.mode,
-            custom_profile=params.custom_dogme_profile,
-        )
-        await conn.mkdir_p(remote_work)
-        await conn.run(f"cat > {quoted_config_path} << 'AGOUTIC_EOF'\n{config}\nAGOUTIC_EOF", check=True)
-        await conn.run(f"cat > {quoted_profile_path} << 'AGOUTIC_EOF'\n{profile_content}AGOUTIC_EOF", check=True)
+        config_path = rendered_files.get("nextflow.config")
+        if not config_path:
+            raise ValueError("Remote workflow executor did not render nextflow.config")
         return config_path
 
     async def _ensure_workflow_input_links(

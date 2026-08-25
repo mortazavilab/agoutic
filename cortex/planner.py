@@ -55,11 +55,14 @@ from cortex.plan_templates import (  # noqa: F401 — re-exported
     _template_compare_region_overlaps,
     _template_compare_workflows,
     _template_download_analyze,
+    _template_haplotype_with_vcf,
     _template_parse_plot_interpret,
     _template_reconcile_bams,
     _template_remote_stage_workflow,
+    _template_run_dogme_batch,
     _template_run_de_pipeline,
     _template_run_enrichment,
+    _template_run_wf_pore_c,
     _template_run_workflow,
     _template_run_xgenepy_analysis,
     _template_search_compare_to_local,
@@ -186,6 +189,10 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_search_compare_to_local(params)
     if plan_type == "run_workflow":
         return _template_run_workflow(params)
+    if plan_type == "run_dogme_batch":
+        return _template_run_dogme_batch(params)
+    if plan_type == "run_wf_pore_c":
+        return _template_run_wf_pore_c(params)
     if plan_type == "run_de_pipeline":
         return _template_run_de_pipeline(params)
     if plan_type == "run_enrichment":
@@ -196,6 +203,8 @@ def _deterministic_template_for_plan_type(plan_type: str, params: dict) -> dict 
         return _template_remote_stage_workflow(params)
     if plan_type == "reconcile_bams":
         return _template_reconcile_bams(params)
+    if plan_type == "haplotype_with_vcf":
+        return _template_haplotype_with_vcf(params)
     return None
 
 
@@ -239,6 +248,7 @@ _PLANNER_APPROVAL_STEP_KINDS = frozenset({
 
 _PLANNER_ALLOWED_STEP_KINDS = frozenset({
     "LOCATE_DATA",
+    "VALIDATE_INPUTS",
     "SEARCH_ENCODE",
     "DOWNLOAD_DATA",
     "SUBMIT_WORKFLOW",
@@ -595,6 +605,7 @@ def generate_plan(
     engine: "AgentEngine",
     conversation_history: list | None = None,
     project_dir: str = "",
+    project_workflow_paths: dict[tuple[str, ...], str] | None = None,
 ) -> dict | None:
     """
     Generate a structured plan payload for a MULTI_STEP request.
@@ -609,7 +620,8 @@ def generate_plan(
         plan_type = "summarize_results"
 
     params = _extract_plan_params(message, conv_state, plan_type or "",
-                                    project_dir=project_dir)
+                                    project_dir=project_dir,
+                                    project_workflow_paths=project_workflow_paths)
 
     # Temporary bridge: hybrid-first for selected non-core flows.
     if plan_type in _HYBRID_FIRST_FLOWS:
@@ -707,6 +719,14 @@ def generate_plan(
         )
         logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
         return _finalize_plan(plan, conv_state)
+    if plan_type == "run_wf_pore_c":
+        plan = _apply_manifest_planning_metadata(
+            _template_run_wf_pore_c(params),
+            plan_type=plan_type,
+            params=params,
+        )
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
     if plan_type == "compare_region_overlaps":
         plan = _apply_manifest_planning_metadata(
             _template_compare_region_overlaps(params),
@@ -718,6 +738,14 @@ def generate_plan(
     if plan_type == "reconcile_bams":
         plan = _apply_manifest_planning_metadata(
             _template_reconcile_bams(params),
+            plan_type=plan_type,
+            params=params,
+        )
+        logger.info("Generated plan from template", plan_type=plan_type, steps=len(plan["steps"]))
+        return _finalize_plan(plan, conv_state)
+    if plan_type == "haplotype_with_vcf":
+        plan = _apply_manifest_planning_metadata(
+            _template_haplotype_with_vcf(params),
             plan_type=plan_type,
             params=params,
         )

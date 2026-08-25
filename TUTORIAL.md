@@ -1,4 +1,4 @@
-# AGOUTIC Tutorial: SSH Profiles, Remote SLURM Runs, Reconcile, and Result Sync
+# AGOUTIC Tutorial: SSH Profiles, Remote SLURM Runs, Reconcile, Haplotype With VCF, and Result Sync
 
 This tutorial walks through the full user flow for running AGOUTIC on a SLURM HPC cluster:
 
@@ -8,6 +8,7 @@ This tutorial walks through the full user flow for running AGOUTIC on a SLURM HP
 4. Launch Dogme workflows on SLURM.
 5. Sync results back to the local AGOUTIC host.
 6. Run `reconcile_bams` across completed workflows.
+7. Haplotype workflow BAMs with an indexed VCF.
 
 For API-level setup details, see [`docs/cluster_slurm_setup.md`](docs/cluster_slurm_setup.md). For execution-mode reference behavior, see [`docs/user_guide_execution_modes.md`](docs/user_guide_execution_modes.md).
 
@@ -212,10 +213,30 @@ Typical prompts:
 - _"sync results back to local for workflow2"_
 - _"retry sync results for workflow2"_
 - _"sync results for 12345678-1234-1234-1234-123456789abc"_
+- _"/sync-workflow workflow2"_
 
 AGOUTIC resolves the run from the active workflow context, the named `workflowN`, or the run UUID you provide. When the sync starts successfully, progress appears in the task dock and the job status updates.
 
 Use manual sync before downstream analysis if the job was left as **Remote only**.
+
+## Import an Existing Completed Remote Workflow
+
+If a Dogme run already finished on the cluster outside AGOUTIC's submission flow, you can import it into the current project instead of rerunning it.
+
+Typical prompts:
+
+- _"/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote"_
+- _"import remote workflow from /scratch/youruser/agoutic/project-alpha/workflow12"_
+- _"/import-workflow /scratch/youruser/agoutic/project-alpha/workflow12 --remote --full-copy"_
+
+What AGOUTIC does:
+
+- allocates the next local `workflowN` folder in the current project
+- reads workflow metadata from the Dogme `.config` file before asking for any missing fields
+- copies the same default result subset as a normal remote copy-back unless you add `--full-copy`
+- keeps the original source path as provenance so you can run `/sync-workflow workflowN` later if the source workflow was still incomplete during the import
+
+If the source workflow is incomplete, the execution card stays completed but shows a partial-import warning and a **Resume Sync** action in the UI.
 
 ## Step 8: Analyze or Inspect the Synced Workflow Outputs
 
@@ -271,6 +292,30 @@ Useful follow-up prompts:
 
 AGOUTIC prefers workflow-local `reconciled.gtf` when present so downstream annotation and plotting stay aligned with the reconciled output.
 
+## Step 11: Haplotype Reads With A VCF
+
+Use haplotyping when you already have local-accessible mapped or annotated BAMs plus a VCF that distinguishes the samples or parental genotypes you want to assign against.
+
+Recommended prerequisites:
+
+- the source workflow outputs are local-accessible on the AGOUTIC host
+- every source BAM is coordinate-sorted and indexed
+- the VCF path is local-accessible, and AGOUTIC can write beside it if a plain `.vcf` still needs compression or indexing
+- you know whether the source workflow should be treated as `DNA`, `RNA`, or `cDNA`
+
+Typical prompts:
+
+- _`/haplotype RNA workflow4 /data/parents.vcf.gz`_
+- _`haplotype RNA workflow4 with file /data/parents.vcf.gz`_
+- _`/haplotype DNA workflow2 /data/family.vcf.gz`_
+
+What AGOUTIC does:
+
+- resolves BAMs from `annot/` for RNA/cDNA Dogme workflows, `bams/` for DNA Dogme workflows, or root-level `*.annotated.bam` files for reconcile outputs
+- runs a preflight validation step to confirm BAM sort/index state, auto-prepare `.vcf.gz` plus `.tbi` when needed, and validate compatible VCF sample layout
+- asks for approval before execution, showing the exact BAM names, selected VCF samples, assignment labels, thresholds, and destination workflow
+- writes combined and split haplotyped BAMs plus BAM indexes and summary TSVs into a new `workflowN` directory
+
 ## Troubleshooting Short List
 
 ### The SSH profile will not test successfully
@@ -294,6 +339,13 @@ AGOUTIC prefers workflow-local `reconciled.gtf` when present so downstream annot
 - confirm AGOUTIC can resolve one shared annotation GTF
 - sync remote-only results back locally before attempting reconcile
 
+### Haplotype will not approve
+
+- confirm the workflow contains the expected BAM type for the requested mode (`annot/*.annotated.bam` for RNA/cDNA, `bams/*.bam` for DNA)
+- confirm every selected BAM is coordinate-sorted and indexed
+- confirm the VCF path is correct and AGOUTIC can create sibling `.vcf.gz`, `.tbi`, or `.csi` files when they are missing
+- if the VCF has more than two samples, be prepared to select one sample or an explicit sample pair during approval
+
 ### Results are remote-only and analysis does not work
 
 Run a manual sync first, then retry the analysis or reconcile request.
@@ -309,5 +361,6 @@ If you are setting this up for the first time, use this sequence:
 5. Wait for the automatic sync to complete.
 6. Run `list workflows` and summarize the finished workflow.
 7. After you have at least two compatible workflows, run reconcile across them.
+8. If you have an indexed VCF and compatible BAM outputs, run `/haplotype RNA workflowN /path/to/parents.vcf.gz` or the matching DNA form.
 
 That path exercises SSH, staging, SLURM submit, copy-back, workflow discovery, and reconcile without requiring manual recovery steps on the first try.

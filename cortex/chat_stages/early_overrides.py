@@ -50,6 +50,9 @@ _BROWSING_PATTERNS = [
     ]
 ]
 
+_ENCODE_FILE_KEYWORDS = ("fastq", "bam", "pod5", "files", "download")
+_ENCSR_ACCESSION_RE = re.compile(r"\bENCSR[A-Z0-9]{6}\b", re.IGNORECASE)
+
 
 def _is_sync_intent(msg: str) -> bool:
     return any(p.search(msg) for p in _SYNC_PATTERNS)
@@ -63,6 +66,11 @@ def _is_browsing_intent(msg: str) -> bool:
     return any(p.search(msg) for p in _BROWSING_PATTERNS)
 
 
+def _is_multi_encode_file_request(msg: str) -> bool:
+    accessions = {match.group(0).upper() for match in _ENCSR_ACCESSION_RE.finditer(msg)}
+    return len(accessions) >= 2 and any(keyword in msg.lower() for keyword in _ENCODE_FILE_KEYWORDS)
+
+
 class EarlyOverrideDetectionStage:
     name = "early_overrides"
     priority = PRIORITY
@@ -72,6 +80,14 @@ class EarlyOverrideDetectionStage:
 
     async def run(self, ctx: ChatContext) -> None:
         msg = ctx.user_msg_lower
+
+        if _is_multi_encode_file_request(ctx.message):
+            ctx.skip_llm_first_pass = True
+            ctx.skip_tag_parsing = True
+            ctx.is_multi_encode_file_override = True
+            _emit_progress(ctx.request_id, "tools", "Finding ENCODE files for all requested experiments...")
+            logger.info("Early multi-experiment ENCODE file override: skipping LLM first pass")
+            return
 
         if _is_sync_intent(msg):
             ctx.skip_llm_first_pass = True
