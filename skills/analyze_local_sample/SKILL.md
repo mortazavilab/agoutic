@@ -71,6 +71,17 @@ Dogme FASTQ input is supported only for the documented cDNA `fastqCDNA` path.
 - **FASTQ alone**: respond with `I found FASTQ input in this project. Dogme only supports FASTQ input for cDNA mode. I prefilled the approval for cDNA fastqCDNA below. If you intended RNA or DNA instead, switch the input to pod5 or BAM before submitting.`
 - **FASTQ + RNA or FASTQ + DNA**: respond with `Dogme only supports FASTQ input for cDNA mode. Your request mentions FASTQ together with {requested_mode}. Choose one of the options below before submitting: keep FASTQ and switch to cDNA fastqCDNA, or keep {requested_mode} and provide pod5/BAM instead.`
 
+## Single-Cell and Single-Nucleus cDNA
+
+cDNA runs remain bulk by default. Enable DOGME single-cell processing only when the user explicitly asks for single-cell or single-nucleus cDNA:
+
+- **Single-cell cDNA**: set `single_cell=true` and `single_cell_entity=cell`.
+- **Single-nucleus cDNA**: set `single_cell=true` and `single_cell_entity=nucleus`.
+- Do not infer the entity from the sample name, tissue, or input. `single_cell_entity` is metadata only.
+- The current single-cell path uses pod5 input through DOGME `main` or `kallisto`. FASTQ `fastqCDNA` and Dorado-demultiplexed samples remain bulk quantification paths.
+- H5AD output is enabled by default for single-cell runs and may be disabled without disabling single-cell FASTQ processing or gene-level bustools counts.
+- Do not describe DOGME barcode correction as cell calling; DOGME does not filter cells, normalize counts, or cluster observations.
+
 ## Detecting Analysis Requests
 
 If the user's message contains any of these patterns, switch to `analyze_job_results`:

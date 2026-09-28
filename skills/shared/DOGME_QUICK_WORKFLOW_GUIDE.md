@@ -50,13 +50,15 @@ The system automatically injects workflow directory paths. If present, use the `
 - ✅ **Include final result files:**
   - Files in `bams/` (unmapped and mapped bams)
   - Files in `annot/` (annotations, final stats)
-  - Files in `kallisto/{sample}/` (gene/transcript counts)
+  - Files in `kallisto/{sample}/` (bulk gene/transcript counts)
+  - Files in `kallisto/{genome}/single-cell/{sample}_{genome}/` (BUS/count matrices, H5AD files, and single-cell QC)
+  - Files in `fastqs/single-cell/` and generated `fastqs/*.seqspec.yaml` (split FASTQs, splitcode QC, and logs)
   - Files in `bedMethyl/` (methylation/modification data)
   - Files in `openChromatin/` (chromatin accessibility data)
 
 - ❌ **Exclude work/intermediate files:**
   - Files in `work/` directory (Nextflow intermediate files)
-  - Temporary files (*.tmp, *.log during processing)
+  - Temporary files (*.tmp and processing logs); retain DOGME's published `fastqs/single-cell/*.log` splitcode logs
   - Processing artifacts and cache files
 
 **Example filtered summary presentation:**

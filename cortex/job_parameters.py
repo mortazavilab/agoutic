@@ -395,6 +395,13 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         "input_type": "pod5",  # Default to pod5
         "input_type_explicit": False,
         "entry_point": None,  # Dogme entry point
+        "single_cell": False,
+        "single_cell_h5ad": True,
+        "single_cell_entity": "cell",
+        "single_cell_kit": None,
+        "seqspec_template": None,
+        "seqspec_variables": None,
+        "seqspec_md5": True,
         "approval_prefill": None,
         "approval_clarification": None,
         "reference_genome": [],  # Now a list for multi-genome support
@@ -580,6 +587,14 @@ async def extract_job_parameters_from_conversation(session, project_id: str) -> 
         params["mode_explicit"] = True
     else:
         params["mode"] = "DNA"  # Default to DNA
+
+    requests_single_nucleus = bool(re.search(r"\bsingle[\s-]*nucleus\b", all_user_text))
+    requests_single_cell = bool(re.search(r"\bsingle[\s-]*cell\b", all_user_text))
+    if params["mode"] == "CDNA" and (requests_single_cell or requests_single_nucleus):
+        params["single_cell"] = True
+        params["single_cell_entity"] = "nucleus" if requests_single_nucleus else "cell"
+        if re.search(r"\b(?:skip|without|no)\s+(?:the\s+)?h5ad\b", all_user_text):
+            params["single_cell_h5ad"] = False
 
     explicit_input_candidate = _extract_explicit_input_candidate(
         user_messages,

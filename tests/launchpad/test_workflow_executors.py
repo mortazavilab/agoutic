@@ -100,12 +100,19 @@ def test_dogme_backend_submit_params_include_workflow_executor():
             "username": "alice",
             "project_slug": "proj-1",
             "sample_name": "sample-1",
-            "mode": "RNA",
+            "mode": "CDNA",
             "input_type": "pod5",
             "input_directory": "/data/input",
             "reference_genome": ["mm39"],
             "modifications": None,
             "entry_point": None,
+            "single_cell": True,
+            "single_cell_h5ad": False,
+            "single_cell_entity": "nucleus",
+            "single_cell_kit": "parse-wt-v2",
+            "seqspec_template": "/refs/custom.yaml",
+            "seqspec_variables": {"assay": "custom"},
+            "seqspec_md5": False,
             "modkit_filter_threshold": 0.9,
             "min_cov": None,
             "per_mod": 5,
@@ -141,6 +148,21 @@ def test_dogme_backend_submit_params_include_workflow_executor():
     )
 
     assert params["workflow_executor"] is executor
+    assert params["single_cell"] is True
+    assert params["single_cell_h5ad"] is False
+    assert params["single_cell_entity"] == "nucleus"
+    assert params["single_cell_kit"] == "parse-wt-v2"
+    assert params["seqspec_variables"] == {"assay": "custom"}
+
+    local_kwargs = executor.build_local_submit_kwargs(
+        run_uuid="run-1",
+        request=request,
+        workflow_index=7,
+        max_gpu_tasks=None,
+    )
+    assert local_kwargs["single_cell"] is True
+    assert local_kwargs["single_cell_entity"] == "nucleus"
+    assert local_kwargs["seqspec_md5"] is False
 
 
 def test_dogme_remote_command_pins_selected_revision():

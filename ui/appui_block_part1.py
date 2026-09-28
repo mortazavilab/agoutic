@@ -1,3 +1,4 @@
+import json
 import os
 
 import streamlit as st
@@ -1047,6 +1048,13 @@ def render_block_part1(
                         sample_sheet = ""
                         cutter = _WF_PORE_C_DEFAULT_CUTTER
                         output_flags = {}
+                        single_cell = False
+                        single_cell_h5ad = True
+                        single_cell_entity = "cell"
+                        single_cell_kit = None
+                        seqspec_template = None
+                        seqspec_variables = None
+                        seqspec_md5 = True
 
                         if _field_visibility["show_mode"]:
                             mode_options = ["DNA", "RNA", "CDNA"]
@@ -1791,6 +1799,8 @@ def render_block_part1(
                                 current_entry = "fastqCDNA"
                             else:
                                 entry_point_options = ["(auto)", "basecall", "remap", "modkit", "annotateRNA", "reports"]
+                                if mode == "CDNA" and input_type == "pod5":
+                                    entry_point_options.append("kallisto")
                                 current_entry = extracted_params.get("entry_point") or "(auto)"
                                 if _workflow_key == "dogme":
                                     current_entry = _dogme_fastq_state.get("default_entry_point") or current_entry
@@ -1819,6 +1829,78 @@ def render_block_part1(
                                 format_func=lambda value: "Default release" if value == "default" else "devel branch",
                                 help="Use the devel branch when the Dogme repository requires an explicit revision.",
                             )
+
+                        if _workflow_key == "dogme" and mode == "CDNA":
+                            single_cell = st.checkbox(
+                                "Single-cell or single-nucleus cDNA",
+                                value=bool(extracted_params.get("single_cell", False)),
+                                key=f"approval_{block_id}_single_cell",
+                            )
+                            if single_cell:
+                                single_cell_route_supported = (
+                                    input_type == "pod5" and entry_point in {"(auto)", "kallisto"}
+                                )
+                                if not single_cell_route_supported:
+                                    _submit_block_reason = (
+                                        "Single-cell cDNA currently requires pod5 input through DOGME main or kallisto. "
+                                        "FASTQ fastqCDNA and BAM routes remain bulk-only. Uncheck Single-cell cDNA "
+                                        "to submit this run as bulk."
+                                    )
+                                    st.warning(_submit_block_reason)
+                                else:
+                                    grouped_section("Single-Cell cDNA")
+                                    entity_options = ["cell", "nucleus"]
+                                    current_entity = extracted_params.get("single_cell_entity", "cell")
+                                    single_cell_entity = st.selectbox(
+                                        "Entity",
+                                        entity_options,
+                                        index=entity_options.index(current_entity) if current_entity in entity_options else 0,
+                                        key=f"approval_{block_id}_single_cell_entity",
+                                    )
+                                    kit_options = [None, "parse-wt-v2", "parse-wt-mega-v2"]
+                                    current_kit = extracted_params.get("single_cell_kit")
+                                    single_cell_kit = st.selectbox(
+                                        "Parse kit",
+                                        kit_options,
+                                        index=kit_options.index(current_kit) if current_kit in kit_options else 0,
+                                        format_func=lambda value: "DOGME default (Parse WT Mega v2)" if value is None else value,
+                                        key=f"approval_{block_id}_single_cell_kit",
+                                    )
+                                    single_cell_h5ad = st.checkbox(
+                                        "Generate H5AD outputs",
+                                        value=bool(extracted_params.get("single_cell_h5ad", True)),
+                                        key=f"approval_{block_id}_single_cell_h5ad",
+                                    )
+                                    with st.expander("Advanced seqspec settings"):
+                                        seqspec_template_value = st.text_input(
+                                            "Seqspec template path",
+                                            value=extracted_params.get("seqspec_template") or "",
+                                            key=f"approval_{block_id}_seqspec_template",
+                                        )
+                                        default_seqspec_variables = extracted_params.get("seqspec_variables")
+                                        seqspec_variables_json = st.text_area(
+                                            "Seqspec variables (JSON object)",
+                                            value=json.dumps(default_seqspec_variables, indent=2) if isinstance(default_seqspec_variables, dict) else "",
+                                            help="Overrides derived FASTQ metadata and built-in kit defaults.",
+                                            key=f"approval_{block_id}_seqspec_variables",
+                                        )
+                                        single_cell_md5 = st.checkbox(
+                                            "Include FASTQ MD5 in seqspec",
+                                            value=bool(extracted_params.get("seqspec_md5", True)),
+                                            key=f"approval_{block_id}_seqspec_md5",
+                                        )
+                                    seqspec_template = seqspec_template_value.strip() or None
+                                    seqspec_md5 = single_cell_md5
+                                    if seqspec_variables_json.strip():
+                                        try:
+                                            parsed_seqspec_variables = json.loads(seqspec_variables_json)
+                                        except json.JSONDecodeError:
+                                            _submit_block_reason = "Seqspec variables must be valid JSON containing an object."
+                                        else:
+                                            if not isinstance(parsed_seqspec_variables, dict):
+                                                _submit_block_reason = "Seqspec variables must be a JSON object."
+                                            else:
+                                                seqspec_variables = parsed_seqspec_variables
 
                         if _workflow_key == "dogme" and input_type == "fastq":
                             _nonblocking_clarification = _dogme_fastq_state.get("clarification")
@@ -2243,7 +2325,7 @@ def render_block_part1(
                         
                         st.divider()
                         if _submit_block_reason:
-                            st.caption("Approve is disabled until the FASTQ input conflict is resolved.")
+                            st.caption(f"Approve is disabled: {_submit_block_reason}")
                         
                         # Action buttons
                         col1, col2 = st.columns(2)
@@ -2286,6 +2368,13 @@ def render_block_part1(
                                     "per_mod": per_mod,
                                     "accuracy": accuracy,
                                     "max_gpu_tasks": max_gpu_tasks,
+                                    "single_cell": single_cell,
+                                    "single_cell_h5ad": single_cell_h5ad,
+                                    "single_cell_entity": single_cell_entity,
+                                    "single_cell_kit": single_cell_kit,
+                                    "seqspec_template": seqspec_template,
+                                    "seqspec_variables": seqspec_variables,
+                                    "seqspec_md5": seqspec_md5,
                                 })
                             if execution_mode == "slurm":
                                 edited_params.update({

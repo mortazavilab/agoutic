@@ -7,7 +7,7 @@ of its planning and reasoning process.
 """
 import asyncio
 import sys
-from typing import Optional
+from typing import Any, Optional
 import json
 import httpx
 import signal
@@ -202,6 +202,13 @@ class LaunchpadMCPTools:
         modifications: Optional[str] = None,
         input_type: Optional[str] = None,
         entry_point: Optional[str] = None,
+        single_cell: bool = False,
+        single_cell_h5ad: bool = True,
+        single_cell_entity: str = "cell",
+        single_cell_kit: Optional[str] = None,
+        seqspec_template: Optional[str] = None,
+        seqspec_variables: Optional[dict[str, Any]] = None,
+        seqspec_md5: bool = True,
         dogme_revision: Optional[str] = None,
         modkit_filter_threshold: Optional[float] = None,
         min_cov: Optional[int] = None,
@@ -281,6 +288,13 @@ class LaunchpadMCPTools:
             "run_type": run_type,
             "reference_genome": reference_genome,
             "execution_mode": execution_mode,
+            "single_cell": single_cell,
+            "single_cell_h5ad": single_cell_h5ad,
+            "single_cell_entity": single_cell_entity,
+            "single_cell_kit": single_cell_kit,
+            "seqspec_template": seqspec_template,
+            "seqspec_variables": seqspec_variables,
+            "seqspec_md5": seqspec_md5,
         }
         # Add optional parameters if provided
         if modifications:
@@ -1053,6 +1067,14 @@ TOOL_REGISTRY = {
                     "description": "Reference genome(s) — single string or list for parallel multi-genome (e.g., ['GRCh38', 'mm39'])"
                 },
                 "input_type": {"type": "string", "enum": ["pod5", "bam", "fastq"], "description": "Type of input files (default: pod5)"},
+                "entry_point": {"type": "string", "description": "Dogme entry point; single-cell cDNA supports main or kallisto with pod5 input"},
+                "single_cell": {"type": "boolean", "default": False, "description": "Opt into long-read single-cell cDNA processing. Requires CDNA, pod5 input, and main or kallisto; FASTQ fastqCDNA remains bulk-only."},
+                "single_cell_h5ad": {"type": "boolean", "default": True, "description": "Generate transcript counts, H5AD outputs, and H5AD QC for single-cell runs"},
+                "single_cell_entity": {"type": "string", "enum": ["cell", "nucleus"], "default": "cell", "description": "Metadata label only; Dogme does not infer cell versus nucleus"},
+                "single_cell_kit": {"type": "string", "enum": ["parse-wt-v2", "parse-wt-mega-v2"], "description": "Optional Parse kit override; the built-in template defaults to Parse WT Mega v2"},
+                "seqspec_template": {"type": "string", "description": "Optional custom seqspec template path"},
+                "seqspec_variables": {"type": "object", "description": "Optional JSON object overriding derived seqspec variables and kit defaults"},
+                "seqspec_md5": {"type": "boolean", "default": True, "description": "Include the FASTQ MD5 in generated seqspec metadata"},
                 "modifications": {"type": "string", "description": "Modification motifs to call (optional)"},
                 "max_gpu_tasks": {"type": "integer", "description": "Max concurrent GPU tasks (dorado/openChromatin) per pipeline run. Omit for no explicit maximum; max allowed is 16."},
                 "execution_mode": {"type": "string", "enum": ["local", "slurm"], "description": "Execution backend to use (default: local)"},

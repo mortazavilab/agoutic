@@ -64,6 +64,19 @@ The Dogme cDNA pipeline performs:
 
 **⚠️ cDNA does NOT have modification calling** — unlike direct RNA and DNA modes, cDNA sequencing does not preserve base modifications (the reverse transcription step erases them).
 
+## Single-Cell and Single-Nucleus cDNA
+
+Bulk remains the default for cDNA. DOGME's single-cell path is an opt-in long-read cDNA workflow; single-cell and single-nucleus runs use the same processing, while `singleCellEntity` records the requested metadata and is not inferred by DOGME.
+
+- Requests for single-cell cDNA use entity `cell`; requests for single-nucleus cDNA use entity `nucleus`.
+- Current Agoutic routing supports this path through pod5 `main` or `kallisto` runs. FASTQ `fastqCDNA` and Dorado-demultiplexed samples still use bulk quantification.
+- DOGME splits cDNA, UMI, and barcode reads, corrects barcodes with bustools, and counts molecules per corrected barcode. This is barcode correction, not cell calling; counts are not cell-filtered, normalized, or clustered.
+- H5AD output defaults on. Turning it off skips transcript-level counting, H5AD generation, and H5AD QC, while splitcode processing and gene-level bustools counts continue.
+
+Single-cell results are under `kallisto/<genome>/single-cell/<sample>_<genome>/`. Look for `count.*` gene matrices, BUS/bustools intermediates, `${sample}_${genome}.single_cell_qc.tsv`, and, when enabled, `${sample}_${genome}.gene.h5ad` and `${sample}_${genome}.transcript.h5ad`. Split FASTQs, splitcode QC/logs, and the generated seqspec are under `fastqs/`. DOGME's container must provide `seqspec` and `splitcode`; H5AD conversion additionally needs `anndata`, `h5py`, `numpy`, `pandas`, and `scipy` from `requirements-h5ad.txt`.
+
+The H5AD matrices contain sparse raw integer counts with cells as observations. `obs_names` contains the full corrected barcode; `obs["barcode_1"]` contains its first 8-base segment. Observation metadata includes `total_counts` and `n_features`; variable metadata includes `total_counts` and `n_cells`. Transcript H5ADs may include `var["gene_id"]`. `uns["dogme"]` records sample, genome, read type, entity, feature/count type, matrix orientation, and source filenames. DOGME's QC TSV reports gene/transcript matrix dimensions and the number of barcodes strictly above gene-level UMI thresholds 100, 200, 300, 400, 500, 1,000, 2,000, 3,000, 4,000, 10,000, and 20,000; it does not make a cell-calling decision.
+
 ## Key Output Files to Examine
 
 ### Alignment Statistics
@@ -74,6 +87,9 @@ The Dogme cDNA pipeline performs:
 ### Transcript/Gene Counts (primary output for cDNA)
 - `*.counts.csv` or `*.gene_counts.csv` — gene-level expression counts
 - `*.transcript_counts.csv` — transcript-level isoform quantification
+- `kallisto/*/single-cell/*/count.*` — single-cell gene-level bustools matrices
+- `kallisto/*/single-cell/*/*.gene.h5ad` and `*.transcript.h5ad` — optional single-cell matrices
+- `kallisto/*/single-cell/*/*.single_cell_qc.tsv` — matrix dimensions and strict gene-level UMI threshold counts
 - `*.junctions.bed` — splice junction support
 - `*.isoform_classification.csv` — isoform categorization (known, novel, fusion)
 

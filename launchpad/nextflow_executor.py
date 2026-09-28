@@ -292,6 +292,28 @@ def _quote_nextflow_single_quoted(value: str) -> str:
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
+def _render_groovy_value(value: object) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return _quote_nextflow_single_quoted(value)
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_render_groovy_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        if not value:
+            return "[:]"
+        entries = (
+            f"{_quote_nextflow_single_quoted(str(key))}: {_render_groovy_value(item)}"
+            for key, item in value.items()
+        )
+        return "[" + ", ".join(entries) + "]"
+    raise ValueError(f"Unsupported value for DOGME Nextflow config: {type(value).__name__}")
+
+
 def _render_before_script(commands: list[str]) -> str:
     normalized: list[str] = []
     for command in commands:
@@ -528,6 +550,13 @@ class NextflowConfig:
         slurm_modkit_bind_paths: Optional[list[str]] = None,
         modkit_task_runtime_exports: Optional[list[str]] = None,
         apptainer_cache_dir: Optional[str] = None,
+        single_cell: bool = False,
+        single_cell_h5ad: bool = True,
+        single_cell_entity: str = "cell",
+        single_cell_kit: str | None = None,
+        seqspec_template: str | None = None,
+        seqspec_variables: dict | None = None,
+        seqspec_md5: bool = True,
     ) -> str:
         """
         Generate a Nextflow configuration string for Dogme pipeline.
@@ -642,6 +671,13 @@ class NextflowConfig:
         config_lines.append(f"    sample = '{sample_name}'")
         config_lines.append(f"    //readType can either be 'RNA', 'DNA' or 'CDNA'")
         config_lines.append(f"    readType = '{mode}'")
+        config_lines.append(f"    singleCell = {_render_groovy_value(single_cell)}")
+        config_lines.append(f"    singleCellH5ad = {_render_groovy_value(single_cell_h5ad)}")
+        config_lines.append(f"    singleCellEntity = {_render_groovy_value(single_cell_entity)}")
+        config_lines.append(f"    singleCellKit = {_render_groovy_value(single_cell_kit)}")
+        config_lines.append(f"    seqspecTemplate = {_render_groovy_value(seqspec_template)}")
+        config_lines.append(f"    seqspecVariables = {_render_groovy_value(seqspec_variables)}")
+        config_lines.append(f"    seqspecMd5 = {_render_groovy_value(seqspec_md5)}")
         config_lines.append(f"    // change this value if 0.9 is too strict")
         config_lines.append(f"    // if set to null or '' then modkit will determine its threshold by sampling reads.")
         config_lines.append(f"    modkitFilterThreshold = {modkit_filter_threshold}")
@@ -1147,6 +1183,13 @@ class NextflowExecutor:
         workflow_version: Optional[str] = None,
         dogme_revision: Optional[str] = None,
         output_flags: Optional[dict[str, bool]] = None,
+        single_cell: bool = False,
+        single_cell_h5ad: bool = True,
+        single_cell_entity: str = "cell",
+        single_cell_kit: str | None = None,
+        seqspec_template: str | None = None,
+        seqspec_variables: dict | None = None,
+        seqspec_md5: bool = True,
     ) -> tuple[str, Path]:
         """
         Submit a Dogme/Nextflow job.
@@ -1376,6 +1419,13 @@ class NextflowExecutor:
             local_max_task_cpus=local_max_task_cpus,
             local_max_task_memory_gb=local_max_task_memory_gb,
             modkit_task_runtime_exports=modkit_task_runtime_exports,
+            single_cell=single_cell,
+            single_cell_h5ad=single_cell_h5ad,
+            single_cell_entity=single_cell_entity,
+            single_cell_kit=single_cell_kit,
+            seqspec_template=seqspec_template,
+            seqspec_variables=seqspec_variables,
+            seqspec_md5=seqspec_md5,
         )
         
         config_path = work_dir / "nextflow.config"

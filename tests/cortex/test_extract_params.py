@@ -382,6 +382,38 @@ class TestInputType:
         }
 
     @pytest.mark.asyncio
+    async def test_cdna_defaults_to_bulk_without_explicit_single_cell_intent(self):
+        _add_block(self.sf, "USER_MESSAGE", {"text": "Run Dogme cDNA on sample pod5"})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["mode"] == "CDNA"
+        assert result["single_cell"] is False
+        assert result["single_cell_entity"] == "cell"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "request_text, entity, h5ad",
+        [
+            ("Run single-cell cDNA on this pod5 sample", "cell", True),
+            ("Run single nucleus cDNA on this pod5 sample without H5AD", "nucleus", False),
+        ],
+    )
+    async def test_explicit_single_cell_cdna_intent_sets_assay_metadata(self, request_text, entity, h5ad):
+        _add_block(self.sf, "USER_MESSAGE", {"text": request_text})
+        sess = self.sf()
+        with patch("cortex.job_parameters.AGOUTIC_DATA", self.tmp):
+            result = await extract_job_parameters_from_conversation(sess, "proj-1")
+        sess.close()
+
+        assert result["mode"] == "CDNA"
+        assert result["single_cell"] is True
+        assert result["single_cell_entity"] == entity
+        assert result["single_cell_h5ad"] is h5ad
+
+    @pytest.mark.asyncio
     async def test_fastq_without_mode_prefills_cdna_clarification(self):
         _add_block(self.sf, "USER_MESSAGE", {"text": "Please analyze reads.fastq.gz"})
         sess = self.sf()

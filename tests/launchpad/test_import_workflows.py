@@ -91,6 +91,13 @@ def test_copy_local_results_to_workflow_copies_subset_and_root_config(tmp_path):
     destination_dir = tmp_path / "project" / "workflow3"
     (source_dir / "annot").mkdir(parents=True)
     (source_dir / "annot" / "genes.tsv").write_text("ok\n", encoding="utf-8")
+    (source_dir / "fastqs" / "single-cell").mkdir(parents=True)
+    (source_dir / "fastqs" / "sample.seqspec.yaml").write_text("name: sample\n", encoding="utf-8")
+    (source_dir / "fastqs" / "single-cell" / "sample_splitcode_qc.tsv").write_text("reads\tcount\n", encoding="utf-8")
+    (source_dir / "fastqs" / "bulk_input.fastq.gz").write_bytes(b"bulk fastq")
+    (source_dir / "kallisto" / "mm39" / "single-cell" / "sample_mm39").mkdir(parents=True)
+    (source_dir / "kallisto" / "mm39" / "single-cell" / "sample_mm39" / "sample_mm39.gene.h5ad").write_bytes(b"h5ad")
+    (source_dir / "kallisto" / "mm39" / "single-cell" / "sample_mm39" / "output.bus").write_bytes(b"bus")
     (source_dir / "work").mkdir()
     (source_dir / "work" / "ignored.txt").write_text("ignore\n", encoding="utf-8")
     (source_dir / "nextflow.config").write_text("params { sample = 'x' }\n", encoding="utf-8")
@@ -98,9 +105,14 @@ def test_copy_local_results_to_workflow_copies_subset_and_root_config(tmp_path):
 
     artifacts = copy_local_results_to_workflow(source_dir, destination_dir, full_copy=False)
 
-    assert artifacts["directories"] == ["annot"]
-    assert sorted(artifacts["files"]) == ["nextflow.config", "report.html"]
+    assert artifacts["directories"] == ["annot", "fastqs/single-cell", "kallisto"]
+    assert sorted(artifacts["files"]) == ["fastqs/sample.seqspec.yaml", "nextflow.config", "report.html"]
     assert (destination_dir / "annot" / "genes.tsv").exists()
+    assert (destination_dir / "fastqs" / "sample.seqspec.yaml").exists()
+    assert (destination_dir / "fastqs" / "single-cell" / "sample_splitcode_qc.tsv").exists()
+    assert not (destination_dir / "fastqs" / "bulk_input.fastq.gz").exists()
+    assert (destination_dir / "kallisto" / "mm39" / "single-cell" / "sample_mm39" / "sample_mm39.gene.h5ad").exists()
+    assert (destination_dir / "kallisto" / "mm39" / "single-cell" / "sample_mm39" / "output.bus").exists()
     assert (destination_dir / "nextflow.config").exists()
     assert (destination_dir / "report.html").exists()
     assert not (destination_dir / "work").exists()

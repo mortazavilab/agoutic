@@ -876,6 +876,9 @@ def test_result_sync_include_patterns_cover_required_folders_and_file_types():
     assert "annot/***" in patterns
     assert "bams/***" in patterns
     assert "bedMethyl/***" in patterns
+    assert "fastqs/single-cell/***" in patterns
+    assert "fastqs/*.seqspec.yaml" in patterns
+    assert "fastqs/***" not in patterns
     assert "kallisto/***" in patterns
     assert "openChromatin/***" in patterns
     assert "stats/***" in patterns
@@ -884,6 +887,46 @@ def test_result_sync_include_patterns_cover_required_folders_and_file_types():
     assert "*.txt" in patterns
     assert "*.csv" in patterns
     assert "*.tsv" in patterns
+
+
+@pytest.mark.asyncio
+async def test_remote_result_discovery_includes_seqspec_relative_path(monkeypatch):
+    backend = SlurmBackend()
+    remote_root = "/remote/workflow1"
+    conn = SimpleNamespace(
+        path_exists=AsyncMock(side_effect=lambda path: path.endswith("fastqs/single-cell")),
+        run=AsyncMock(side_effect=[
+            SimpleNamespace(stdout="report.html\n"),
+            SimpleNamespace(stdout=f"{remote_root}/fastqs/sample.seqspec.yaml\n"),
+        ]),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(backend._ssh_manager, "connect", AsyncMock(return_value=conn))
+    profile = SSHProfileData(
+        id="profile-1",
+        user_id="user-1",
+        nickname="hpc3",
+        ssh_host="example.org",
+        ssh_port=22,
+        ssh_username="alice",
+        auth_method="ssh_agent",
+        key_file_path=None,
+        local_username=None,
+        is_enabled=True,
+        remote_base_path="/remote/agoutic",
+    )
+
+    artifacts = await backend._discover_remote_result_artifacts(
+        profile=profile,
+        remote_output_dir=remote_root,
+    )
+
+    assert artifacts == {
+        "directories": ["fastqs/single-cell"],
+        "files": ["report.html", "fastqs/sample.seqspec.yaml"],
+    }
+    assert conn.run.await_count == 2
+    conn.close.assert_awaited_once()
 
 
 def test_result_sync_include_patterns_cover_wf_pore_c_tree(monkeypatch):

@@ -1,7 +1,7 @@
 """
 Pydantic schemas for Launchpad API.
 """
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 from typing import Optional, Any, List, Literal, Union
 from datetime import datetime
 
@@ -30,6 +30,13 @@ class SubmitJobRequest(BaseModel):
     reference_genome: Union[str, List[str]] = "mm39"  # Single or multiple genomes
     modifications: Optional[str] = None
     entry_point: Optional[str] = None  # Dogme entry point (e.g., "remap", "basecall")
+    single_cell: StrictBool = False
+    single_cell_h5ad: StrictBool = True
+    single_cell_entity: Literal["cell", "nucleus"] = "cell"
+    single_cell_kit: Optional[Literal["parse-wt-v2", "parse-wt-mega-v2"]] = None
+    seqspec_template: Optional[str] = None
+    seqspec_variables: Optional[dict[str, Any]] = None
+    seqspec_md5: StrictBool = True
     parent_block_id: Optional[str] = None
     
     # Resume support
@@ -124,6 +131,20 @@ class SubmitJobRequest(BaseModel):
     def apply_dogme_accuracy_default(self):
         if self.workflow_key == "dogme":
             self.accuracy = resolve_dogme_accuracy(self.mode, self.accuracy)
+        return self
+
+    @model_validator(mode="after")
+    def validate_single_cell(self):
+        if not self.single_cell:
+            return self
+
+        if self.workflow_key != "dogme" or str(self.mode or "").strip().upper() != "CDNA":
+            raise ValueError("single_cell is supported only for DOGME CDNA runs")
+        if self.input_type != "pod5":
+            raise ValueError("single_cell currently requires pod5 input; FASTQ fastqCDNA remains bulk-only")
+        entry_point = str(self.entry_point or "").strip().lower()
+        if entry_point not in {"", "main", "kallisto"}:
+            raise ValueError("single_cell is supported only through DOGME main or kallisto entry points")
         return self
 
     @field_validator("custom_dogme_bind_paths", mode="before")

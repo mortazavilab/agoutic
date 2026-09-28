@@ -1,3 +1,13 @@
+## [3.7.7] - 2026-09-28
+
+### Features
+
+- **Added opt-in DOGME single-cell and single-nucleus cDNA processing:** cDNA remains bulk by default. Explicit single-cell requests use the `cell` entity and explicit single-nucleus requests use `nucleus`; supported runs use pod5 with DOGME `main` or `kallisto`. FASTQ `fastqCDNA` and Dorado-demultiplexed quantification remain bulk-only. Approval controls support optional H5AD output and seqspec overrides, and local/SLURM result sync retains split FASTQs, seqspec, count matrices, QC, and H5AD files without copying unrelated bulk FASTQs.
+
+### Tests
+
+- **Added DOGME single-cell coverage** for intent extraction, request validation, approval-to-MCP forwarding, safe Nextflow config serialization, and selective local/SLURM result synchronization.
+
 ## [3.7.6] - 2026-08-11
 
 ### Features

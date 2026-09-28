@@ -1778,17 +1778,24 @@ class TestSubmitJobAfterApproval:
         assert submitted["max_gpu_tasks"] is None
 
     @pytest.mark.asyncio
-    async def test_local_submission_forwards_local_max_task_cpus(self, session_factory, seed_data):
+    async def test_local_submission_forwards_local_resources_and_single_cell_parameters(self, session_factory, seed_data):
         gate = _create_gate(session_factory, "proj-bg", "u-bg", {
             "edited_params": {
                 "sample_name": "local-test",
-                "mode": "DNA",
+                "mode": "CDNA",
                 "input_type": "pod5",
                 "input_directory": "/data/local-sample",
                 "reference_genome": ["mm39"],
                 "execution_mode": "local",
                 "local_max_task_cpus": 8,
                 "local_max_task_memory_gb": 48,
+                "single_cell": True,
+                "single_cell_h5ad": False,
+                "single_cell_entity": "nucleus",
+                "single_cell_kit": "parse-wt-v2",
+                "seqspec_template": "/refs/custom.yaml",
+                "seqspec_variables": {"assay": "custom"},
+                "seqspec_md5": False,
             },
         })
 
@@ -1810,6 +1817,13 @@ class TestSubmitJobAfterApproval:
         assert submitted["local_max_task_cpus"] == 8
         assert submitted["local_max_task_memory_gb"] == 48
         assert submitted["slurm_cpus"] is None
+        assert submitted["single_cell"] is True
+        assert submitted["single_cell_h5ad"] is False
+        assert submitted["single_cell_entity"] == "nucleus"
+        assert submitted["single_cell_kit"] == "parse-wt-v2"
+        assert submitted["seqspec_template"] == "/refs/custom.yaml"
+        assert submitted["seqspec_variables"] == {"assay": "custom"}
+        assert submitted["seqspec_md5"] is False
 
     @pytest.mark.asyncio
     async def test_remote_submission_keeps_cpu_and_gpu_accounts_separate(self, session_factory, seed_data):

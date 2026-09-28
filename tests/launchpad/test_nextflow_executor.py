@@ -148,6 +148,55 @@ class TestGenerateConfig:
         assert f"genome: '{REFERENCE_GENOMES['GRCh38']['fasta']}'" in config
         assert f"annot: '{REFERENCE_GENOMES['GRCh38']['gtf']}'" in config
 
+    def test_cdna_config_defaults_to_bulk_single_cell_parameters(self):
+        config = NextflowConfig.generate_config(
+            sample_name="bulk-cdna",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+        )
+
+        assert "singleCell = false" in config
+        assert "singleCellH5ad = true" in config
+        assert "singleCellEntity = 'cell'" in config
+        assert "singleCellKit = null" in config
+        assert "seqspecTemplate = null" in config
+        assert "seqspecVariables = null" in config
+        assert "seqspecMd5 = true" in config
+
+    def test_single_cell_config_renders_overrides_as_groovy_values(self):
+        config = NextflowConfig.generate_config(
+            sample_name="single-nucleus-cdna",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            single_cell=True,
+            single_cell_h5ad=False,
+            single_cell_entity="nucleus",
+            single_cell_kit="parse-wt-v2",
+            seqspec_template="/refs/custom's-template.yaml",
+            seqspec_variables={"kit": "custom ${value}", "segments": [8, 8, 8], "enabled": True},
+            seqspec_md5=False,
+        )
+
+        assert "singleCell = true" in config
+        assert "singleCellH5ad = false" in config
+        assert "singleCellEntity = 'nucleus'" in config
+        assert "singleCellKit = 'parse-wt-v2'" in config
+        assert "seqspecTemplate = '/refs/custom\\'s-template.yaml'" in config
+        assert "seqspecVariables = ['kit': 'custom ${value}', 'segments': [8, 8, 8], 'enabled': true]" in config
+        assert "seqspecMd5 = false" in config
+
+        empty_variables_config = NextflowConfig.generate_config(
+            sample_name="single-cell-empty-overrides",
+            mode="CDNA",
+            input_dir="/tmp/input",
+            reference_genome=["mm39"],
+            single_cell=True,
+            seqspec_variables={},
+        )
+        assert "seqspecVariables = [:]" in empty_variables_config
+
     def test_multi_genome_config_renders_all_requested_genomes(self):
         config = NextflowConfig.generate_config(
             sample_name="sample-b",

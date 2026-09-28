@@ -17,7 +17,7 @@ from launchpad.config import REFERENCE_GENOMES
 logger = get_logger(__name__)
 
 
-_DOGME_RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "kallisto", "openChromatin", "stats")
+_DOGME_RESULT_SYNC_DIRS = ("annot", "bams", "bedMethyl", "fastqs/single-cell", "kallisto", "openChromatin", "stats")
 _WF_PORE_C_RESULT_SYNC_DIRS = (
     "pairs",
     "cooler",
@@ -29,6 +29,7 @@ _WF_PORE_C_RESULT_SYNC_DIRS = (
     "filtered_out",
 )
 _DOGME_RESULT_SYNC_FILE_PATTERNS = ("*.config", "*.html", "*.txt", "*.csv", "*.tsv")
+_DOGME_RESULT_SYNC_NESTED_FILE_PATTERNS = ("fastqs/*.seqspec.yaml",)
 _WF_PORE_C_RESULT_SYNC_FILE_PATTERNS = ("wf-pore-c-report.html", ".agoutic.workflow.json", "*.html", "*.txt", "*.csv", "*.tsv")
 RESULT_SYNC_DIRS = _DOGME_RESULT_SYNC_DIRS
 RESULT_SYNC_FILE_PATTERNS = _DOGME_RESULT_SYNC_FILE_PATTERNS
@@ -206,6 +207,14 @@ def discover_local_result_artifacts(source_dir: Path, *, full_copy: bool, workfl
         for child in sorted(source_dir.iterdir(), key=lambda item: item.name.lower())
         if (child.is_file() or child.is_symlink()) and _matches_result_file_pattern(child.name, workflow_key=effective_workflow_key)
     ]
+    if _normalize_workflow_key(effective_workflow_key) != "wf_pore_c":
+        seqspec_dir = source_dir / "fastqs"
+        files.extend(
+            str(path.relative_to(source_dir))
+            for path in sorted(seqspec_dir.glob("*.seqspec.yaml"), key=lambda item: item.name.lower())
+            if path.is_file() or path.is_symlink()
+        )
+    files.sort(key=str.lower)
     return {"directories": directories, "files": files}
 
 
@@ -399,6 +408,13 @@ def result_sync_file_patterns_for_workflow(workflow_key: str | None) -> tuple[st
     if normalized == "wf_pore_c" and bool(launchpad_config.WF_PORE_C_ENABLED):
         return tuple(dict.fromkeys(_WF_PORE_C_RESULT_SYNC_FILE_PATTERNS))
     return _DOGME_RESULT_SYNC_FILE_PATTERNS
+
+
+def result_sync_nested_file_patterns_for_workflow(workflow_key: str | None) -> tuple[str, ...]:
+    normalized = _normalize_workflow_key(workflow_key)
+    if normalized == "wf_pore_c" and bool(launchpad_config.WF_PORE_C_ENABLED):
+        return ()
+    return _DOGME_RESULT_SYNC_NESTED_FILE_PATTERNS
 
 
 def _matches_result_file_pattern(filename: str, *, workflow_key: str | None) -> bool:

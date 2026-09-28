@@ -1,6 +1,6 @@
 # AGOUTIC: Automated Genomic Orchestrator
 
-**Release:** 3.7.6
+**Release:** 3.7.7
 **Status:** Active Prototype 
 
 ## 🧬 Overview
@@ -77,6 +77,10 @@ Remote execution features:
 - **Staged approval prompts** — Cortex collects details progressively, presents summary before submission
 - **Run and staging status tracking** — dedicated staging tasks plus remote execution stage labels through `completed`, including byte-level transfer progress, current-file details, and faster live refresh while transfers are active
 - **Scheduler integration** — SLURM job ID tracking, state polling via sacct/squeue, cancellation via scancel
+
+## DOGME Single-Cell cDNA
+
+cDNA runs remain bulk unless single-cell or single-nucleus processing is explicitly requested. Single-cell cDNA currently uses pod5 input through DOGME `main` or `kallisto`; FASTQ `fastqCDNA` and Dorado-demultiplexed quantification remain bulk-only. Single-nucleus requests set the entity metadata to `nucleus`; this label does not change DOGME's processing. Single-cell outputs include split FASTQs and seqspec under `fastqs/`, plus count matrices, QC, and optional H5AD files under `kallisto/`.
 
 ### wf-pore-c Status
 
@@ -1040,7 +1044,7 @@ pytest tests/ --cov=cortex --cov=launchpad --cov-report=html
 
 ## 📦 Version Information
 
-- **Release**: 3.7.6 — adds optional separate rsync transfer hosts for remote SLURM profiles, with automatic fallback to the SLURM host when no transfer host is configured
+- **Release**: 3.7.7 — adds opt-in DOGME single-cell cDNA processing with single-nucleus metadata and synchronized outputs
 - **Python**: 3.12+
 - **FastAPI**: Latest (from environment.yml)
 - **SQLAlchemy**: 2.0+

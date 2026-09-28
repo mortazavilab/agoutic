@@ -921,6 +921,13 @@ async def submit_job_after_approval(project_id: str, gate_block_id: str):
             "modifications": job_params.get("modifications"),
             "input_type": job_params.get("input_type", "pod5"),
             "entry_point": job_params.get("entry_point"),
+            "single_cell": job_params.get("single_cell", False),
+            "single_cell_h5ad": job_params.get("single_cell_h5ad", True),
+            "single_cell_entity": job_params.get("single_cell_entity", "cell"),
+            "single_cell_kit": job_params.get("single_cell_kit"),
+            "seqspec_template": job_params.get("seqspec_template"),
+            "seqspec_variables": job_params.get("seqspec_variables"),
+            "seqspec_md5": job_params.get("seqspec_md5", True),
             # Advanced parameters - use Launchpad defaults if None
             "modkit_filter_threshold": job_params.get("modkit_filter_threshold") or 0.9,
             "min_cov": job_params.get("min_cov"),  # Let Launchpad handle None (mode-dependent default)

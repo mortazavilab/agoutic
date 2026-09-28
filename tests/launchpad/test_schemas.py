@@ -27,6 +27,59 @@ class TestSubmitJobRequest:
         assert req.workflow_key == "dogme"
         assert req.mode == "DNA"
         assert req.input_type == "pod5"  # default
+        assert req.single_cell is False
+        assert req.single_cell_h5ad is True
+        assert req.single_cell_entity == "cell"
+        assert req.single_cell_kit is None
+        assert req.seqspec_md5 is True
+
+    def test_single_cell_cdna_pod5_is_valid(self):
+        req = SubmitJobRequest(
+            project_id="proj-1",
+            sample_name="nucleus-cdna",
+            mode="CDNA",
+            input_directory="/data/pod5",
+            single_cell=True,
+            single_cell_entity="nucleus",
+            single_cell_kit="parse-wt-v2",
+            seqspec_variables={"kit": "custom"},
+        )
+
+        assert req.single_cell is True
+        assert req.single_cell_entity == "nucleus"
+        assert req.single_cell_kit == "parse-wt-v2"
+        assert req.seqspec_variables == {"kit": "custom"}
+
+    @pytest.mark.parametrize(
+        "overrides, message",
+        [
+            ({"mode": "RNA"}, "only for DOGME CDNA"),
+            ({"input_type": "fastq", "entry_point": "fastqCDNA"}, "fastqCDNA remains bulk-only"),
+            ({"entry_point": "annotateRNA"}, "main or kallisto"),
+        ],
+    )
+    def test_single_cell_rejects_unsupported_contracts(self, overrides, message):
+        with pytest.raises(ValidationError, match=message):
+            request_data = {
+                "project_id": "proj-1",
+                "sample_name": "invalid-single-cell",
+                "mode": "CDNA",
+                "input_directory": "/data/input",
+                "single_cell": True,
+            }
+            request_data.update(overrides)
+            SubmitJobRequest(**request_data)
+
+    @pytest.mark.parametrize("value", [1, "true", None])
+    def test_single_cell_switch_requires_boolean(self, value):
+        with pytest.raises(ValidationError):
+            SubmitJobRequest(
+                project_id="proj-1",
+                sample_name="invalid-single-cell",
+                mode="CDNA",
+                input_directory="/data/input",
+                single_cell=value,
+            )
 
     def test_normalizes_workflow_key(self):
         req = SubmitJobRequest(

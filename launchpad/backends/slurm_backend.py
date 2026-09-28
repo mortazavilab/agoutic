@@ -29,6 +29,7 @@ from launchpad.import_workflows import (
     RESULT_SYNC_FILE_PATTERNS,
     result_sync_dirs_for_workflow,
     result_sync_file_patterns_for_workflow,
+    result_sync_nested_file_patterns_for_workflow,
 )
 from launchpad.nextflow_executor import resolve_slurm_cpu_memory_gb
 from launchpad.workflow_accounting import collect_nextflow_trace_native_ids, normalize_slurm_job_id, summarize_slurm_workflow_usage
@@ -1191,7 +1192,8 @@ class SlurmBackend:
     def _build_result_sync_include_patterns(cls, workflow_key: str | None = None) -> list[str]:
         sync_dirs = result_sync_dirs_for_workflow(workflow_key)
         sync_file_patterns = result_sync_file_patterns_for_workflow(workflow_key)
-        return [*(f"{name}/***" for name in sync_dirs), *sync_file_patterns]
+        nested_file_patterns = result_sync_nested_file_patterns_for_workflow(workflow_key)
+        return [*(f"{name}/***" for name in sync_dirs), *sync_file_patterns, *nested_file_patterns]
 
     @staticmethod
     def _needs_local_result_copy(job) -> bool:
@@ -1442,7 +1444,10 @@ class SlurmBackend:
                     profile=profile,
                     remote_path=artifact_root,
                     local_path=local_work_dir,
-                    include_patterns=list(result_sync_file_patterns_for_workflow(workflow_key)),
+                    include_patterns=[
+                        *result_sync_file_patterns_for_workflow(workflow_key),
+                        *result_sync_nested_file_patterns_for_workflow(workflow_key),
+                    ],
                     exclude_patterns=["*"],
                     on_progress=_on_rsync_progress,
                 )
@@ -1664,6 +1669,18 @@ class SlurmBackend:
             )
             result = await conn.run(f"{file_cmd} 2>/dev/null || true")
             existing_files = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+            if "fastqs/single-cell" in result_sync_dirs_for_workflow(workflow_key):
+                seqspec_dir = str(PurePosixPath(remote_output_dir) / "fastqs")
+                seqspec_cmd = (
+                    f"find {shlex.quote(seqspec_dir)} -maxdepth 1 -type f "
+                    "-name '*.seqspec.yaml' -print 2>/dev/null || true"
+                )
+                seqspec_result = await conn.run(seqspec_cmd)
+                existing_files.extend(
+                    str(PurePosixPath(path.strip()).relative_to(PurePosixPath(remote_output_dir)))
+                    for path in (seqspec_result.stdout or "").splitlines()
+                    if path.strip()
+                )
             return {"directories": existing_dirs, "files": existing_files}
         finally:
             await conn.close()
