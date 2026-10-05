@@ -3,11 +3,13 @@
 ### Features
 
 - **Added PubMed and PubMed Central literature search:** Chat can search scientific topics, return up to ten relevance-ranked papers by default, and provide PubMed/PMC links with summaries labeled by their abstract or open-full-text evidence source. Users can optionally configure an NCBI contact email and API key in Literature Settings; saved keys are encrypted at rest, and searches without a key use NCBI public rate limits.
+- **Improved biomedical query recall:** Natural-language request boilerplate is removed from PubMed queries, species and tissue variants are expanded, comparison intent is retained, and a larger candidate set is ranked against the topic before the top results are returned.
 
 ### Bug Fixes
 
 - **Rendered literature search results as cited summaries:** Literature results now show paper titles, identifiers, source links, and evidence-attributed summaries instead of abbreviated JSON or a nonexistent interactive-table claim. Internal user IDs are excluded from displayed literature provenance.
 - **Recognized the literature search tool during chat validation:** `search_literature` DATA_CALL tags no longer produce a false unknown-tool warning.
+- **Kept literature identifiers attached to the correct paper:** DOI and PMC identifiers are read from the article's own citation record, not from identifiers belonging to its cited references.
 
 ### Tests
 

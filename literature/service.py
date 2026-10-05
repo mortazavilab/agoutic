@@ -7,7 +7,6 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -25,6 +24,39 @@ from literature.config import (
 
 _WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{1,}")
 _QUALITY_TERMS = frozenset({"randomized", "systematic review", "meta-analysis", "cohort"})
+_INTENT_WORDS = frozenset({
+    "find", "get", "give", "look", "me", "paper", "papers", "publication",
+    "publications", "study", "studies", "article", "articles", "literature",
+    "pubmed", "about", "on", "for", "the", "a", "an", "and", "or", "of",
+    "in", "to", "with", "between", "regarding",
+})
+_COMPARISON_CUES = frozenset({
+    "compare", "compared", "comparison", "comparisons", "comparative",
+    "similar", "similarity", "similarities", "difference", "differences",
+    "differ", "different", "divergent", "shared",
+})
+_COMPARISON_SEARCH_TERMS = (
+    "comparative", "comparison", "comparisons", "similar", "similarity",
+    "similarities", "difference", "differences", "differ", "different",
+    "divergent", "shared",
+)
+_PUBMED_GROUPS: dict[str, tuple[str, ...]] = {
+    "human": (
+        "humans[MeSH Terms]", "human[Title/Abstract]", "humans[Title/Abstract]",
+        '"Homo sapiens"[Title/Abstract]',
+    ),
+    "mouse": (
+        "mice[MeSH Terms]", "mouse[Title/Abstract]", "mice[Title/Abstract]",
+        "murine[Title/Abstract]",
+    ),
+    "kidney": (
+        "kidney[MeSH Terms]", "kidney[Title/Abstract]", "kidneys[Title/Abstract]",
+        "renal[Title/Abstract]",
+    ),
+    "p53": (
+        "TP53[MeSH Terms]", "TP53[Title/Abstract]", "p53[Title/Abstract]",
+    ),
+}
 
 
 class LiteratureServiceError(RuntimeError):
@@ -35,6 +67,51 @@ class LiteratureServiceError(RuntimeError):
 class NCBICredentials:
     email: str | None = None
     api_key: str | None = None
+
+
+@dataclass(frozen=True)
+class QueryProfile:
+    terms: tuple[str, ...]
+    comparative: bool
+
+
+def _query_profile(query: str) -> QueryProfile:
+    """Remove conversational/search boilerplate while retaining topic concepts."""
+    tokens = [token.lower() for token in _WORD_RE.findall(query)]
+    comparative = any(token in _COMPARISON_CUES for token in tokens)
+    terms: list[str] = []
+    for token in tokens:
+        if token in _INTENT_WORDS or token in _COMPARISON_CUES:
+            continue
+        if token in {"kidneys"}:
+            token = "kidney"
+        elif token in {"mice", "murine"}:
+            token = "mouse"
+        elif token in {"humans"}:
+            token = "human"
+        elif token == "tp53":
+            token = "p53"
+        if token not in terms:
+            terms.append(token)
+    return QueryProfile(terms=tuple(terms), comparative=comparative)
+
+
+def _build_pubmed_query(query: str) -> tuple[str, QueryProfile]:
+    """Build a fielded PubMed query that avoids treating prompt wording as science terms."""
+    profile = _query_profile(query)
+    if not profile.terms:
+        raise ValueError("Include at least one scientific topic term in the literature query.")
+
+    groups: list[str] = []
+    for term in profile.terms:
+        alternatives = _PUBMED_GROUPS.get(term, (f'"{term}"[Title/Abstract]',))
+        groups.append(f"({' OR '.join(alternatives)})")
+    if profile.comparative:
+        comparisons = " OR ".join(
+            f'"{term}"[Title/Abstract]' for term in _COMPARISON_SEARCH_TERMS
+        )
+        groups.append(f"({comparisons})")
+    return " AND ".join(groups), profile
 
 
 class RateLimiter:
@@ -70,32 +147,40 @@ class LiteratureService:
             raise ValueError(f"Literature queries must be at most {MAX_QUERY_LENGTH} characters.")
         if not 1 <= int(result_count) <= MAX_RESULT_COUNT:
             raise ValueError(f"result_count must be between 1 and {MAX_RESULT_COUNT}.")
+        pubmed_query, query_profile = _build_pubmed_query(cleaned_query)
 
         credentials = await self._load_credentials(user_id)
         async with self._get_client() as client:
-            ids = await self._search_ids(client, cleaned_query, int(result_count), credentials)
+            # Fetch a broader candidate set, then rank against the user's topic
+            # before spending additional requests on PMC full-text enrichment.
+            candidate_count = min(max(int(result_count) * 10, 100), 200)
+            ids = await self._search_ids(client, pubmed_query, candidate_count, credentials)
             if not ids:
                 return {
                     "query": cleaned_query,
+                    "search_query": pubmed_query,
                     "total": 0,
                     "papers": [],
                     "notice": "No PubMed records matched this query.",
                 }
             records = await self._fetch_records(client, ids, credentials)
+            records.sort(
+                key=lambda record: self._score(record, query_profile),
+                reverse=True,
+            )
             normalized = [
-                await self._normalize_record(client, record, cleaned_query, credentials)
-                for record in records
+                await self._normalize_record(client, record, query_profile, credentials)
+                for record in records[:int(result_count)]
             ]
-
-        ranked = sorted(
-            normalized,
-            key=lambda paper: (paper["relevance_score"], paper["publication_date"], paper["pmid"]),
-            reverse=True,
-        )
-        for rank, paper in enumerate(ranked, start=1):
+        for rank, paper in enumerate(normalized, start=1):
             paper["rank"] = rank
             paper.pop("relevance_score", None)
-        return {"query": cleaned_query, "total": len(ranked), "papers": ranked}
+        return {
+            "query": cleaned_query,
+            "search_query": pubmed_query,
+            "total": len(normalized),
+            "papers": normalized,
+        }
 
     async def _load_credentials(self, user_id: str | None) -> NCBICredentials:
         if not user_id or self._credentials_loader is None:
@@ -175,10 +260,14 @@ class LiteratureService:
         abstract = " ".join("".join(node.itertext()).strip() for node in article_node.findall(".//AbstractText"))
         pmcid = ""
         doi = ""
-        for article_id in article.findall(".//ArticleId"):
+        for elocation in article_node.findall("./ELocationID"):
+            if elocation.attrib.get("EIdType", "").lower() == "doi":
+                doi = (elocation.text or "").strip()
+                break
+        for article_id in article.findall("./PubmedData/ArticleIdList/ArticleId"):
             if article_id.attrib.get("IdType") == "pmc":
-                pmcid = (article_id.text or "").strip()
-            if article_id.attrib.get("IdType") == "doi":
+                pmcid = pmcid or (article_id.text or "").strip()
+            if article_id.attrib.get("IdType") == "doi" and not doi:
                 doi = (article_id.text or "").strip()
         authors = []
         for author in article_node.findall("./AuthorList/Author"):
@@ -207,7 +296,11 @@ class LiteratureService:
         }
 
     async def _normalize_record(
-        self, client: httpx.AsyncClient, record: dict[str, Any], query: str, credentials: NCBICredentials
+        self,
+        client: httpx.AsyncClient,
+        record: dict[str, Any],
+        query_profile: QueryProfile,
+        credentials: NCBICredentials,
     ) -> dict[str, Any]:
         full_text = ""
         if record["pmcid"]:
@@ -230,7 +323,7 @@ class LiteratureService:
             "summary": summary,
             "evidence_source": provenance,
             "rank_rationale": "Relevance to the query, with recency and study-design cues as secondary factors.",
-            "relevance_score": self._score(record, query),
+            "relevance_score": self._score(record, query_profile),
         }
 
     async def _fetch_pmc_text(
@@ -252,14 +345,28 @@ class LiteratureService:
         except (LiteratureServiceError, ET.ParseError):
             return ""
 
-    def _score(self, record: dict[str, Any], query: str) -> float:
-        terms = set(_WORD_RE.findall(query.lower()))
-        searchable = " ".join((record["title"], record["abstract"], " ".join(record["publication_types"]))).lower()
-        relevance = sum(searchable.count(term) for term in terms) * 100
-        quality = 10 * sum(term in searchable for term in _QUALITY_TERMS)
+    def _score(self, record: dict[str, Any], query_profile: QueryProfile) -> float:
+        title = str(record.get("title") or "").lower()
+        abstract = str(record.get("abstract") or "").lower()
+        searchable = " ".join((title, abstract, " ".join(record.get("publication_types") or [])))
+        relevance = 0
+        for term in query_profile.terms:
+            aliases = {
+                "human": ("human", "humans", "homo sapiens"),
+                "mouse": ("mouse", "mice", "murine"),
+                "kidney": ("kidney", "kidneys", "renal"),
+                "p53": ("p53", "tp53"),
+            }.get(term, (term,))
+            if any(alias in title for alias in aliases):
+                relevance += 120
+            elif any(alias in abstract for alias in aliases):
+                relevance += 50
+        if query_profile.comparative and any(cue in searchable for cue in _COMPARISON_CUES):
+            relevance += 80
+        quality = 5 * sum(term in searchable for term in _QUALITY_TERMS)
         try:
-            recency = max(0, int(record["publication_date"][:4]) - 1900) / 100
-        except ValueError:
+            recency = max(0, min(20, int(record["publication_date"][:4]) - 2000))
+        except (TypeError, ValueError):
             recency = 0
         return relevance + quality + recency
 
