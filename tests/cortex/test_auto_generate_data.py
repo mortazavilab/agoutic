@@ -45,6 +45,15 @@ def _history(messages: list[tuple[str, str]]) -> list[dict]:
 # DF reference / visualization early-exit
 # ---------------------------------------------------------------------------
 
+def test_literature_search_generates_authenticated_call():
+    calls = _auto_generate_data_calls("find papers about BRCA1 function", "literature_search")
+    assert calls == [{
+        "source_type": "service",
+        "source_key": "literature",
+        "tool": "search_literature",
+        "params": {"query": "find papers about BRCA1 function", "user_id": "<user_id>"},
+    }]
+
 class TestDFAndVisualizationEarlyExit:
     def test_df_reference_returns_empty(self):
         calls = _auto_generate_data_calls("Show me DF1 columns", "ENCODE_Search")

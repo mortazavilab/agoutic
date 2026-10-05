@@ -122,6 +122,16 @@ SERVICE_REGISTRY = {
         "skills": [],
         "fallback_patterns": {},
     },
+    "literature": {
+        "url": os.getenv("LITERATURE_MCP_URL", "http://localhost:8010"),
+        "display_name": "PubMed and PubMed Central",
+        "emoji": "\U0001f4da",
+        "table_columns": [],
+        "count_field": None,
+        "count_label": None,
+        "skills": [],
+        "fallback_patterns": {},
+    },
 }
 
 

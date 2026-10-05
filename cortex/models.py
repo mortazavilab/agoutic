@@ -329,6 +329,22 @@ class UserExecutionPreference(Base):
     )
 
 
+class UserNCBICredential(Base):
+    """Optional per-user contact email and encrypted NCBI API key."""
+    __tablename__ = "user_ncbi_credentials"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, unique=True, index=True, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
+    api_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class Memory(Base):
     """Persistent memory entries — user-global or project-scoped.
 

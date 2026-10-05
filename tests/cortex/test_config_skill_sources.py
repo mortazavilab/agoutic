@@ -13,6 +13,7 @@ def test_get_source_for_skill_uses_manifest_metadata_for_consortium_skills():
 def test_service_registry_skills_are_populated_from_manifests():
     assert "differential_expression" in SERVICE_REGISTRY["edgepython"]["skills"]
     assert "enrichment_analysis" in SERVICE_REGISTRY["edgepython"]["skills"]
+    assert "literature_search" in SERVICE_REGISTRY["literature"]["skills"]
 
 
 def test_consortium_registry_skills_are_populated_from_manifests():

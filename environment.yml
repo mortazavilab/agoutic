@@ -26,6 +26,8 @@ dependencies:
     - mcp                      # Model Context Protocol SDK
     - pydantic>=2.0            # Data validation
     - pyyaml                   # YAML skill manifests
+    - cryptography             # Authenticated encryption for user-owned NCBI API keys
+    - email-validator          # Validation for user-owned NCBI contact emails
     - requests
     - httpx                    # Async HTTP client
     

@@ -239,6 +239,14 @@ def _auto_generate_data_calls(user_message: str, skill_key: str,
     if _df_action_call is not None:
         return [_df_action_call]
 
+    if skill_key == "literature_search":
+        return [{
+            "source_type": "service",
+            "source_key": "literature",
+            "tool": "search_literature",
+            "params": {"query": user_message, "user_id": "<user_id>"},
+        }]
+
     # --- Cross-project BED overlap requests must use the workflow planner ---
     _region_overlap_refs = _extract_region_overlap_refs(user_message)
     if len(_region_overlap_refs) >= 2 and _wants_region_overlap_plot(user_message):

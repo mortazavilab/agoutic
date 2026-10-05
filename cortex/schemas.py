@@ -87,6 +87,16 @@ class BlockUpdate(BaseModel):
     payload: Optional[Any] = None
 
 
+class NCBICredentialUpdate(BaseModel):
+    email: str | None = Field(default=None, max_length=254)
+    api_key: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class NCBICredentialStatus(BaseModel):
+    email: str | None = None
+    has_api_key: bool = False
+
+
 class ProjectTaskOut(BaseModel):
     id: str
     project_id: str

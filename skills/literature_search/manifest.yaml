@@ -1,0 +1,28 @@
+key: literature_search
+display_name: PubMed Literature Search
+description: Search PubMed and PubMed Central for ranked, evidence-attributed scientific papers.
+category: data_retrieval
+source:
+  type: service
+  key: literature
+required_services:
+  - literature
+expected_inputs:
+  - topic
+  - query
+output_types:
+  - report
+sample_types:
+  - any
+estimated_runtime: medium
+plan_type: literature_search
+trigger_patterns:
+  - "\\b(?:search|find|look up)\\s+(?:pubmed|papers?|literature|studies)\\b"
+  - "\\bwhat does (?:the )?literature say\\b"
+  - "\\b(?:papers?|studies)\\s+(?:about|on)\\b"
+slash_commands:
+  - "/literature"
+classification_priority: 15
+mcp_tool_chain:
+  - source_key: literature
+    tool: search_literature

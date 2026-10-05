@@ -641,6 +641,8 @@ def build_calls_by_source(
                 corrected_tool, params, user_message,
                 conversation_history=conversation_history,
             )
+        if source_key == "literature":
+            params.setdefault("user_id", user_id)
 
         calls_by_source.setdefault(source_key, []).append({
             "tool": corrected_tool,
