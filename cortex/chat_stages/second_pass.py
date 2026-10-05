@@ -88,6 +88,7 @@ class SecondPassStage:
                 if _r.get("_chain") == "download":
                     _has_download_chain = True
         _is_browsing = bool(_all_tools_used) and _all_tools_used <= _browsing_tools
+        _is_literature = bool(_all_tools_used) and _all_tools_used == {"search_literature"}
         _is_sync = "sync_job_results" in _all_tools_used
         _is_download = _has_download_chain or ctx.active_skill == "download_files"
 
@@ -118,6 +119,12 @@ class SecondPassStage:
                     "\n\n<details><summary>📋 Raw Query Results (click to expand)</summary>\n\n"
                     + _display_data + "\n\n</details>"
                 )
+
+        elif _is_literature:
+            # The literature formatter includes the actual citations and evidence
+            # summaries. Avoid a second LLM rewrite that can omit links or invent
+            # an interactive table that this result set does not provide.
+            ctx.clean_markdown = _display_data
 
         elif _is_browsing and has_real_data and formatted_data.strip():
             if _prov_block:

@@ -53,17 +53,103 @@ def format_results(source_key: str, results: list[dict], registry_entry: dict | 
         # Header for this tool call
         markdown += f"**{tool_name.replace('_', ' ').title()}**"
         if params:
-            markdown += f" ({', '.join(f'{k}={v}' for k, v in params.items())})"
+            display_params = {
+                key: value for key, value in params.items()
+                if not (source_key == "literature" and key == "user_id")
+            }
+            if display_params:
+                markdown += f" ({', '.join(f'{k}={v}' for k, v in display_params.items())})"
         markdown += "\n\n"
 
         if "error" in result:
             markdown += f"❌ Error: {result['error']}\n\n"
         elif "data" in result:
             data = result["data"]
-            markdown += _format_data(data, table_columns, count_field, count_label)
+            if source_key == "literature" and tool_name == "search_literature":
+                markdown += _format_literature_results(data)
+            else:
+                markdown += _format_data(data, table_columns, count_field, count_label)
         markdown += "\n"
 
     return markdown
+
+
+def _format_literature_results(data: Any) -> str:
+    """Render literature records as cited summaries rather than abbreviated JSON."""
+    if not isinstance(data, dict):
+        return "PubMed returned an invalid literature result payload.\n"
+
+    query = str(data.get("query") or "").strip()
+    papers = data.get("papers")
+    if not isinstance(papers, list):
+        return "PubMed returned an invalid literature result payload.\n"
+    if not papers:
+        notice = str(data.get("notice") or "No PubMed records matched this query.")
+        return f"**No papers found**{f' for “{query}”' if query else ''}. {notice}\n"
+
+    lines = [
+        f"Found **{len(papers)} paper(s)**{f' for “{query}”' if query else ''}, "
+        "ranked by topic relevance (then recency and study-design cues).",
+        "",
+    ]
+    evidence_labels = {
+        "full_text": "PMC open full text",
+        "abstract": "PubMed abstract",
+        "metadata": "Metadata only; no abstract/full text available",
+    }
+    for index, paper in enumerate(papers, start=1):
+        if not isinstance(paper, dict):
+            continue
+        title = str(paper.get("title") or "Untitled article").strip()
+        pubmed_url = str(paper.get("pubmed_url") or "").strip()
+        if pubmed_url:
+            title_link = f"[{title}]({pubmed_url})"
+        else:
+            title_link = title
+        authors_value = paper.get("authors") or []
+        authors = (
+            ", ".join(str(author) for author in authors_value[:6])
+            if isinstance(authors_value, list)
+            else str(authors_value)
+        )
+        if isinstance(authors_value, list) and len(authors_value) > 6:
+            authors += ", et al."
+        journal = str(paper.get("journal") or "").strip()
+        date = str(paper.get("publication_date") or "").strip()
+        citation = " · ".join(value for value in (authors, journal, date) if value)
+        evidence = str(paper.get("evidence_source") or "metadata")
+        evidence_label = evidence_labels.get(evidence, "Evidence source not specified")
+        availability = str(paper.get("availability") or "")
+        if availability == "full_text":
+            evidence_label = "PMC open full text"
+        summary = paper.get("summary")
+        if isinstance(summary, dict):
+            summary_text = str(summary.get("text") or "").strip()
+            summary_evidence = str(summary.get("evidence_source") or evidence)
+            evidence_label = evidence_labels.get(summary_evidence, evidence_label)
+        else:
+            summary_text = str(summary or "").strip()
+        identifiers = []
+        pmid = str(paper.get("pmid") or "").strip()
+        if pmid:
+            identifiers.append(f"PMID: {pmid}")
+        doi = str(paper.get("doi") or "").strip()
+        if doi:
+            identifiers.append(f"[DOI](https://doi.org/{doi})")
+        pmc_url = str(paper.get("pmc_url") or "").strip()
+        if pmc_url:
+            identifiers.append(f"[PMC record]({pmc_url})")
+
+        lines.append(f"### {index}. {title_link}")
+        if citation:
+            lines.append(citation)
+        if identifiers:
+            lines.append(" · ".join(identifiers))
+        lines.append(f"**Summary evidence:** {evidence_label}")
+        lines.append(summary_text or "No evidence-based summary is available for this record.")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _format_data(

@@ -172,6 +172,8 @@ def _validate_llm_output(
         "list_job_files", "find_file", "read_file_content",
         "parse_csv_file", "parse_bed_file", "compare_bed_region_overlaps", "get_analysis_summary",
         "categorize_job_files",
+        # Literature MCP
+        "search_literature",
         # Local Cortex dataframe tools
         "filter_dataframe", "select_dataframe_columns", "rename_dataframe_columns",
         "sort_dataframe", "melt_dataframe", "aggregate_dataframe",

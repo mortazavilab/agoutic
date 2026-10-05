@@ -127,6 +127,15 @@ class TestUnknownTools:
         cleaned, violations = _validate_llm_output(response, "welcome")
         assert not any("Unknown tool" in v for v in violations)
 
+    def test_literature_search_tool_not_flagged(self):
+        response = (
+            "[[DATA_CALL: service=literature, tool=search_literature, "
+            "query=P53]]"
+        )
+        cleaned, violations = _validate_llm_output(response, "literature_search")
+        assert cleaned == response
+        assert not any("Unknown tool" in v for v in violations)
+
     def test_search_alias_not_flagged(self):
         """'search' is a valid alias that gets resolved downstream."""
         response = "[[DATA_CALL: consortium=encode, tool=search]]"

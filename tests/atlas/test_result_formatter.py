@@ -240,3 +240,55 @@ class TestFormatResults:
         result = format_results("test", results, registry_entry=entry)
         assert "🧪 Test Source" in result
         assert "item1" in result
+
+    def test_literature_results_render_citations_and_evidence_summaries(self):
+        results = [{
+            "tool": "search_literature",
+            "params": {"query": "P53", "user_id": "private-user-id"},
+            "data": {
+                "query": "P53",
+                "total": 1,
+                "papers": [{
+                    "rank": 1,
+                    "title": "TP53 gene function",
+                    "authors": ["A Author", "B Author"],
+                    "journal": "Genomics",
+                    "publication_date": "2025",
+                    "pmid": "12345",
+                    "pmcid": "PMC123",
+                    "doi": "10.1000/example",
+                    "pubmed_url": "https://pubmed.ncbi.nlm.nih.gov/12345/",
+                    "pmc_url": "https://pmc.ncbi.nlm.nih.gov/articles/PMC123/",
+                    "availability": "full_text",
+                    "evidence_source": "full_text",
+                    "summary": {
+                        "text": "This paper reports findings about TP53.",
+                        "evidence_source": "full_text",
+                    },
+                }],
+            },
+        }]
+        result = format_results("literature", results)
+
+        assert "[TP53 gene function](https://pubmed.ncbi.nlm.nih.gov/12345/)" in result
+        assert "[PMC record](https://pmc.ncbi.nlm.nih.gov/articles/PMC123/)" in result
+        assert "PMC open full text" in result
+        assert "This paper reports findings about TP53." in result
+        assert "private-user-id" not in result
+
+    def test_literature_empty_results_report_no_matches(self):
+        result = format_results(
+            "literature",
+            [{
+                "tool": "search_literature",
+                "params": {"query": "rare topic"},
+                "data": {
+                    "query": "rare topic",
+                    "total": 0,
+                    "papers": [],
+                    "notice": "No PubMed records matched this query.",
+                },
+            }],
+        )
+        assert "No papers found" in result
+        assert "rare topic" in result

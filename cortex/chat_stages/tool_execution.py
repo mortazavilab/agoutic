@@ -105,6 +105,7 @@ class ToolExecutionStage:
                     "params": {
                         k: v for k, v in _r.get("params", {}).items()
                         if k not in ("__routing_error__",)
+                        and not (_src == "literature" and k == "user_id")
                     },
                     "timestamp": _now_ts,
                     "success": "data" in _r,
