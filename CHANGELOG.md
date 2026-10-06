@@ -4,6 +4,10 @@
 
 - **Added PubMed and PubMed Central literature search:** Chat can search scientific topics, return up to ten relevance-ranked papers by default, and provide PubMed/PMC links with summaries labeled by their abstract or open-full-text evidence source. Users can optionally configure an NCBI contact email and API key in Literature Settings; saved keys are encrypted at rest, and searches without a key use NCBI public rate limits.
 - **Improved biomedical query recall:** Natural-language request boilerplate is removed from PubMed queries, species and tissue variants are expanded, comparison intent is retained, and a larger candidate set is ranked against the topic before the top results are returned.
+- **Added literature search controls and structured evidence:** Searches now support publication-year, organism, article-type, study-design, PMC open-full-text, and relevance/recency filters. Results retain labeled abstract sections, expose evidence-backed methods/findings/conclusions/limitations, identify detected organisms and study types, and explain topic matches.
+- **Broadened literature study filters beyond clinical categories:** Optional article/design filters now include journal and comparative studies, functional and comparative genomics, systems genetics, population genetics/genomics, GWAS, QTL, and a combined human-and-mouse organism restriction. Default searches remain unrestricted by publication type or study design.
+- **Added literature tables, comparison, and citation export:** Chat responses now include a compact evidence table. The Literature Search page provides selectable/searchable results, evidence comparisons, and CSV, RIS, and BibTeX exports.
+- **Added private saved searches and new-paper checks:** Users can save PubMed queries with their filters and known PMID snapshot, rerun them, and explicitly check for newly matching PMIDs. Checks are on demand; no background or email notifications are implied.
 
 ### Bug Fixes
 

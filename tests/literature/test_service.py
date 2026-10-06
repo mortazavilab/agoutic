@@ -135,3 +135,115 @@ def test_pubmed_identifiers_do_not_leak_from_cited_references():
     assert record["pmid"] == "33679620"
     assert record["doi"] == "10.3389/fendo.2021.626390"
     assert record["pmcid"] == "PMC8739816"
+
+
+def test_pubmed_query_includes_selected_search_filters():
+    query, profile = _build_pubmed_query(
+        "kidney development",
+        organism="mouse",
+        article_type="review",
+        study_design="single-cell study",
+        open_access_only=True,
+    )
+
+    assert "mice[MeSH Terms]" in query
+    assert "Review[Publication Type]" in query
+    assert '"single-cell"[Title/Abstract]' in query
+    assert "free full text[sb]" in query
+    assert profile.terms == ("kidney", "development")
+
+
+def test_study_filters_cover_nonclinical_and_mixed_species_research():
+    query, _ = _build_pubmed_query(
+        "kidney development",
+        organism="human and mouse",
+        article_type="journal article",
+        study_design="systems genetics",
+    )
+
+    assert "humans[MeSH Terms]" in query
+    assert "mice[MeSH Terms]" in query
+    assert " AND (" in query
+    assert "Journal Article[Publication Type]" in query
+    assert '"systems genetics"[Title/Abstract]' in query
+
+
+@pytest.mark.asyncio
+async def test_search_applies_years_and_returns_structured_evidence():
+    observed_params = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("esearch.fcgi"):
+            observed_params.update(dict(request.url.params))
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["41"]}})
+        if request.url.path.endswith("efetch.fcgi"):
+            return httpx.Response(200, text="""
+              <PubmedArticleSet><PubmedArticle><MedlineCitation>
+                <PMID>41</PMID><Article>
+                  <ArticleTitle>Mouse kidney development study</ArticleTitle>
+                  <Abstract><AbstractText Label="METHODS">Single-cell sequencing was performed.</AbstractText>
+                    <AbstractText Label="RESULTS">A shared kidney cell population was identified.</AbstractText>
+                    <AbstractText Label="CONCLUSIONS">The findings support a developmental role.</AbstractText>
+                  </Abstract>
+                  <Journal><Title>Development</Title><JournalIssue><PubDate><Year>2024</Year></PubDate></JournalIssue></Journal>
+                  <PublicationTypeList><PublicationType>Journal Article</PublicationType></PublicationTypeList>
+                </Article><MeshHeadingList><MeshHeading><DescriptorName>Mice</DescriptorName></MeshHeading></MeshHeadingList>
+              </MedlineCitation><PubmedData><ArticleIdList /></PubmedData></PubmedArticle></PubmedArticleSet>
+            """)
+        raise AssertionError(f"Unexpected request: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await LiteratureService(client=client).search_literature(
+            "mouse kidney",
+            year_from=2020,
+            year_to=2025,
+            organism="mouse",
+        )
+
+    paper = result["papers"][0]
+    assert observed_params["mindate"] == "2020"
+    assert observed_params["maxdate"] == "2025"
+    assert observed_params["datetype"] == "pdat"
+    assert paper["abstract_sections"][0]["label"] == "METHODS"
+    assert paper["evidence"]["methods"] == "Single-cell sequencing was performed."
+    assert paper["evidence"]["findings"] == "A shared kidney cell population was identified."
+    assert paper["organisms"] == ["Mouse"]
+    assert paper["study_type"] == ["Journal Article"]
+    assert paper["rank_rationale"] == "title matches mouse, kidney"
+
+
+@pytest.mark.asyncio
+async def test_open_access_filter_returns_only_records_with_pmc_full_text():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("esearch.fcgi"):
+            return httpx.Response(200, json={"esearchresult": {"idlist": ["1", "2"]}})
+        if request.url.path.endswith("efetch.fcgi") and request.url.params.get("db") == "pubmed":
+            return httpx.Response(200, text="""
+              <PubmedArticleSet>
+                <PubmedArticle><MedlineCitation><PMID>1</PMID><Article>
+                  <ArticleTitle>Kidney paper without accessible full text</ArticleTitle>
+                  <Abstract><AbstractText>Kidney evidence.</AbstractText></Abstract>
+                </Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pmc">PMC1</ArticleId></ArticleIdList></PubmedData></PubmedArticle>
+                <PubmedArticle><MedlineCitation><PMID>2</PMID><Article>
+                  <ArticleTitle>Kidney paper with accessible full text</ArticleTitle>
+                  <Abstract><AbstractText>Kidney full text evidence.</AbstractText></Abstract>
+                </Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pmc">PMC2</ArticleId></ArticleIdList></PubmedData></PubmedArticle>
+              </PubmedArticleSet>
+            """)
+        if request.url.path.endswith("oa.fcgi"):
+            if request.url.params["id"] == "PMC1":
+                return httpx.Response(200, text="<OA><error>Not Open Access</error></OA>")
+            return httpx.Response(200, text="<OA><record id='PMC2' /></OA>")
+        if request.url.path.endswith("efetch.fcgi") and request.url.params.get("db") == "pmc":
+            return httpx.Response(200, text="<article><body><sec><title>Methods</title><p>Method details.</p></sec><sec><title>Results</title><p>Result details.</p></sec></body></article>")
+        raise AssertionError(f"Unexpected request: {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await LiteratureService(client=client).search_literature(
+            "kidney", result_count=1, open_access_only=True
+        )
+
+    assert result["total"] == 1
+    assert result["papers"][0]["pmid"] == "2"
+    assert result["papers"][0]["availability"] == "full_text"
+    assert result["papers"][0]["evidence"]["methods"] == "Method details."

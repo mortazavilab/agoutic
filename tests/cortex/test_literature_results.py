@@ -63,6 +63,7 @@ async def test_literature_results_bypass_generic_llm_table_summary(monkeypatch):
     await SecondPassStage().run(ctx)
 
     assert "[TP53 gene function](https://pubmed.ncbi.nlm.nih.gov/12345/)" in ctx.clean_markdown
+    assert "| # | Paper | Year | Organism/model | Study type | Key finding | Evidence |" in ctx.clean_markdown
     assert "PMC open full text" in ctx.clean_markdown
     assert "This paper reports findings about TP53." in ctx.clean_markdown
     assert "interactive table" not in ctx.clean_markdown.lower()

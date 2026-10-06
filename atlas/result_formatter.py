@@ -91,12 +91,45 @@ def _format_literature_results(data: Any) -> str:
         f"Found **{len(papers)} paper(s)**{f' for “{query}”' if query else ''}, "
         "ranked by topic relevance (then recency and study-design cues).",
         "",
+        "| # | Paper | Year | Organism/model | Study type | Key finding | Evidence |",
+        "|---:|---|---:|---|---|---|---|",
     ]
     evidence_labels = {
         "full_text": "PMC open full text",
         "abstract": "PubMed abstract",
         "metadata": "Metadata only; no abstract/full text available",
     }
+    for index, paper in enumerate(papers, start=1):
+        if not isinstance(paper, dict):
+            continue
+        title = str(paper.get("title") or "Untitled article").strip()
+        table_title = _table_cell(title, 100)
+        year = str(paper.get("year") or str(paper.get("publication_date") or "")[:4])
+        organisms = paper.get("organisms") or []
+        organism_label = ", ".join(str(value) for value in organisms) if isinstance(organisms, list) else str(organisms)
+        study_types = paper.get("study_type") or []
+        study_label = ", ".join(str(value) for value in study_types[:2]) if isinstance(study_types, list) else str(study_types)
+        evidence_data = paper.get("evidence")
+        finding = ""
+        if isinstance(evidence_data, dict):
+            finding = str(evidence_data.get("findings") or evidence_data.get("conclusion") or "")
+        if not finding:
+            summary_value = paper.get("summary")
+            finding = str(summary_value.get("text") or "") if isinstance(summary_value, dict) else str(summary_value or "")
+        evidence_source = str(paper.get("evidence_source") or "metadata")
+        evidence_label = {
+            "full_text": "PMC full text",
+            "abstract": "PubMed abstract",
+            "metadata": "Metadata only",
+        }.get(evidence_source, evidence_source)
+        lines.append(
+            f"| {index} | {table_title} | {_table_cell(year, 8)} | "
+            f"{_table_cell(organism_label, 48)} | {_table_cell(study_label, 55)} | "
+            f"{_table_cell(finding, 180)} | {_table_cell(evidence_label, 20)} |"
+        )
+    lines.append("")
+    lines.append("### Paper details")
+    lines.append("")
     for index, paper in enumerate(papers, start=1):
         if not isinstance(paper, dict):
             continue
@@ -147,9 +180,38 @@ def _format_literature_results(data: Any) -> str:
             lines.append(" · ".join(identifiers))
         lines.append(f"**Summary evidence:** {evidence_label}")
         lines.append(summary_text or "No evidence-based summary is available for this record.")
+        rationale = str(paper.get("rank_rationale") or "").strip()
+        if rationale:
+            lines.append(f"**Why it matched:** {rationale}")
+        evidence_fields = paper.get("evidence")
+        if isinstance(evidence_fields, dict):
+            evidence_names = {
+                "methods": "Methods",
+                "findings": "Findings",
+                "conclusion": "Conclusion",
+                "limitations": "Limitations",
+            }
+            for key, label in evidence_names.items():
+                value = str(evidence_fields.get(key) or "").strip()
+                if value:
+                    lines.append(f"**{label} ({evidence_label}):** {value[:700]}")
+        sections = paper.get("abstract_sections")
+        if isinstance(sections, list) and sections:
+            labelled = [
+                f"{section.get('label')}: {section.get('text')}"
+                for section in sections
+                if isinstance(section, dict) and section.get("label") and section.get("text")
+            ]
+            if labelled:
+                lines.append("**Structured abstract:** " + " ".join(labelled))
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _table_cell(value: str, max_length: int) -> str:
+    """Keep Markdown table cells compact and prevent source text breaking rows."""
+    return " ".join(str(value or "").replace("|", "\\|").split())[:max_length]
 
 
 def _format_data(

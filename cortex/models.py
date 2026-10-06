@@ -345,6 +345,26 @@ class UserNCBICredential(Base):
     )
 
 
+class SavedLiteratureSearch(Base):
+    """User-owned PubMed query and PMID snapshot for on-demand update alerts."""
+    __tablename__ = "saved_literature_searches"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    filters_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    known_pmids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    alert_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_checked_at: Mapped[str | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[str] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False,
+    )
+
+
 class Memory(Base):
     """Persistent memory entries — user-global or project-scoped.
 

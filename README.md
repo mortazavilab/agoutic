@@ -19,9 +19,11 @@ The system is composed of:
 
 ## Literature Search
 
-Chat requests such as “find papers on a gene” or “what does the literature say about a pathway?” use the Literature MCP service to search PubMed and PubMed Central. Results default to ten papers, are ranked primarily by topic relevance, and label whether their concise summary is grounded in PMC open full text, a PubMed abstract, or metadata only.
+Chat requests such as “find papers on a gene” or “what does the literature say about a pathway?” use the Literature MCP service to search PubMed and PubMed Central. Results default to ten papers, are ranked primarily by topic relevance, and label whether their concise summary is grounded in PMC open full text, a PubMed abstract, or metadata only. Chat results include a compact comparison table and cited evidence details.
 
-Start the service with `python -m literature.launch_literature --port 8010`, or use `./agoutic_servers.sh`. Users can optionally save an NCBI contact email and API key from the **Literature Settings** UI page. API keys require `NCBI_CREDENTIAL_ENCRYPTION_KEY` to be set to a valid Fernet key; they are encrypted at rest, never returned by the API, and omitted from logs. Searches without a saved key use NCBI public rate limits.
+The **Literature Search** UI page adds publication-year, organism (including a human-and-mouse comparison filter), article-type, study-design, open-full-text, and ranking controls; a sortable, selectable table; evidence-based paper comparison; and CSV, RIS, and BibTeX citation exports. Default searches remain broad, with no publication-type restriction; optional filters cover functional/comparative genomics, systems genetics, population genetics/genomics, GWAS, QTL, and other designs. Users can save searches privately and explicitly check for new PMIDs. These checks are on demand, not background or email alerts.
+
+Start the service with `python -m literature.launch_literature --port 8010`, or use `./agoutic_servers.sh`. Users can optionally save an NCBI contact email and API key from the **Literature Settings** UI page. API keys require `NCBI_CREDENTIAL_ENCRYPTION_KEY` to be set to a valid Fernet key; they are encrypted at rest, never returned by the API, and omitted from logs. Searches without a saved key use NCBI public rate limits. Deployments using Alembic should apply the saved-search schema with `alembic upgrade head`.
 
 Current status: database infrastructure centralized in `common/database.py`
 with Alembic migrations. Gene annotation and enrichment tools moved from
